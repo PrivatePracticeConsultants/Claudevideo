@@ -24,6 +24,7 @@ from .parser import (
     run_big_file_fast,
     run_in_network_parse,
     run_skim,
+    skipped_groups_reason,
 )
 from .sniff import Preflight, open_stream, preflight
 from .store import FINISHED_NOW, Store, file_key, sql_path, unlink_with_retry
@@ -596,11 +597,17 @@ def _parse_worker(cfg: MrfxConfig, path_str: str, name: str, header_defaults: di
         writer.write_table(table)
         rows_written += len(rows)
 
+    made: list = []
+
     def make_parser(keep_ref_ids=None) -> InNetworkParser:
-        return InNetworkParser(
+        made.append(InNetworkParser(
             cfg, source_file=name, external_refs=external_refs,
             sink=sink, header_defaults=header_defaults, keep_ref_ids=keep_ref_ids,
-        )
+        ))
+        return made[-1]
+
+    def refs_only() -> bool:
+        return bool(made) and made[-1].reference_only
 
     try:
         result = None
@@ -618,7 +625,8 @@ def _parse_worker(cfg: MrfxConfig, path_str: str, name: str, header_defaults: di
                 state["pass"] = 0
             else:
                 if target_items == 0:
-                    return {"short_circuit": True, "chunks_total": chunks_total}
+                    return {"short_circuit": True, "chunks_total": chunks_total,
+                            "refs_only": refs_only()}
         if result is None:
             keep_ref_ids = None
             if big:
@@ -653,6 +661,7 @@ def _parse_worker(cfg: MrfxConfig, path_str: str, name: str, header_defaults: di
               if rows_written and Path(tmp_out).exists() else (0, 0, 0))
     return {
         "short_circuit": False,
+        "refs_only": refs_only() and not rows_written,
         "chunks_total": chunks_total,
         "qa_agg": qa_agg,
         "payer": result.payer,
@@ -852,6 +861,9 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
 
     store.update_progress(name, 100.0, chunks_done=payload["chunks_total"],
                           chunks_total=payload["chunks_total"])
+    if payload.get("refs_only"):
+        _cleanup_unlink(tmp_out)
+        return _ingest_reference_file(cfg, store, path, pf)
     if payload["short_circuit"]:
         msg = ("scanned: none of the target billing codes appear in this "
                "file — extraction pass skipped")
@@ -886,12 +898,16 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
     if rebuild_rollups:
         _rebuild_rollups_best_effort(store, name)
     _finish_ok(cfg, store, path)
+    qa = payload.get("qa") or {}
     if payload["ref_groups_skipped"]:
-        log.warning("%s: %d rate groups skipped — missing provider reference file",
-                    name, payload["ref_groups_skipped"])
+        log.warning("%s: %d rate groups skipped — %s", name, payload["ref_groups_skipped"],
+                    skipped_groups_reason(payload["ref_groups_skipped"],
+                                          qa.get("remote_ref_groups", 0),
+                                          qa.get("ambiguous_ref_ids", 0)))
     return {"status": "done", "rows": payload["rows"],
             "ref_groups_skipped": payload["ref_groups_skipped"],
-            "remote_ref_groups": (payload.get("qa") or {}).get("remote_ref_groups", 0)}
+            "remote_ref_groups": qa.get("remote_ref_groups", 0),
+            "ambiguous_ref_ids": qa.get("ambiguous_ref_ids", 0)}
 
 
 def _commit_done(store: Store, name: str, **fields) -> None:
@@ -1101,16 +1117,7 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
             return {"status": "quarantined", "error": msg}
 
         if pf.file_type == "provider_reference":
-            with open_stream(path) as stream:
-                payer, last_updated, refs = parse_provider_reference_file(cfg, stream)
-            store.save_provider_refs(payer, name, last_updated, refs)
-            store.upsert_file(
-                name, payer=payer, status="done", last_updated_on=last_updated,
-                rows_emitted=len(refs), finished_at=FINISHED_NOW,
-            )
-            _finish_ok(cfg, store, path)
-            requeued = requeue_skipped(cfg, store, payer)
-            return {"status": "done", "refs": len(refs), "requeued": requeued}
+            return _ingest_reference_file(cfg, store, path, pf)
 
         # in-network rate file. When a parse pool is installed (queue worker
         # with parallel_ingests > 1) the CPU-heavy parse runs in a child
@@ -1137,6 +1144,7 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
         big = est >= LARGE_FILE_UNCOMPRESSED_BYTES
         keep_ref_ids = None
         result = None
+        parser = None
         if big:
             # progress spans two passes: pass 1 fills 0-50%, pass 2 fills 50-100%
             progress = _ProgressTracker(store, name, pf.compressed_bytes,
@@ -1152,12 +1160,16 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
                 try:
                     srp = SingleReadProgress(pf.compressed_bytes, progress.set_percent)
                     with store.rates_part_writer(name) as writer:
+                        big_parser = InNetworkParser(
+                            cfg, source_file=name, external_refs=external_refs,
+                            sink=writer.write_batch, header_defaults=header_defaults)
                         result, target_items = run_big_file_fast(
-                            cfg,
-                            InNetworkParser(cfg, source_file=name, external_refs=external_refs,
-                                            sink=writer.write_batch, header_defaults=header_defaults),
+                            cfg, big_parser,
                             lambda: open_stream(path, progress_cb=_stop_aware(store, name, srp.feed)),
                             spool_path_for(writer.tmp), progress=srp)
+                    if big_parser.reference_only and not result.qa.rows:
+                        progress.finish()
+                        return _ingest_reference_file(cfg, store, path, pf)
                 except FastScanUnsupported as e:
                     log.info("%s: single read declined (%s) — two-pass", name, e)
                     result = None
@@ -1192,7 +1204,7 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
 
         if result is None:
             with store.rates_part_writer(name) as writer:
-                _, result = run_in_network_parse(
+                parser, result = run_in_network_parse(
                     cfg,
                     lambda: InNetworkParser(
                         cfg, source_file=name, external_refs=external_refs,
@@ -1204,6 +1216,8 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
                 )
         if progress is not None:
             progress.finish()
+        if parser is not None and parser.reference_only and not result.qa.rows:
+            return _ingest_reference_file(cfg, store, path, pf)
         _commit_done(
             store, name,
             payer=result.payer,
@@ -1224,13 +1238,15 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
         _finish_ok(cfg, store, path)
         if result.ref_groups_skipped:
             log.warning(
-                "%s: %d rate groups skipped — missing provider reference file", name, result.ref_groups_skipped
-            )
+                "%s: %d rate groups skipped — %s", name, result.ref_groups_skipped,
+                skipped_groups_reason(result.ref_groups_skipped, result.qa.remote_ref_groups,
+                                      result.qa.ambiguous_ref_ids))
         return {
             "status": "done",
             "rows": result.qa.rows,
             "ref_groups_skipped": result.ref_groups_skipped,
             "remote_ref_groups": result.qa.remote_ref_groups,
+            "ambiguous_ref_ids": result.qa.ambiguous_ref_ids,
         }
 
     except ParseStopped:
@@ -1253,7 +1269,7 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
         return {"status": "requeued", "error": str(e)}
     except Exception as e:  # noqa: BLE001 — fault isolation is the contract here
         log.exception("ingest failed for %s", name)
-        store.upsert_file(name, status="failed", error=f"{type(e).__name__}: {e}", finished_at=_now())
+        store.upsert_file(name, status="failed", error=plain_parse_error(e), finished_at=_now())
         store.requeue_part_payers(name)   # a failed RE-ingest leaves the old part live
         _finish_file(cfg, path, ok=False)  # never raises; the row is already 'failed'
         return {"status": "failed", "error": str(e)}
@@ -1265,6 +1281,57 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
         store.clear_parse_stop(name)
 
 
+def plain_parse_error(e: BaseException) -> str:
+    """A failed file's message in words, with the technical cause after it.
+    The one rule for malformed VALUES (audit 8 P3-1): the fast reader (the
+    default) skips in_network members for codes it does not need without
+    reading them, so a NaN or a 20-digit number THERE never fails a file; a
+    malformed value in data that must be read (a target code's rates, the
+    reference table, or anything when the classic reader is in use) fails
+    the file with this sentence — never a silently wrong number."""
+    text = f"{type(e).__name__}: {e}"
+    low = str(e).lower()
+    if "overflow" in low:
+        why = ("the payer's file holds a number too large to be a real value "
+               "(e.g. a 20-digit NPI or rate)")
+    elif "lexical error" in low or "invalid char" in low or "nan" in low.split():
+        why = ("the payer's file holds a value that is not valid JSON "
+               "(e.g. NaN or Infinity)")
+    else:
+        return text
+    return (f"{why} in data MRF Explorer had to read — the file is malformed; "
+            f"ask the payer for a corrected copy ({text[:200]})")
+
+
+def _ingest_reference_file(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight) -> dict:
+    """A standalone provider-reference file: stream its table into
+    provider_refs in batches (flat memory for a multi-million-id table —
+    the old path built the whole dict first), then re-ingest this payer's
+    rate files that were waiting on it. Also reached AFTER an in-network
+    parse that found a reference table and no in_network array (the 1 MB
+    sniff could not see past a big table — audit 8 P1-2)."""
+    name = path.name
+    store.drop_rates_part(name)          # a 0-row in-network attempt left nothing to serve
+    store.clear_provider_refs(name)
+    state = {"n": 0, "payer": pf.payer or "Unknown payer"}
+
+    def write(batch: dict) -> None:
+        store.save_provider_refs(state["payer"], name, pf.last_updated_on, batch, append=True)
+        state["n"] += len(batch)
+
+    with open_stream(path) as stream:
+        payer, last_updated, _ = parse_provider_reference_file(cfg, stream, on_batch=write)
+    store.finish_provider_refs(name, payer, last_updated)
+    store.upsert_file(
+        name, payer=payer, status="done", last_updated_on=last_updated,
+        file_type="provider_reference", rows_emitted=state["n"], finished_at=FINISHED_NOW,
+    )
+    _finish_ok(cfg, store, path)
+    requeued = requeue_skipped(cfg, store, payer)
+    log.info("%s: provider reference file — %d reference ids stored", name, state["n"])
+    return {"status": "done", "refs": state["n"], "requeued": requeued}
+
+
 def requeue_skipped(cfg: MrfxConfig, store: Store, payer: str) -> list[str]:
     """After a reference file lands, re-ingest this payer's in-network files
     that had skipped groups (if their source file is still on disk)."""
@@ -1274,7 +1341,9 @@ def requeue_skipped(cfg: MrfxConfig, store: Store, payer: str) -> list[str]:
             SELECT filename FROM files
             WHERE payer = ? AND file_type = 'in_network'
               AND status = 'done'
-              AND (ref_groups_skipped > 0 OR coalesce(TRY_CAST(json_extract_string(qa, '$.missing_ref_ids') AS BIGINT), 0) > 0)
+              AND (ref_groups_skipped > 0
+                   OR coalesce(TRY_CAST(json_extract_string(qa, '$.missing_ref_ids') AS BIGINT), 0) > 0
+                   OR coalesce(TRY_CAST(json_extract_string(qa, '$.ambiguous_ref_ids') AS BIGINT), 0) > 0)
             """,
             [payer],
         ).fetchall()

@@ -211,6 +211,8 @@ class QaCounters:
     missing_ref_ids: int = 0          # provider_reference ids a rate group cited that no reference
                                       # file defined (remote links excluded) — even when the
                                       # group's OTHER ids resolved (round 7 P1.7)
+    ambiguous_ref_ids: int = 0        # ids the payer's standalone reference files define
+                                      # differently at the same vintage: not attached (audit 8)
     prices: int = 0                   # readable prices seen (denominator for price-level shares)
     modifier_split_rows: int = 0      # rows whose modifier element held several ("52,53" -> 52|53)
     pos_in_modifier_rows: int = 0     # rows whose "modifiers" were place-of-service codes (moved)
@@ -219,6 +221,31 @@ class QaCounters:
 
     def to_dict(self) -> dict:
         return dict(self.__dict__)
+
+
+def normalize_negotiated_type(value) -> str:
+    """'Fee_Schedule' / 'fee-schedule' -> 'fee schedule'. ONE function for the
+    parser and the stored-row migration (store._normalize_part), so a part
+    written by an older build reads exactly as a re-ingest would write it."""
+    return re.sub(r"[\s_\-]+", " ", str(value or "").strip().lower())
+
+
+def skipped_groups_reason(skipped: int, remote: int = 0, ambiguous: int = 0) -> str:
+    """One sentence for "N rate groups skipped — why", shared by the log,
+    the CLI and the API so the three never disagree."""
+    if remote >= skipped:
+        return ("their provider lists are remote links MRF Explorer doesn't download")
+    parts = []
+    if remote:
+        parts.append(f"{remote} point at remote provider lists MRF Explorer doesn't download")
+    if ambiguous:
+        parts.append(f"{ambiguous} reference id(s) are defined differently by two of the payer's "
+                     "provider reference files of the same month, so neither was used")
+    rest = skipped - remote
+    if not ambiguous or rest > ambiguous:
+        parts.append("the rest need the payer's provider reference file" if parts
+                     else "missing provider reference file")
+    return "; ".join(parts)
 
 
 @dataclass
@@ -544,6 +571,15 @@ class InNetworkParser:
         self._buffer = RowBatch()
         self._flushed = False
         self._refs_complete = False
+        # True once the file's OWN top-level provider_references array has
+        # been read (even an empty one) — diagnostics/tests; resolution keys
+        # on the ids the table defines (see _resolve_refs, audit 8 P0-1)
+        self._own_table = False
+        # True once a top-level in_network array was seen. A file with a
+        # reference table and NO in_network is a standalone reference file
+        # that the 1 MB sniff could not tell apart (its table outgrew the
+        # window): ingest stores its references instead (audit 8 P1-2)
+        self.saw_in_network = False
         self._deferred: list[_DeferredGroup] = []
         self._ingested_at = dt.datetime.now(dt.timezone.utc).isoformat()
         self.result.ingest_month = self._ingested_at[:7]
@@ -620,6 +656,9 @@ class InNetworkParser:
                 building = "ref"
             elif event == "end_array" and prefix == "provider_references":
                 self._refs_complete = True
+                self._own_table = True
+            elif event == "start_array" and prefix == "in_network":
+                self.saw_in_network = True
             elif event == "string" and prefix in ("reporting_entity_name", "version", "last_updated_on"):
                 self._set_header(prefix, value)
 
@@ -645,6 +684,12 @@ class InNetworkParser:
             self._emit_group(dg.billing_code, dg.billing_code_type, dg.groups, dg.ref_ids, dg.prices)
         self._flush(final=True)
         return r
+
+    @property
+    def reference_only(self) -> bool:
+        """The whole file was read and it is a reference table with no
+        in_network array: a standalone provider-reference file."""
+        return self._own_table and not self.saw_in_network
 
     def _set_header(self, key: str, value: str) -> None:
         r = self.result
@@ -705,6 +750,9 @@ class InNetworkParser:
             if data is None:
                 if array == "provider_references":
                     self._refs_complete = True
+                    self._own_table = True
+                elif array == "in_network":
+                    self.saw_in_network = True
                 continue
             obj = decode_member(data)
             if array == "provider_references":
@@ -739,13 +787,22 @@ class InNetworkParser:
         self.result.embedded_refs[rid] = share_strings(parse_groups(groups or []), self._strings)
 
     def _resolve_refs(self, ref_ids: list[int]) -> dict[int, list[PGroup] | None]:
-        """Resolve a rate group's cited ref ids from the in-memory table
-        (for huge files this holds only the target-cited subset), falling back
-        to a standalone companion file."""
+        """Resolve a rate group's cited ref ids. An id the file's OWN
+        provider_references table defines resolves only from it (for huge
+        files the in-memory copy holds only the target-cited subset) — even
+        when that entry is a remote link or empty: it is then missing, never
+        filled from another file, whose ids mean other practices. Only an id
+        the file does not define at all falls back to the payer's standalone
+        companion; an id the companions define two different ways (None)
+        stays unresolved. Callers resolve only once the table is complete
+        (_handle_item defers until then)."""
         out: dict[int, list[PGroup] | None] = {}
+        own = self.result.embedded_refs
         for rid in ref_ids:
-            g = self.result.embedded_refs.get(rid)
-            out[rid] = g if g else self.external_refs.get(rid)
+            if rid in own:
+                out[rid] = own[rid] or None
+            else:
+                out[rid] = self.external_refs.get(rid)
         return out
 
     # -- items ----------------------------------------------------------------
@@ -795,12 +852,14 @@ class InNetworkParser:
             prices = [p for p in as_list(grp.get("negotiated_prices")) if isinstance(p, dict)]
             if not prices:
                 continue
-            # Defer only when the reference table hasn't finished streaming yet
-            # (in_network precedes provider_references); the common refs-first
-            # layout never defers.
+            # Defer while the reference table hasn't finished streaming
+            # (in_network precedes provider_references, or the file has no
+            # table and that is only known at its end); the common refs-first
+            # layout never defers. A standalone companion that happens to
+            # define the id is NOT a reason to emit early: whether this file
+            # has its own table is not known yet (audit 8 P0-1).
             if ref_ids and not self._refs_complete and any(
-                rid not in self.result.embedded_refs and rid not in self.external_refs
-                for rid in ref_ids
+                rid not in self.result.embedded_refs for rid in ref_ids
             ):
                 self._deferred.append(_DeferredGroup(code, code_type, groups, ref_ids, prices))
                 continue
@@ -828,6 +887,9 @@ class InNetworkParser:
                     missing_ref = True
                     if rid in self._remote_rids:
                         remote_ref = True
+                    elif (rid not in self.result.embedded_refs and rid in self.external_refs
+                          and self.external_refs[rid] is None):
+                        self.result.qa.ambiguous_ref_ids += 1
                     else:
                         # counted even when the group's other ids resolved:
                         # [7, 8] with only 7 known emitted 7's practices and
@@ -896,8 +958,7 @@ class InNetworkParser:
                 sorted({clean_code(s) for s in as_list(price.get("service_code")) if str(s).strip()}))
             # "fee_schedule" / "Fee-Schedule" are "fee schedule": an exact
             # match stored them as NOT dollars — out of every median (P2)
-            ntype = re.sub(r"[\s_\-]+", " ",
-                           str(price.get("negotiated_type", "") or "").strip().lower())
+            ntype = normalize_negotiated_type(price.get("negotiated_type"))
             if not ntype:
                 r.qa.missing_negotiated_type += 1
             rate = clean_rate(price.get("negotiated_rate"))
@@ -1231,6 +1292,8 @@ def run_big_file_fast(cfg: MrfxConfig, parser: "InNetworkParser", open_fn, spool
                             break         # the reference table is done: stop reading
                         parser._add_ref(decode_member(data))
         parser._refs_complete = True
+        parser._own_table = arrays.get("provider_references", 0) > 0
+        parser.saw_in_network = arrays.get("in_network", 0) > 0
         replayed = 0
         next_tick = 0
         with open(spool_path, "rb") as spool:
@@ -1270,8 +1333,16 @@ def run_skim(cfg: MrfxConfig, open_fn) -> tuple[set[int], int]:
         return skim_needed_ref_ids(cfg, stream)
 
 
-def parse_provider_reference_file(cfg: MrfxConfig, stream) -> tuple[str, str | None, dict[int, list[PGroup]]]:
-    """Standalone provider-reference file -> (payer, last_updated_on, {ref_id: [PGroup]})."""
+REF_BATCH = 200_000   # reference ids per write when streaming a reference file
+
+
+def parse_provider_reference_file(cfg: MrfxConfig, stream, on_batch=None,
+                                  ) -> tuple[str, str | None, dict[int, list[PGroup]]]:
+    """Standalone provider-reference file -> (payer, last_updated_on, {ref_id: [PGroup]}).
+    With `on_batch(refs)`, every REF_BATCH ids are handed over and dropped, so
+    memory stays flat for a multi-million-id table; the returned dict then
+    holds only the last partial batch (also handed over) — callers use the
+    count they accumulated."""
     payer = "Unknown payer"
     last_updated = None
     refs: dict[int, list[PGroup]] = {}
@@ -1285,6 +1356,10 @@ def parse_provider_reference_file(cfg: MrfxConfig, stream) -> tuple[str, str | N
                 rid = clean_ref_id(entry.get("provider_group_id"))
                 if rid is not None:
                     refs[rid] = share_strings(parse_groups(entry.get("provider_groups") or []), strings)
+                    if on_batch is not None and len(refs) >= REF_BATCH:
+                        on_batch(refs)
+                        refs = {}
+                        strings = {}
                 builder = None
             continue
         if event == "start_map" and prefix == "provider_references.item":
@@ -1294,4 +1369,6 @@ def parse_provider_reference_file(cfg: MrfxConfig, stream) -> tuple[str, str | N
             payer = cfg.normalize_payer(value)
         elif event == "string" and prefix == "last_updated_on":
             last_updated = value
+    if on_batch is not None and refs:
+        on_batch(refs)
     return payer, last_updated, refs

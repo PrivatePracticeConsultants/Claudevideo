@@ -493,8 +493,11 @@ FINISHED_NOW = object()
 # part written under an older rule be rewritten once at open (_migrate_row_rules)
 # — exactly as a re-ingest would write it, no re-download. 1: modifier field
 # (mrfx/modifiers.py). 2: + a header dated after the file was read is not its
-# month (parser.file_month_for).
-ROW_RULES_VERSION = 2
+# month (parser.file_month_for). 3: negotiated_type spelling ("fee_schedule"
+# is "fee schedule", a dollar rate — parser.normalize_negotiated_type), and
+# files that lost items as "bundled" under the old arrangement rule are
+# flagged for a re-ingest (those items are not in the part to rewrite).
+ROW_RULES_VERSION = 3
 
 
 # a paused row that is NOT a copy waiting on an earlier row still in flight
@@ -1425,7 +1428,7 @@ class Store:
                 rows_fixed += n
         if fixed:
             log.info("updated %s stored row(s) in %d file(s) to the current rules "
-                     "(modifier / place-of-service fields, future-dated months) in "
+                     "(modifier / place-of-service fields, future-dated months, 'fee_schedule' spelling) in "
                      "%.0f s — one time; see the Files tab's data-quality line",
                      f"{rows_fixed:,}", fixed, time.monotonic() - t0)
 
@@ -1433,10 +1436,12 @@ class Store:
         """One file's part -> the current row rules. Returns rows changed."""
         from .catalog import resolve_discipline
         from .modifiers import normalize
-        from .parser import file_month_for, published_month_of
+        from .config import DOLLAR_TYPES
+        from .parser import file_month_for, normalize_negotiated_type, published_month_of
         path = self.rates_dir / f"{file_key(name)}.parquet"
         changed_rows = 0
         months: dict = {}
+        type_map: list = []   # (old type, new type, new is_dollar)
         if path.exists():
             src = f"read_parquet('{sql_path(path)}')"
             with self.connect() as con:
@@ -1446,6 +1451,13 @@ class Store:
                 mrows = con.execute(
                     f"SELECT DISTINCT last_updated_on, source_file, file_month, "
                     f"substr(ingested_at, 1, 7) FROM {src}").fetchall()
+                types = con.execute(
+                    f"SELECT DISTINCT negotiated_type, is_dollar_rate FROM {src}").fetchall()
+            for old_t, old_d in types:
+                new_t = normalize_negotiated_type(old_t)
+                new_d = new_t in DOLLAR_TYPES
+                if old_t is not None and (new_t != old_t or bool(old_d) != new_d):
+                    type_map.append((old_t, new_t, new_d))
             mod_map = []   # (code, old mods, old pos, new mods, new pos, discipline, split, moved)
             for code, mods, pos in combos:
                 mods, pos = list(mods or []), list(pos or [])
@@ -1461,10 +1473,28 @@ class Store:
                 months = {"file_month": new_fm,
                           "published_month": published_month_of(sf or name, im or fm),
                           "future_header_date": str(hdr) if future else ""}
-            if mod_map or month_map:
+            if mod_map or month_map or type_map:
                 changed_rows = self._rewrite_part(name, src, mod_map, month_map,
-                                                  months.get("future_header_date", ""))
+                                                  months.get("future_header_date", ""),
+                                                  type_map)
         with self.write_lock, self.connect() as con:
+            # items excluded as "bundled" by a build before rule 3 may have
+            # been "fee for service" spelled out — they were never stored, so
+            # only a re-ingest can tell: say so on the Files tab
+            raw = con.execute("SELECT qa, coalesce(row_rules, 0) FROM files "
+                              "WHERE filename = ?", [name]).fetchone()
+            if raw and raw[1] < 3 and raw[0]:
+                try:
+                    qa = json.loads(raw[0])
+                except ValueError:
+                    qa = None
+                if isinstance(qa, dict) and (qa.get("bundled_items") or 0) > 0:
+                    qa["reingest_suggested"] = (
+                        f"{qa['bundled_items']:,} item(s) were left out as bundle/capitation "
+                        "by an older version, which also read a spelled-out "
+                        "\"fee for service\" that way — re-ingest this file to check")
+                    con.execute("UPDATE files SET qa = ? WHERE filename = ?",
+                                [json.dumps(qa), name])
             con.execute("UPDATE files SET row_rules = ? WHERE filename = ?",
                         [ROW_RULES_VERSION, name])
             if months:
@@ -1475,7 +1505,7 @@ class Store:
         return changed_rows
 
     def _rewrite_part(self, name: str, src: str, mod_map: list, month_map: list,
-                      future_header: str) -> int:
+                      future_header: str, type_map: list | None = None) -> int:
         tmp = self.rates_dir / f".{file_key(name)}.{os.getpid()}.parquet.tmp"
         # hash joins on the rules' inputs — measured 12 s for a 13.5M-row part
         # vs 50 s for a per-row map lookup
@@ -1484,8 +1514,12 @@ class Store:
                 "LEFT JOIN _monthfix m ON r.file_month = m.fm "
                 "AND r.last_updated_on IS NOT DISTINCT FROM m.h "
                 "AND r.source_file IS NOT DISTINCT FROM m.sf "
-                "AND substr(r.ingested_at, 1, 7) IS NOT DISTINCT FROM m.im")
+                "AND substr(r.ingested_at, 1, 7) IS NOT DISTINCT FROM m.im "
+                "LEFT JOIN _typefix t ON r.negotiated_type = t.o")
         with self.connect() as con:
+            con.execute("CREATE OR REPLACE TEMP TABLE _typefix (o VARCHAR, n VARCHAR, d BOOLEAN)")
+            if type_map:
+                con.executemany("INSERT INTO _typefix VALUES (?, ?, ?)", type_map)
             con.execute("CREATE OR REPLACE TEMP TABLE _modfix (c VARCHAR, m VARCHAR[], "
                         "s VARCHAR[], nm VARCHAR[], ns VARCHAR[], nd VARCHAR, "
                         "split BOOLEAN, moved BOOLEAN)")
@@ -1496,7 +1530,8 @@ class Store:
             if month_map:
                 con.executemany("INSERT INTO _monthfix VALUES (?, ?, ?, ?, ?)", month_map)
             changed, split_rows, moved_rows = con.execute(
-                f"SELECT count(*) FILTER (WHERE f.c IS NOT NULL OR m.nfm IS NOT NULL), "
+                f"SELECT count(*) FILTER (WHERE f.c IS NOT NULL OR m.nfm IS NOT NULL "
+                f"OR t.o IS NOT NULL), "
                 f"count(*) FILTER (WHERE f.split), "
                 f"count(*) FILTER (WHERE f.moved) {join}").fetchone()
             reader = con.execute(
@@ -1504,7 +1539,9 @@ class Store:
                         coalesce(f.nm, r.billing_code_modifier) AS billing_code_modifier,
                         coalesce(f.ns, r.service_code) AS service_code,
                         coalesce(f.nd, r.discipline) AS discipline,
-                        coalesce(m.nfm, r.file_month) AS file_month) {join}"""
+                        coalesce(m.nfm, r.file_month) AS file_month,
+                        coalesce(t.n, r.negotiated_type) AS negotiated_type,
+                        coalesce(t.d, r.is_dollar_rate) AS is_dollar_rate) {join}"""
             ).to_arrow_reader(200_000)
             rows = 0
             tmp.unlink(missing_ok=True)
@@ -1516,6 +1553,7 @@ class Store:
                         rows += batch.num_rows
                 con.execute("DROP TABLE IF EXISTS _modfix")
                 con.execute("DROP TABLE IF EXISTS _monthfix")
+                con.execute("DROP TABLE IF EXISTS _typefix")
             except BaseException:
                 tmp.unlink(missing_ok=True)
                 raise
@@ -2076,6 +2114,19 @@ class Store:
         the complete part is PARKED under a name the sweep leaves alone and
         swapped in at the next open or rollup; an old part that can't be
         deleted is retried the same way (_retry_pending_part_ops)."""
+        # Whatever an EARLIER run of this file left pending is superseded by
+        # this outcome: an older parked replacement must not be adopted over
+        # it, and an older "delete this part" must not delete the part this
+        # run just wrote (audit 8 P0-2: v1 parked, v2 swapped in, the next
+        # rollup adopted v1 over v2; v1 doomed at 0 rows, v2 swapped in, the
+        # next rollup deleted v2's part under a 'done' files row)
+        with self.connect() as con:
+            self._discard_park(con, source_file)
+            doomed = json.loads(self._meta_get(con, "doomed_parts") or "[]")
+            if path.name in doomed:
+                doomed.remove(path.name)
+                con.execute("INSERT OR REPLACE INTO meta VALUES ('doomed_parts', ?)",
+                            [json.dumps(doomed)])
         if rows_written:
             try:
                 replace_with_retry(tmp, path)
@@ -4233,12 +4284,16 @@ class Store:
     def save_provider_refs(
         self, payer: str, source_file: str, last_updated_on: str | None,
         refs: dict[int, list[tuple[str | None, str | None, tuple[str, ...]]]],
+        append: bool = False,
     ) -> None:
+        """Replace this file's references (append=True adds a batch — the
+        streaming writer clears the file's old rows once, up front)."""
         with self.write_lock, self.connect() as con:
-            con.execute(
-                "DELETE FROM provider_refs WHERE payer = ? AND source_file = ?",
-                [payer, source_file],
-            )
+            if not append:
+                con.execute(
+                    "DELETE FROM provider_refs WHERE payer = ? AND source_file = ?",
+                    [payer, source_file],
+                )
             if not refs:
                 return
             # one Arrow table, one INSERT: executemany ran ~420 rows/s
@@ -4268,7 +4323,19 @@ class Store:
             finally:
                 con.unregister("__refs_in")
 
-    def load_provider_refs(self, payer: str) -> dict[int, list[tuple[str | None, str | None, tuple[str, ...]]]]:
+    def finish_provider_refs(self, source_file: str, payer: str,
+                             last_updated_on: str | None) -> None:
+        """After a streamed reference file: its batches were written under
+        the header known at the time; stamp the final payer/date on all."""
+        with self.write_lock, self.connect() as con:
+            con.execute("UPDATE provider_refs SET payer = ?, last_updated_on = ? "
+                        "WHERE source_file = ?", [payer, last_updated_on, source_file])
+
+    def clear_provider_refs(self, source_file: str) -> None:
+        with self.write_lock, self.connect() as con:
+            con.execute("DELETE FROM provider_refs WHERE source_file = ?", [source_file])
+
+    def load_provider_refs(self, payer: str) -> dict[int, list[tuple[str | None, str | None, tuple[str, ...]]] | None]:
         """Per ref_id, only the NEWEST vintage's groups are served: two
         companion files for one payer (a re-download under a new name, or two
         publication months) must not UNION their provider lists — rates would
@@ -4278,28 +4345,41 @@ class Store:
         with self.connect() as con:
             rows = con.execute(
                 """
-                SELECT ref_id, tin_value, tin_type, npis FROM (
+                SELECT ref_id, source_file, tin_value, tin_type, npis FROM (
                     SELECT *, rank() OVER (
                         PARTITION BY ref_id
-                        ORDER BY coalesce(last_updated_on, '') DESC, source_file DESC
+                        ORDER BY coalesce(last_updated_on, '') DESC
                     ) AS vintage_rank
                     FROM provider_refs WHERE payer = ?
                 ) WHERE vintage_rank = 1
+                ORDER BY ref_id, source_file DESC
                 """,
                 [payer],
             ).fetchall()
-        out: dict[int, list] = {}
-        seen: set = set()
+        # Ids are file-local: two companion files of the SAME vintage that
+        # define one id differently (a PPO and an HMO table, say) cannot both
+        # be right for an in-network file that names neither — the old
+        # "highest source_file wins" tiebreak attached one network's rates to
+        # the other's practices. Such an id maps to None (unresolved, counted
+        # as ambiguous_ref_ids); byte-for-byte twins (a re-download under a
+        # new name) still agree and resolve (audit 8 P0-1).
+        per_file: dict[int, dict[str, set]] = {}
+        for rid, src, tin_value, tin_type, npis in rows:
+            per_file.setdefault(rid, {}).setdefault(src, set()).add(
+                (tin_value, tin_type, tuple(npis or ())))
+        out: dict[int, list | None] = {}
         pool: dict = {}   # one object per distinct NPI/TIN (see parser.share_strings);
         get = pool.setdefault   # also shrinks the pickle shipped to each worker
-        for rid, tin_value, tin_type, npis in rows:
-            key = (rid, tin_value, tin_type, tuple(npis or ()))
-            if key in seen:
+        for rid, by_src in per_file.items():
+            versions = {frozenset(v) for v in by_src.values()}
+            if len(versions) > 1:
+                out[rid] = None
                 continue
-            seen.add(key)
-            out.setdefault(rid, []).append(
+            out[rid] = [
                 (get(tin_value, tin_value) if tin_value is not None else None, tin_type,
-                 tuple(get(n, n) for n in (npis or ()))))
+                 tuple(get(n, n) for n in npis))
+                for tin_value, tin_type, npis in sorted(
+                    next(iter(versions)), key=lambda g: (g[0] or "", g[1] or "", g[2]))]
         return out
 
     def has_provider_refs(self, payer: str, last_updated_on: str | None = None) -> bool:
