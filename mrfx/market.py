@@ -66,7 +66,15 @@ def _code_scope(code, market):
 
 def geographic_rates(store: Store, code: str, market: dict, limit: int = 60) -> dict:
     """Median negotiated rate for one code, ranked across states — territory
-    intelligence for prospecting and for advising a multi-site client."""
+    intelligence for prospecting and for advising a multi-site client.
+
+    The state IS this view's dimension: a State (or city) picked elsewhere on
+    the tab only highlights its row. Applied as a filter it kept that state's
+    practices and then listed every OTHER state of theirs — "TX $28.84 · 123
+    practices" under State AL (TX is $26.17 across 1,874) — and the
+    "National median" was Alabama's (review 10 item 2.3)."""
+    selected = (market or {}).get("state")
+    market = {k: v for k, v in (market or {}).items() if k not in ("state", "city")}
     code, m, where, params, rel = _code_scope(code, market)
     sql = f"""
     WITH base AS (
@@ -101,6 +109,7 @@ def geographic_rates(store: Store, code: str, market: dict, limit: int = 60) -> 
         "as_of": month_label(m["month"]), "min_practices": _MIN_CELL,
         "national_median": nat[0], "national_practices": nat[1],
         "states": rows,
+        "selected_state": (str(selected).strip().upper() or None) if selected else None,
         "basis_note": BASIS_NOTE, "geo_note": _GEO_NOTE,
     }
 

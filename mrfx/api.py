@@ -12,6 +12,7 @@ import contextlib
 import datetime as dt
 import io
 import json
+import math
 import logging
 import os
 import re
@@ -22,6 +23,7 @@ import time
 import zipfile
 from pathlib import Path
 
+import duckdb
 from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Query, Request, UploadFile
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTextResponse,
                                StreamingResponse)
@@ -171,7 +173,8 @@ _TIN_JOINS = """
 _TIN_REL = f"SELECT {_TIN_PROJECTION} FROM rates_by_tin t {_TIN_JOINS}"
 
 
-def _tin_rows_by_unit(where_key: str, where_unit: str, latest: bool) -> str:
+def _tin_rows_by_unit(where_key: str, where_unit: str, latest: bool,
+                      units: str | None = None) -> str:
     """The TIN relation's rows whose contract passes `where_key` and whose
     PRACTICE passes `where_unit` — the same rows as
     `SELECT * FROM (_TIN_REL[_LATEST]) WHERE key AND unit`, found the other way
@@ -183,6 +186,12 @@ def _tin_rows_by_unit(where_key: str, where_unit: str, latest: bool) -> str:
     expressions — the passing practices are found, and only their rows are
     read and joined. Binds the key params, then the unit params (bucket order)."""
     spine = "rates_by_tin WHERE " + ("is_latest AND " if latest else "") + where_key
+    # `units`: every practice of the spine, kept once per spine generation
+    # (FilterSet.units_rel -> Store.spine_materialised). A superset of k's
+    # practices, so the SEMI JOIN below keeps exactly the same rows — without
+    # re-reading the 79M-row spine to list them in every statement (review 10
+    # item 1.3: 2.2-3.2 thread-s per statement, four statements per search)
+    units = units or "(SELECT DISTINCT tin_value, tin_is_really_npi FROM k)"
     unit_cols = ", ".join(f"{sql} AS {name}" for name, sql in _UNIT_COLS.items())
     return f"""
         WITH k AS NOT MATERIALIZED (SELECT * FROM {spine}),
@@ -190,12 +199,37 @@ def _tin_rows_by_unit(where_key: str, where_unit: str, latest: bool) -> str:
             SELECT tin_value, tin_is_really_npi FROM (
                 SELECT t.tin_value, t.tin_value AS unit_id, t.tin_is_really_npi,
                        {unit_cols}
-                FROM (SELECT DISTINCT tin_value, tin_is_really_npi FROM k) t {_TIN_JOINS})
+                FROM {units} t {_TIN_JOINS})
             WHERE {where_unit})
         SELECT {_TIN_PROJECTION}
         FROM k t SEMI JOIN u ON u.tin_value = t.tin_value
                             AND u.tin_is_really_npi = t.tin_is_really_npi
         {_TIN_JOINS}"""
+
+
+def _spine_rows_by_unit(where_key: str, where_unit: str, latest: bool,
+                        units: str | None = None) -> str:
+    """The SPINE rows (no names joined) of the practices passing
+    `where_unit` — _tin_rows_by_unit without its outer three joins. The
+    practices are found on the per-generation practice list; the spine is read
+    once. Used where no joined column is read afterwards: the page's Top-N
+    (names attached to the 100 kept rows after), the count, the strip."""
+    spine = "rates_by_tin WHERE " + ("is_latest AND " if latest else "") + where_key
+    units = units or "(SELECT DISTINCT tin_value, tin_is_really_npi FROM k)"
+    unit_cols = ", ".join(f"{sql} AS {name}" for name, sql in _UNIT_COLS.items())
+    return f"""
+        WITH k AS NOT MATERIALIZED (SELECT * FROM {spine}),
+        u AS (
+            SELECT tin_value, tin_is_really_npi FROM (
+                SELECT t.tin_value, t.tin_value AS unit_id, t.tin_is_really_npi,
+                       {unit_cols}
+                FROM {units} t {_TIN_JOINS})
+            WHERE {where_unit})
+        SELECT t.*, t.tin_value AS unit_id
+        FROM k t SEMI JOIN u ON u.tin_value = t.tin_value
+                            AND u.tin_is_really_npi = t.tin_is_really_npi"""
+
+
 # each contract's newest month only: the spine's stored flag (store.SPINE_QUERY)
 # — a filter DuckDB applies in the scan, under the joins
 _TIN_REL_LATEST = _TIN_REL + " WHERE t.is_latest"
@@ -321,6 +355,96 @@ def _entity_rel(tin_rows: str, latest: bool = False) -> str:
 """
 
 
+# Review 10 item 1.7 — the entity page in two passes. One pass built EVERY
+# entity group of the spine with five list() columns (TINs, rates, files,
+# states, cities) and sorted the lists, then kept 100: on a 32M-rate store
+# 1,350,747 rows -> 1,348,421 groups, 3.9-4.9 s a page, 7-13 s for page 2.
+# The light pass carries only what the filters, the sort, the count and the
+# page cut read — the TIN list included, because it is a tiebreak of every
+# order (_ORDER_TIEBREAK) — so the page holds exactly the rows the full
+# relation would put there; the full row is then built for those groups only.
+_ENTITY_HEAVY = ("rate_variants", "source_count", "source_files", "states", "cities")
+_ENTITY_GROUP = ("entity_key", "payer", "billing_code", "discipline", "modifier_set",
+                 "billing_class", "service_code_set", "is_dollar_rate")
+
+
+def _entity_light(tin_rows: str, latest: bool) -> str:
+    """_entity_rel's columns minus the heavy list ones (_ENTITY_HEAVY), the
+    same expressions, one row per the same group. `tin_rows` must carry
+    entity_key (_entity_keyed)."""
+    month_col = "max(file_month) AS file_month" if latest else "file_month"
+    month_key = "" if latest else " file_month,"
+    return f"""
+    SELECT min(display_name) AS display_name, entity_key AS unit_id,
+           CASE WHEN len(list_distinct(list(tin_value))) > 0
+                THEN array_to_string(list_sort(list_distinct(list(tin_value))), '; ') END AS tin_value,
+           bool_or(is_mapped_entity) AS is_mapped_entity,
+           bool_or(tin_is_really_npi) AS tin_is_really_npi,
+           count(DISTINCT tin_value) AS tin_count,
+           sum(npi_count) AS npi_count,
+           min(rate_min) AS rate_min, max(rate_max) AS rate_max,
+           payer, billing_code, min(billing_code_type) AS billing_code_type,
+           discipline, min(is_timed) AS is_timed,
+           modifier_set, billing_class, service_code_set, {month_col},
+           round(coalesce(
+               median(negotiated_rate) FILTER (NOT is_dollar_rate OR negotiated_rate > 0.01),
+               median(negotiated_rate)), 4) AS negotiated_rate,
+           min(negotiated_type) AS negotiated_type, is_dollar_rate,
+           min(schema_version) AS schema_version,
+           max(last_updated_on) AS last_updated_on,
+           bool_or(is_therapy) AS is_therapy
+    FROM ({tin_rows})
+    GROUP BY entity_key, payer, billing_code, discipline, modifier_set,
+             billing_class, service_code_set,{month_key} is_dollar_rate"""
+
+
+def _entity_inner(fs: "FilterSet") -> str:
+    """The member TIN rows rel_sql's entity branch aggregates (key + unit
+    filters; latest = each member's own newest month)."""
+    by_unit = fs.selective_dims and not fs.codes
+    if by_unit and fs.has("unit"):
+        return _tin_rows_by_unit(fs.where_of("key"), fs.where_of("unit"), fs.latest_only,
+                                 fs.units_rel())
+    tin_rel = _TIN_REL_LATEST if fs.latest_only else _TIN_REL
+    return f"SELECT * FROM ({tin_rel}) WHERE {fs.where_of('key', 'unit')}"
+
+
+def entity_two_pass_ok(fs: "FilterSet", sort: str = "negotiated_rate") -> bool:
+    """No filter, sort or outlier band reads a heavy list column."""
+    if fs.hide_outliers or sort in _ENTITY_HEAVY:
+        return False
+    where = fs.where_of("ident", "row")
+    return not any(c in where for c in _ENTITY_HEAVY)
+
+
+def entity_light_rel(fs: "FilterSet") -> str:
+    """The filtered entity groups, light columns: count, strip and page cut.
+    Binds fs.params (key, unit, ident, row)."""
+    w = fs.where_of("ident", "row")
+    if fs.ident_kind:
+        w = w.replace(_IDENT_TOKEN, f"({_ident_clause('entity', fs.ident_kind)})")
+    return (f"SELECT * FROM ({_entity_light(_entity_keyed(_entity_inner(fs)), fs.latest_only)}) "
+            f"WHERE {w}")
+
+
+def entity_page_sql(fs: "FilterSet", order: str) -> str:
+    """The entity page in two passes; binds fs.params, then LIMIT, OFFSET.
+    Same rows, same order as `rel_sql('entity', fs) {order} LIMIT ? OFFSET ?`."""
+    w = fs.where_of("ident", "row")
+    if fs.ident_kind:
+        w = w.replace(_IDENT_TOKEN, f"({_ident_clause('entity', fs.ident_kind)})")
+    keys = list(_ENTITY_GROUP) + ([] if fs.latest_only else ["file_month"])
+    on = " AND ".join(f"s.{k} IS NOT DISTINCT FROM pg.{k}" for k in keys)
+    pg_cols = ", ".join(("unit_id AS entity_key" if k == "entity_key" else k) for k in keys)
+    full = _entity_rel("SELECT * EXCLUDE (entity_key) FROM (SELECT s.* FROM kk s "
+                       f"SEMI JOIN pg ON {on})", fs.latest_only)
+    return (f"WITH kk AS MATERIALIZED ({_entity_keyed(_entity_inner(fs))}), "
+            f"pg AS MATERIALIZED (SELECT {pg_cols} FROM ("
+            f"SELECT * FROM ({_entity_light('SELECT * FROM kk', fs.latest_only)}) WHERE {w} "
+            f"{order} LIMIT ? OFFSET ?)) "
+            f"SELECT * FROM ({full}) {order}")
+
+
 _ENTITY_REL = _entity_rel(_TIN_REL)
 
 _NPI_REL = f"""
@@ -346,6 +470,12 @@ GRAIN_REL = {"tin": _TIN_REL, "entity": _ENTITY_REL, "npi": _NPI_REL}
 # Store size (done in-network rates) above which the NPI / entity views need a
 # narrowing filter — see create_app's _require_narrowing for the measurements.
 NARROW_REQUIRED_ROWS = 40_000_000
+# The NPI view aggregates rates_dedup (every published line): on a 32M-rate
+# store, under the 40M guard, it ran 5-16 s and then answered "needs more
+# memory" — and knocked a concurrent narrow request out with it (review 10
+# item 1.8). Its guard follows the memory budget: rates per GB it measured to
+# finish in, ~2.5M (6 GB -> 15M).
+NPI_ROWS_PER_GB = 2_500_000
 
 # Placeholder for an exact NPI/TIN search clause; rel_sql substitutes the
 # grain's single-column predicate (see FilterSet's q handling).
@@ -362,9 +492,23 @@ def _ident_clause(grain: str, kind: str) -> str:
     return "list_contains(string_split(tin_value, '; '), ?)"
 
 
+def _lit(v) -> str:
+    """A user's text as a LIKE literal: `%` and `_` typed into a search or
+    modifier box matched anything (`q=_` and `modifier=%` returned every row
+    — review 10 item 1.9). Paired with ESCAPE '\\' in every such clause."""
+    return str(v).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 class FilterSet:
     """Query params -> parameterized WHERE over the uniform grain relation.
     Shared by table, summary, and CSV export so the numbers always agree."""
+
+    # the app's per-generation practice list (create_app sets it per request;
+    # the CLI and scripts leave it None and read the practices off the spine)
+    units_provider = None
+
+    def units_rel(self) -> str | None:
+        return self.units_provider() if self.units_provider else None
 
     def __init__(self, qp: dict):
         split = lambda s: [x.strip() for x in s.split(",") if x.strip()] if s else []  # noqa: E731
@@ -409,6 +553,7 @@ class FilterSet:
             self._buckets[kind][1].extend(ps)
         self.described: dict = {}
         self.ident_kind: str | None = None   # set by an exact NPI/TIN search
+        self.ident_value: str | None = None
         # True once a filter references a column that only exists AFTER the
         # name/geo joins (states, cities, display_name). The table endpoint can
         # take its fast late-join path only when this stays False.
@@ -452,19 +597,22 @@ class FilterSet:
             put("row", "(modifier_set LIKE '%CQ%' OR modifier_set LIKE '%CO%')")
             add("modifier", "assistant-provided only (CQ/CO)")
         elif modifier:
-            put("row", "('|' || modifier_set || '|') LIKE ('%|' || ? || '|%')", modifier)
+            put("row", "('|' || modifier_set || '|') LIKE ('%|' || ? || '|%') ESCAPE '\\'",
+                _lit(modifier))
             add("modifier", f"contains {modifier}")
         for m in split(qp.get("mod_has")):
-            put("row", "('|' || modifier_set || '|') LIKE ('%|' || ? || '|%')", m)
+            put("row", "('|' || modifier_set || '|') LIKE ('%|' || ? || '|%') ESCAPE '\\'", _lit(m))
             add(f"mod_has:{m}", True)
         for m in split(qp.get("mod_not")):
-            put("row", "('|' || modifier_set || '|') NOT LIKE ('%|' || ? || '|%')", m)
+            put("row", "('|' || modifier_set || '|') NOT LIKE ('%|' || ? || '|%') ESCAPE '\\'",
+                _lit(m))
             add(f"mod_not:{m}", True)
         if qp.get("billing_class"):
             put("row", "billing_class = ?", qp["billing_class"])
             add("billing_class", qp["billing_class"])
         if qp.get("pos"):
-            put("row", "('|' || service_code_set || '|') LIKE ('%|' || ? || '|%')", qp["pos"])
+            put("row", "('|' || service_code_set || '|') LIKE ('%|' || ? || '|%') ESCAPE '\\'",
+                _lit(qp["pos"]))
             add("place_of_service", qp["pos"])
         if qp.get("state"):
             put("unit", "list_contains(states, ?)", qp["state"].upper())
@@ -504,17 +652,20 @@ class FilterSet:
                 # row). Which column depends on the grain, so rel_sql swaps
                 # this token for the grain's clause (exactly one parameter).
                 put("ident", _IDENT_TOKEN, ident)
+                self.ident_value = ident
                 self.ident_kind = "npi" if len(ident) == 10 else "tin"
             else:   # a partial number while typing
-                put("ident", "(unit_id LIKE ? OR tin_value LIKE ?)", f"%{ident}%", f"%{ident}%")
+                put("ident", "(unit_id LIKE ? ESCAPE '\\' OR tin_value LIKE ? ESCAPE '\\')",
+                    f"%{_lit(ident)}%", f"%{_lit(ident)}%")
                 self.selective_dims = True
             add("search", q)
             # unit_id is a projected name (tin_value / npi / entity), not a
             # base-table column: keep the TIN grain off the late-join path
             self.uses_dim_cols = True
         elif q:
-            put("ident", "(unit_id LIKE ? OR upper(display_name) LIKE upper(?) OR tin_value LIKE ?)",
-                f"%{q}%", f"%{q}%", f"%{q}%")
+            put("ident", "(unit_id LIKE ? ESCAPE '\\' OR upper(display_name) LIKE upper(?) "
+                         "ESCAPE '\\' OR tin_value LIKE ? ESCAPE '\\')",
+                f"%{_lit(q)}%", f"%{_lit(q)}%", f"%{_lit(q)}%")
             add("search", q)
             self.uses_dim_cols = True  # searches display_name (a joined column)
             self.selective_dims = True
@@ -715,7 +866,8 @@ def rel_sql(grain: str, fs: FilterSet) -> str:
         # and, under latest, each member is reduced to ITS newest month before
         # the member rates are combined
         if by_unit and fs.has("unit"):
-            inner = _tin_rows_by_unit(fs.where_of("key"), fs.where_of("unit"), fs.latest_only)
+            inner = _tin_rows_by_unit(fs.where_of("key"), fs.where_of("unit"), fs.latest_only,
+                                      fs.units_rel())
         else:
             tin_rel = _TIN_REL_LATEST if fs.latest_only else _TIN_REL
             inner = f"SELECT * FROM ({tin_rel}) WHERE {fs.where_of('key', 'unit')}"
@@ -723,7 +875,7 @@ def rel_sql(grain: str, fs: FilterSet) -> str:
                 f"WHERE {sub(fs.where_of('ident', 'row'))}")
     elif by_unit and (fs.has("unit") or not fs.ident_kind):
         rows = _tin_rows_by_unit(fs.where_of("key"), sub(fs.where_of("unit", "ident")),
-                                 fs.latest_only)
+                                 fs.latest_only, fs.units_rel())
         base = f"WITH base AS ({rows}) SELECT * FROM base WHERE {fs.where_of('row')}"
     elif fs.latest_only and grain == "tin":
         base = f"WITH base AS ({_TIN_REL_LATEST}) SELECT * FROM base WHERE {sub(fs.where)}"
@@ -749,6 +901,22 @@ def spine_where(fs: FilterSet) -> str:
     return f"is_latest AND {fs.where}" if fs.latest_only else fs.where
 
 
+def spine_by_unit_ok(grain: str, fs: FilterSet) -> bool:
+    """Exactly rel_sql's practices-first branch, at the TIN grain."""
+    return (grain == "tin" and fs.selective_dims and not fs.codes
+            and (fs.has("unit") or not fs.ident_kind))
+
+
+def spine_rel_by_unit(fs: FilterSet) -> str:
+    """rel_sql's rows for a practices-first TIN view, spine columns only
+    (+ unit_id). Binds fs.params (key, unit, ident, row)."""
+    w_unit = fs.where_of("unit", "ident")
+    if fs.ident_kind:
+        w_unit = w_unit.replace(_IDENT_TOKEN, f"({_ident_clause('tin', fs.ident_kind)})")
+    return (f"SELECT * FROM ({_spine_rows_by_unit(fs.where_of('key'), w_unit, fs.latest_only, fs.units_rel())}) "
+            f"WHERE {fs.where_of('row')}")
+
+
 def stat_rel(grain: str, fs: FilterSet) -> str:
     """The relation the AGGREGATE views read — the summary strip and its
     by-code rows, the Code page's histogram and payer leaderboard, the trend:
@@ -757,6 +925,11 @@ def stat_rel(grain: str, fs: FilterSet) -> str:
     so they never add or drop a row, and none of these aggregates reads a
     joined column — joining names onto every spine row only to count and
     median the rates was most of their cost. Same rows, same columns used."""
+    if spine_by_unit_ok(grain, fs):
+        base = spine_rel_by_unit(fs)
+        return _outlier_band(base) if fs.hide_outliers else base
+    if grain == "entity" and entity_two_pass_ok(fs):
+        return entity_light_rel(fs)
     if grain != "tin" or fs.uses_dim_cols:
         return rel_sql(grain, fs)
     base = f"SELECT *, tin_value AS unit_id FROM rates_by_tin WHERE {spine_where(fs)}"
@@ -864,7 +1037,7 @@ def _as_int(v, default: int) -> int:
         return default
     try:
         return int(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):   # int(inf), int("x"), int([])
         raise BenchmarkError(f"expected a whole number, got {v!r}")
 
 
@@ -876,13 +1049,24 @@ def _bounded_int(v, default, lo, hi):
     return max(lo, min(_as_int(v, default), hi))
 
 
+def _radius_arg(v) -> float | None:
+    """A radius off the wire: finite, 0.1–500 miles; absent -> None. "NaN"
+    parsed as a float and failed deep in the query (a 500 — review 10)."""
+    if v in (None, "", 0):
+        return None
+    return max(0.1, min(_as_float(v, 25.0), 500.0))
+
+
 def _as_float(v, default):
     if v is None or v == "":
         return default
     try:
-        return float(v)
+        x = float(v)
     except (TypeError, ValueError):
         raise BenchmarkError(f"expected a number, got {v!r}")
+    if math.isnan(x) or math.isinf(x):        # "NaN" / 1e999 parse as floats
+        raise BenchmarkError(f"expected a finite number, got {v!r}")
+    return x
 
 
 def _comparables_arg(v) -> list[str] | None:
@@ -955,8 +1139,10 @@ def outreach_methodology(store: Store, grain: str, fs: FilterSet, market: dict) 
     month = market.get("month") or "latest"
     payers = market.get("payers") or []
     with store.connect() as con:
+        # the month each file is FILED under (file_month — what every number
+        # is grouped by), not the header's date (review 10 item 3.13)
         files = con.execute(
-            "SELECT filename, payer, substr(coalesce(last_updated_on, ''), 1, 7) "
+            "SELECT filename, payer, file_month "
             "FROM files WHERE status = 'done' AND file_type = 'in_network' "
             "ORDER BY filename").fetchall()
     unit = "organization (entity)" if grain == "entity" else "billing tax ID (TIN)"
@@ -967,7 +1153,7 @@ def outreach_methodology(store: Store, grain: str, fs: FilterSet, market: dict) 
         "per-code columns. One row per organization — not one per payer, code or month.",
         "Which organizations are listed: those with at least one published rate "
         "matching the dashboard's filters at export time "
-        f"({json.dumps(fs.described, default=str)}). These filters choose the LIST; "
+        f"({filters_in_words(fs.described)}). These filters choose the LIST; "
         "they do not change the numbers below.",
         "The numbers (every C<code>_* column) are on one basis: "
         + ("the newest published month of each payer's contract (latest)"
@@ -988,11 +1174,41 @@ def outreach_methodology(store: Store, grain: str, fs: FilterSet, market: dict) 
     ])
 
 
+_FILTER_WORDS = {
+    "payers": "payers", "codes": "codes", "disciplines": "disciplines",
+    "modifier": "modifiers", "billing_class": "billing class",
+    "place_of_service": "place of service", "state": "state", "city": "city",
+    "as_of_month": "month", "search": "search text",
+    "dollar_rates_only": "dollar rates only", "hide_tin_is_really_npi":
+    "hide NPI-in-the-tax-ID-slot rows", "therapy_practices_only": "therapy practices only",
+    "hide_outliers": "hide outliers",
+}
+
+
+def filters_in_words(described: dict) -> str:
+    """The Explorer's filters as a sentence for an export sidecar — it printed
+    raw JSON (review 10 item 3.13)."""
+    out = []
+    for k, v in described.items():
+        label = _FILTER_WORDS.get(k)
+        if label is None and k.startswith(("mod_has:", "mod_not:")):
+            label = ("modifier must include " if k.startswith("mod_has:")
+                     else "modifier must not include ") + k.split(":", 1)[1]
+            out.append(label)
+            continue
+        if isinstance(v, bool):
+            v = "yes" if v else "no"
+        elif isinstance(v, (list, tuple)):
+            v = ", ".join(str(x) for x in v)
+        out.append(f"{label or k.replace('_', ' ')}: {v}")
+    return "; ".join(out) or "none"
+
+
 def methodology_text(cfg: MrfxConfig, store: Store, grain: str, fs: FilterSet,
                      sort: str, direction: str, view: str) -> str:
     with store.connect() as con:
         files = con.execute(
-            "SELECT filename, payer, substr(coalesce(last_updated_on, ''), 1, 7), "
+            "SELECT filename, payer, file_month, "
             "last_updated_on FROM files WHERE status = 'done' "
             "AND file_type = 'in_network' ORDER BY filename"
         ).fetchall()
@@ -1006,7 +1222,7 @@ def methodology_text(cfg: MrfxConfig, store: Store, grain: str, fs: FilterSet,
         "name's month (or the month read) and its Files-tab line says so. Payers' "
         "clocks differ — one payer's October files can carry an August date — so a "
         "pinned month compares payers' own statements of vintage.",
-        f"Filters: {json.dumps(fs.described, default=str)}",
+        f"Filters: {filters_in_words(fs.described)}.",
         f"Sort: {sort} {direction}",
         "Dedup rule: distinct negotiated facts per grain tuple. A TIN rate is the "
         "median of its distinct published values EXCLUDING $0/$0.01 dollar "
@@ -1245,6 +1461,66 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 "off until the file is fixed (code,locality,non_facility_rate)",
                 cfg.mpfs_path)
 
+    # every practice of the spine, once per spine generation (review 10 1.3)
+    def _units_rel():
+        try:
+            if store.rollups_stale():
+                return None
+            return store.spine_materialised(
+                "spine_units_v1", "SELECT DISTINCT tin_value, tin_is_really_npi FROM rates_by_tin")
+        except Exception:  # noqa: BLE001 — an optimisation never fails a search
+            log.debug("practice list unavailable", exc_info=True)
+            return None
+
+    def _fs_app(qp: dict) -> FilterSet:
+        fs = _fs(qp)
+        fs.units_provider = _units_rel
+        return fs
+
+    # one running query per (page, view) — review 10 item 1.1. The page sends
+    # X-Mrfx-View: <page id>:<view>; a newer request under the same key
+    # interrupts the older one's DuckDB statement (its answer would be thrown
+    # away by the page anyway) so superseded scans never pile up.
+    _views: dict[str, dict] = {}
+    _views_lock = threading.Lock()
+
+    class _Superseded(Exception):
+        pass
+
+    @contextlib.contextmanager
+    def _view_query(request: Request, con):
+        key = request.headers.get("x-mrfx-view")
+        if not key:
+            yield lambda: None
+            return
+        me = {"con": con, "dead": False}
+        with _views_lock:
+            old = _views.get(key)
+            _views[key] = me
+            if len(_views) > 256:
+                for k in [k for k, v in _views.items() if v is not me][:128]:
+                    _views.pop(k, None)
+        if old is not None:
+            old["dead"] = True
+            try:
+                old["con"].interrupt()
+            except Exception:  # noqa: BLE001
+                pass
+
+        def alive():
+            if me["dead"]:
+                raise _Superseded()
+        try:
+            yield alive
+        except duckdb.InterruptException:
+            raise HTTPException(409, "superseded by a newer search")
+        except _Superseded:
+            raise HTTPException(409, "superseded by a newer search")
+        finally:
+            with _views_lock:
+                if _views.get(key) is me:
+                    _views.pop(key, None)
+
     # -- rates table ---------------------------------------------------------
 
     # Row-count cache for the table's pagination total. The count is the same
@@ -1295,6 +1571,11 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         # cold cache don't each launch a whole-store scan (a stampede that
         # thrashes the HDD at 300M rows). One computes; the rest serve the last
         # value (or wait) rather than piling on.
+        # a practices-first view is counted off the spine (the joins
+        # match at most one row each: same count)
+        count_rel = (spine_rel_by_unit(fs) if spine_by_unit_ok(grain, fs) and not fs.hide_outliers
+                     else entity_light_rel(fs) if grain == "entity" and entity_two_pass_ok(fs)
+                     else rel_sql(grain, fs))
         if not _count_lock.acquire(blocking=False):
             if hit is not None:
                 return hit[1]
@@ -1303,7 +1584,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 if hit is not None and time.monotonic() - hit[0] < _COUNT_TTL:
                     return hit[1]
                 total = con.execute(
-                    f"SELECT count(*) FROM ({rel_sql(grain, fs)})", fs.params).fetchone()[0]
+                    f"SELECT count(*) FROM ({count_rel})", fs.params).fetchone()[0]
                 _count_cache[key] = (time.monotonic(), total)
                 return total
         try:
@@ -1311,7 +1592,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             if hit is not None and time.monotonic() - hit[0] < _COUNT_TTL:
                 return hit[1]
             total = con.execute(
-                f"SELECT count(*) FROM ({rel_sql(grain, fs)})", fs.params).fetchone()[0]
+                f"SELECT count(*) FROM ({count_rel})", fs.params).fetchone()[0]
             if len(_count_cache) > 512:
                 _count_cache.clear()  # crude but fine: keys churn as filters change
             _count_cache[key] = (time.monotonic(), total)
@@ -1343,13 +1624,24 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                                 ).fetchone()[0]
         except Exception:  # noqa: BLE001 — the guard is advisory
             return
-        if n < NARROW_REQUIRED_ROWS:
+        limit = NARROW_REQUIRED_ROWS
+        code_alone_ok = False
+        if grain == "npi":
+            gb = float(getattr(store, "_memory_limit_gb", 4) or 4)
+            limit = min(limit, int(gb * NPI_ROWS_PER_GB))
+            # between the memory guard and the big-store guard a code alone
+            # is narrow enough (1.3-1.9 s on a 32M-rate store); at 306M rows
+            # it was not (payer AND code, as before)
+            code_alone_ok = n < NARROW_REQUIRED_ROWS and bool(d.get("codes"))
+        if n < limit or code_alone_ok:
             return
         if grain == "npi":
             msg = (f"Your store is large ({n:,} rates), so the NPI view needs a "
                    "narrower question: type a full 10-digit NPI (or 9-digit TIN) "
-                   "in the search box, or pick BOTH a payer and a code. To find a "
-                   "practice by NAME, use the TIN view's search, then click it.")
+                   "in the search box, or pick "
+                   + ("a code" if n < NARROW_REQUIRED_ROWS else "BOTH a payer and a code")
+                   + ". To find a practice by NAME, use the TIN view's search, then "
+                   "click it.")
         else:
             msg = (f"Your store is large ({n:,} rates), so the Entity view needs "
                    "BOTH a payer and a code picked. To look up one practice, use "
@@ -1367,7 +1659,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     ):
         qp = _qp(request)
         grain = grain_of(qp, cfg, store)
-        fs = _fs(qp)
+        fs = _fs_app(qp)
         _require_narrowing(grain, fs)
         order = order_sql(sort, dir)
         limit_params = [*fs.params, page_size, (page - 1) * page_size]
@@ -1381,13 +1673,39 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             sql = (f"WITH page AS (SELECT *, tin_value AS unit_id FROM rates_by_tin "
                    f"WHERE {spine_where(fs)} {order} LIMIT ? OFFSET ?) "
                    f"SELECT * FROM (SELECT {_TIN_PROJECTION} FROM page t {_TIN_JOINS}) {order}")
+        elif (spine_by_unit_ok(grain, fs) and not fs.hide_outliers
+              and sort not in ("display_name", "tin_count")):
+            # a name / state / city search keeps its practices' SPINE
+            # rows, sorts and cuts the page there, and only then attaches names
+            # to the 100 rows kept — the same late join as the unfiltered table
+            sql = (f"WITH page AS (SELECT * FROM ({spine_rel_by_unit(fs)}) {order} LIMIT ? OFFSET ?) "
+                   f"SELECT * FROM (SELECT {_TIN_PROJECTION} FROM page t {_TIN_JOINS}) {order}")
+        elif grain == "entity" and entity_two_pass_ok(fs, sort):
+            sql = entity_page_sql(fs, order)
         else:
             sql = f"{rel_sql(grain, fs)} {order} LIMIT ? OFFSET ?"
-        with store.connect() as con:
+        with store.connect() as con, _view_query(request, con) as alive:
+            alive()
             rows = _dicts(con.execute(sql, limit_params))
+            alive()
             total = _filtered_count(con, grain, fs)
-        return {"rows": _mask_row_tins(rows), "total": total, "page": page,
-                "page_size": page_size, "grain": grain}
+            hint = None
+            if not total and fs.ident_kind == "npi" and grain != "npi":
+                # an NPI at the TIN / entity grain matches only an NPI in the
+                # TIN slot: say which practices it bills under instead of a
+                # bare "No rates match" (review 10 item 1.7)
+                ident = fs.ident_value
+                tins = [mask_tin(r[0]) for r in con.execute(
+                    "SELECT DISTINCT tin_value FROM rates WHERE npi = ? AND tin_value IS NOT NULL "
+                    "ORDER BY 1 LIMIT 5", [str(ident)]).fetchall()]
+                if tins:
+                    hint = (f"NPI {ident} bills under tax ID {', '.join(tins)} — search that, "
+                            "or switch to the NPI view.")
+        out = {"rows": _mask_row_tins(rows), "total": total, "page": page,
+               "page_size": page_size, "grain": grain}
+        if hint:
+            out["hint"] = hint
+        return out
 
     # The summary strip is a heavy whole-store aggregation (5 quantiles + 2
     # count-distinct). Cache it on (grain, filter, data_generation) with a
@@ -1402,11 +1720,56 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     _overview_cache: dict[tuple, dict] = {}
     _overview_lock = threading.Lock()
 
+    # A per-generation strip (off the bare spine, a pure function of it) is
+    # kept on disk too, named by the spine's content (Store.spine_key, like
+    # the materialised medians): the unfiltered strip was recomputed after
+    # every restart — 8.5-11.5 s on a 99M-rate store (review 10 item 1.4).
+    _strip_disk_lock = threading.Lock()
+
+    def _strip_disk_file():
+        return store.dir / f"summary_strips.v2.{store.spine_key()}.json"
+
+    def _strip_disk_id(grain, fs) -> str:
+        import hashlib
+        return hashlib.sha1(json.dumps(
+            [grain, fs.where, [str(x) for x in fs.params], fs.hide_outliers, fs.latest_only],
+            default=str).encode()).hexdigest()
+
+    def _strip_disk_get(grain, fs):
+        try:
+            if store.rollups_stale():
+                return None
+            f = _strip_disk_file()
+            if f.exists():
+                return json.loads(f.read_text()).get(_strip_disk_id(grain, fs))
+        except Exception:  # noqa: BLE001 — a cache never fails the strip
+            log.debug("stored summary strip unreadable", exc_info=True)
+        return None
+
+    def _strip_disk_put(grain, fs, scanned) -> None:
+        try:
+            if store.rollups_stale():
+                return
+            with _strip_disk_lock:
+                f = _strip_disk_file()
+                data = json.loads(f.read_text()) if f.exists() else {}
+                if len(data) > 64:
+                    data = {}
+                data[_strip_disk_id(grain, fs)] = scanned
+                tmp = f.with_name(f.name + f".{os.getpid()}.tmp")
+                tmp.write_text(json.dumps(data, default=float))
+                os.replace(tmp, f)
+                for old in store.dir.glob("summary_strips.*.json"):
+                    if old != f:
+                        old.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            log.debug("summary strip not stored", exc_info=True)
+
     @app.get("/api/summary")
     def summary(request: Request):
         qp = _qp(request)
         grain = grain_of(qp, cfg, store)
-        fs = _fs(qp)
+        fs = _fs_app(qp)
         _require_narrowing(grain, fs)
         # hide_outliers is applied inside rel_sql but is NOT part of fs.where/
         # params — omitting it from the key served the unfiltered stats to the
@@ -1429,9 +1792,23 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                                       or time.monotonic() - h[0] < SUMMARY_TTL_SECONDS)
 
         hit = _summary_cache.get(key)
+        if hit is None and per_generation:
+            stored = _strip_disk_get(grain, fs)
+            if stored is not None:
+                hit = _summary_cache[key] = (time.monotonic(), stored)
         if fresh(hit):
             return _with_anchor(hit[1], fs)
-        if not _summary_lock.acquire(blocking=False):
+        # this page view's older summary (if any) is interrupted
+        # first, so the lock it holds is released in a moment — wait for it
+        # instead of answering "busy" to the search the user actually meant
+        if not request.headers.get("x-mrfx-view"):
+            return _summary_locked(fs, grain, key, hit, fresh, None, lambda: None, False)
+        with store.connect() as vcon, _view_query(request, vcon) as alive:
+            return _summary_locked(fs, grain, key, hit, fresh, vcon, alive, True)
+
+    def _summary_locked(fs, grain, key, hit, fresh, vcon, alive, wait):
+        if not (_summary_lock.acquire(timeout=8.0) if wait
+                else _summary_lock.acquire(blocking=False)):
             # a heavy scan is already running — serve the last value for THIS
             # key, else say "busy" honestly (serving another filter's numbers
             # under this view's label would be a wrong number; and iterating
@@ -1446,7 +1823,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             # the strip and the by-code rows read only spine columns: off the
             # bare spine when no name/geo filter needs the joins (stat_rel)
             srel = stat_rel(grain, fs)
-            with store.connect() as con:
+            alive()
+            with (contextlib.nullcontext(vcon) if vcon is not None else store.connect()) as con:
                 row = con.execute(
                     f"""
                     -- ONE list-form quantile, not median + two quantile_cont:
@@ -1454,7 +1832,11 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                     -- value in memory (not spillable). At 306M rows the three
                     -- copies peaked the server at 11.2 GB RSS; one state gives
                     -- the identical exact values (median == quantile_cont .5).
-                    SELECT n, entities, codes, mn, q[1], q[2], q[3], mx FROM (
+                    -- rounded HERE, half-up to the cent (DuckDB round = half_up):
+                    -- the browser rounded raw doubles its own way, $70.70 on
+                    -- the Explorer vs $70.69 on Markets (review 10 item 3.2)
+                    SELECT n, entities, codes, round(mn, 2), round(q[1], 2), round(q[2], 2),
+                           round(q[3], 2), round(mx, 2) FROM (
                     SELECT count(*) AS n,
                            count(DISTINCT unit_id) AS entities,
                            count(DISTINCT billing_code) AS codes,
@@ -1476,14 +1858,15 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 # variants outvote the rest, and blended professional with
                 # institutional and NPI-slot rows the Benchmark excludes.
                 basis, basis_text = practice_basis(fs)
+                alive()
                 by_code = _dicts(con.execute(
                     f"""
                     WITH r AS (SELECT billing_code, unit_id, median(negotiated_rate) AS negotiated_rate
                                FROM ({srel})
                                WHERE {basis}
                                GROUP BY billing_code, unit_id)
-                    SELECT billing_code, q[2] AS median, q[1] AS p25, q[3] AS p75,
-                           entities FROM (
+                    SELECT billing_code, round(q[2], 2) AS median, round(q[1], 2) AS p25,
+                           round(q[3], 2) AS p75, entities FROM (
                     SELECT r.billing_code,
                            quantile_cont(r.negotiated_rate, [0.25, 0.5, 0.75]) AS q,
                            count(DISTINCT r.unit_id)             AS entities
@@ -1498,6 +1881,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             if len(_summary_cache) > 256:
                 _summary_cache.clear()
             _summary_cache[key] = (time.monotonic(), scanned)
+            if grain == "tin" and not fs.uses_dim_cols:
+                _strip_disk_put(grain, fs, scanned)
             return _with_anchor(scanned, fs)
         finally:
             _summary_lock.release()
@@ -1575,11 +1960,25 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                     """,
                     tin_list,
                 )) if tin_list else []
+            # the CURRENT rate on the house basis — each contract's newest
+            # month, professional, base modifiers — the Benchmark's rule. It
+            # was a median over every month, modifier, class and POS: "$50.00"
+            # above a table whose current row is $55.00 (two superseded
+            # months outvoted it — review 10 item 2.5)
+            if grain == "npi":
+                chart_rel = (f"SELECT * FROM ({GRAIN_REL['npi']}) WHERE unit_id = ? "
+                             "QUALIFY file_month = max(file_month) OVER (PARTITION BY payer, "
+                             "tin_value, billing_code, modifier_set, billing_class, service_code_set)")
+            elif grain == "entity":
+                chart_rel = f"SELECT * FROM ({_entity_rel(_TIN_REL_LATEST, True)}) WHERE unit_id = ?"
+            else:
+                chart_rel = f"SELECT * FROM ({_TIN_REL_LATEST}) WHERE unit_id = ?"
             chart = _dicts(con.execute(
                 f"""
-                SELECT billing_code, payer, median(negotiated_rate) AS median_rate
-                FROM ({GRAIN_REL[grain]})
-                WHERE unit_id = ? AND is_dollar_rate AND negotiated_rate > 0.01
+                SELECT billing_code, payer, round(median(negotiated_rate), 2) AS median_rate
+                FROM ({chart_rel})
+                WHERE is_dollar_rate AND negotiated_rate > 0.01
+                  AND billing_class = 'professional' AND {base_sql("modifier_set")}
                 GROUP BY billing_code, payer ORDER BY billing_code, payer
                 """,
                 [unit_id],
@@ -1663,7 +2062,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         # so a reader can recompute every median shown.
         qp.setdefault("latest", "1")
         grain = grain_of(qp, cfg, store)
-        fs = _fs(qp)
+        fs = _fs_app(qp)
         # the same guard as the table: an entity/NPI-grain code view on a big
         # store is a whole-store live aggregation (temp-disk 500 at 306M rows)
         _require_narrowing(grain, fs)
@@ -1683,7 +2082,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                        -- blend them into one median that matches no published
                        -- number (dollars and percentages are incommensurable)
                        is_dollar_rate,
-                       median(negotiated_rate) AS median_rate,
+                       round(median(negotiated_rate), 2) AS median_rate,
                        min(negotiated_rate) AS min_rate, max(negotiated_rate) AS max_rate,
                        -- MAX, not SUM: the grouped rows are the same
                        -- practice's place-of-service variants, which share
@@ -1764,21 +2163,36 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         qp = _qp(request)
         qp.pop("month", None)  # trend spans months by definition
         grain = grain_of(qp, cfg, store)
-        fs = _fs(qp)
+        fs = _fs_app(qp)
         _require_narrowing(grain, fs)
+        # the payer table's basis (practice_basis: professional, base
+        # modifiers, no NPI-in-the-TIN-slot rows) and ONE rate per practice
+        # per month — a raw line median gave Moda $25.38 here and $26.17 in the
+        # payer table for the same single file (review 10 item 3.1); a payer
+        # appears only with two or more months (a "trend" of one point is not)
+        basis, basis_text = practice_basis(fs)
         with store.connect() as con:
             rows = _dicts(con.execute(
                 f"""
+                WITH r AS (
+                    SELECT billing_code, payer, file_month, unit_id,
+                           median(negotiated_rate) AS rate
+                    FROM ({stat_rel(grain, fs)}) WHERE {basis}
+                    GROUP BY billing_code, payer, file_month, unit_id
+                )
                 SELECT billing_code, payer, file_month,
-                       median(negotiated_rate) AS median_rate,
-                       count(DISTINCT unit_id) AS entities
-                FROM ({stat_rel(grain, fs)}) WHERE is_dollar_rate AND negotiated_rate > 0.01
+                       round(median(rate), 2) AS median_rate,
+                       count(*) AS entities
+                FROM r
+                WHERE (billing_code, payer) IN (
+                    SELECT billing_code, payer FROM r GROUP BY billing_code, payer
+                    HAVING count(DISTINCT file_month) >= 2)
                 GROUP BY billing_code, payer, file_month
                 ORDER BY billing_code, payer, file_month
                 """,
                 fs.params,
             ))
-        return {"rows": rows}
+        return {"rows": rows, "basis": basis_text}
 
     @app.get("/api/months")
     def months():
@@ -2487,7 +2901,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             return new_to_network(
                 store, body.get("market") or {},
                 zip_code=str(body.get("zip") or "").strip() or None,
-                radius_miles=float(body["radius_miles"]) if body.get("radius_miles") else None,
+                radius_miles=_radius_arg(body.get("radius_miles")),
                 therapy_only=bool(body.get("therapy_only", True)))
         except BenchmarkError as e:
             raise HTTPException(422, str(e))
@@ -2516,7 +2930,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         try:
             return suggested_volumes(store, str(body.get("subject", "")),
                                      body.get("year") or None,
-                                     multiplier=_as_float(body.get("multiplier"), 1.0))
+                                     multiplier=_as_float(body.get("multiplier"), 1.0),
+                                     market=body.get("market") or None)
         except BenchmarkError as e:
             raise HTTPException(422, str(e))
 
@@ -2579,7 +2994,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         try:
             return new_enumerations(
                 store, zip_code=str(body.get("zip") or "").strip() or None,
-                radius_miles=float(body["radius_miles"]) if body.get("radius_miles") else None,
+                radius_miles=_radius_arg(body.get("radius_miles")),
                 days=_as_int(body.get("days"), 180),
                 therapy_only=bool(body.get("therapy_only", True)),
                 state=_state_arg(body.get("state")))
@@ -2601,7 +3016,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         try:
             return closures(
                 store, zip_code=str(body.get("zip") or "").strip() or None,
-                radius_miles=float(body["radius_miles"]) if body.get("radius_miles") else None,
+                radius_miles=_radius_arg(body.get("radius_miles")),
                 days=_as_int(body.get("days"), 365),
                 therapy_only=bool(body.get("therapy_only", True)),
                 state=_state_arg(body.get("state")))
@@ -2743,7 +3158,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             return practice_growth(
                 store, str(body.get("subject") or "").strip(),
                 from_year=str(body.get("from_year") or "").strip() or None,
-                to_year=str(body.get("to_year") or "").strip() or None)
+                to_year=str(body.get("to_year") or "").strip() or None,
+                market=body.get("market") or None)
         except BenchmarkError as e:
             raise HTTPException(422, str(e))
         except (TypeError, ValueError) as e:
@@ -2759,7 +3175,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 zip_code=str(body.get("zip") or "").strip() or None,
                 radius_miles=_as_float(body.get("radius_miles"), 25.0),
                 year=str(body.get("year") or "").strip() or None,
-                min_peers=_bounded_int(body.get("min_peers"), 3, 1, 1000))
+                min_peers=_bounded_int(body.get("min_peers"), 3, 1, 1000),
+                market=body.get("market") or None)
         except BenchmarkError as e:
             raise HTTPException(422, str(e))
         except (TypeError, ValueError) as e:
@@ -3144,7 +3561,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             return referral_leaders(
                 store,
                 zip_code=str(body.get("zip") or "").strip() or None,
-                radius_miles=float(body["radius_miles"]) if body.get("radius_miles") else None,
+                radius_miles=_radius_arg(body.get("radius_miles")),
                 limit=_bounded_int(body.get("limit"), 50, 1, 5000),
                 dataset_id=str(body.get("dataset_id") or "").strip() or None,
                 therapy_only=bool(body.get("therapy_only", True)))
@@ -3262,7 +3679,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         grain = grain_of(qp, cfg, store)
         if grain == "npi":
             grain = "tin"  # outreach is entity-level by definition
-        fs = _fs(qp)
+        fs = _fs_app(qp)
         # the per-code columns are on the house basis, at the dashboard's
         # month and payer choice (outreach.build_outreach_rows)
         market = {"month": fs.described.get("as_of_month") or "latest",
@@ -3310,7 +3727,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         name or TIN; empty `q` returns the largest practices as a starter set."""
         emap = store.entity_map()
         ql = q.strip().lower()
-        like = f"%{ql}%"
+        like = f"%{_lit(ql)}%"
         with store.connect() as con:
             # auto-grouped orgs: an NPPES org name shared by >1 TIN is ONE
             # practice on the Explorer's entity grain, and resolve_subject_tins
@@ -3319,7 +3736,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             # lone fragment TIN. Exclude the 'TIN …' no-name fallback labels.
             auto_sql = ("SELECT display_name FROM tin_directory "
                         "WHERE display_name NOT LIKE 'TIN %' "
-                        + ("AND lower(display_name) LIKE ? " if ql else "")
+                        + ("AND lower(display_name) LIKE ? ESCAPE '\\' " if ql else "")
                         # the biggest multi-TIN practices first; a UNIQUE
                         # order (invariant 7) — without it LIMIT kept a
                         # different 50 on each call
@@ -3330,9 +3747,17 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             if ql:
                 tins = _dicts(con.execute(
                     "SELECT tin_value, display_name, npi_count, states FROM tin_directory "
-                    "WHERE lower(display_name) LIKE ? OR tin_value LIKE ? "
+                    "WHERE lower(display_name) LIKE ? ESCAPE '\\' OR tin_value LIKE ? ESCAPE '\\' "
                     "ORDER BY npi_count DESC NULLS LAST, display_name, tin_value LIMIT ?",
-                    [like, f"{ql}%", limit]))
+                    [like, f"{_lit(ql)}%", limit]))
+                if len(ql) == 10 and ql.isdigit():
+                    # the box invites an NPI: offer the practices it bills
+                    # under (it matched nothing before — review 10 item 1.9)
+                    tins += _dicts(con.execute(
+                        "SELECT tin_value, display_name, npi_count, states FROM tin_directory "
+                        "WHERE tin_value IN (SELECT DISTINCT tin_value FROM rates WHERE npi = ?) "
+                        "ORDER BY npi_count DESC NULLS LAST, display_name, tin_value LIMIT ?",
+                        [ql, limit]))
             else:
                 tins = _dicts(con.execute(
                     "SELECT tin_value, display_name, npi_count, states FROM tin_directory "
@@ -3601,7 +4026,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         try:
             return contract_gaps(
                 store, str(body.get("subject") or ""), body.get("market") or {},
-                min_peers=_as_int(body.get("min_peers"), 5),
+                # bounded: 1e308 reached DuckDB as an out-of-range integer (a 500)
+                min_peers=_bounded_int(body.get("min_peers"), 5, 1, 1_000_000),
                 limit=_bounded_int(body.get("limit"), 100, 1, 5000))
         except (BenchmarkError, ValueError, TypeError) as e:
             raise HTTPException(422, str(e))
@@ -3776,10 +4202,18 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     @app.get("/api/sources")
     def sources(state: str | None = None):
+        # ONE answer with the Files tab's tested-sources catalog (review 10
+        # item 3.7): a registry card the catalog has verified says so and
+        # carries the tested link; a tested payer the registry has no card
+        # for gets one ("tested source"), so Sources never calls a link
+        # "unverified — search for current URL" that Files auto-queues
+        from .known_sources import load_known_sources, merge_registry_cards
+        known = load_known_sources(cfg.known_sources_path)
+        st = (state or "").strip().upper()
         return {
             "states": registry.states(),
-            "national": registry.national(),
-            "state": registry.state(state) if state else [],
+            "national": merge_registry_cards(registry.national(), known, "US"),
+            "state": merge_registry_cards(registry.state(st), known, st) if st else [],
             "elevance_note": registry.elevance_note(),
         }
 
@@ -3823,6 +4257,12 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 # months): the dashboard refreshes its pickers and the open
                 # Explorer/Code view when it changes (round 7 P1.20)
                 "data_generation": store.data_generation}
+
+    @app.get("/api/boot")
+    def boot_info():
+        """The one thing the first paint needs from /api/stats (whose
+        whole-store counts made the table wait 1.2-1.7 s — review 10 1.4)."""
+        return {"default_grain": grain_of({}, cfg, store)}
 
     @app.get("/api/states")
     def states():

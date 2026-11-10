@@ -5181,6 +5181,12 @@ class Store:
                     ORDER BY s
                     """
                 ).fetchall()
+                # only real US state codes: NPPES addresses abroad and full
+                # names ("BRITISH COLUMBIA", "RIYADH", "MASSACHUSETTS", AA/AE/AP
+                # military codes) made "69 states with data" and filled every
+                # State suggestion list (review 10 item 3.4)
+                from .states import STATE_CODES
+                rows = [r for r in rows if r[0] in STATE_CODES]
             except Exception as e:  # noqa: BLE001 — no rows/view yet on a fresh store
                 # A fresh store legitimately has no tin_directory view yet, so
                 # an empty result is normal — but log unexpected errors so a
@@ -5197,6 +5203,7 @@ class Store:
                  entity_type: str | None = None, address: str | None = None,
                  zip_code: str | None = None, phone: str | None = None,
                  taxonomy_codes: str | None = None) -> None:
+        state = _state_cell(state)
         with self.write_lock, self.connect() as con:
             con.execute(
                 "INSERT OR REPLACE INTO npi_directory "
@@ -5236,7 +5243,7 @@ class Store:
             "taxonomy_desc": pa.array([None] * len(rows), type=pa.string()),
             "taxonomy_codes": sarr("taxonomy_codes"),
             "city": sarr("city"),
-            "state": sarr("state"),
+            "state": pa.array([_state_cell(r.get("state")) for r in rows], type=pa.string()),
             "address": sarr("address"),
             "zip": pa.array([(r.get("zip") or "")[:5] or None for r in rows], type=pa.string()),
             "phone": sarr("phone"),
@@ -5454,8 +5461,10 @@ class Store:
                 unlink_with_retry(p)
             for p in self.dir.glob("tin_zip_place.*"):
                 unlink_with_retry(p)
-            for p in self.dir.glob("practice_medians*.parquet*"):
-                unlink_with_retry(p)
+            for pat in ("practice_medians*.parquet*", "spine_units*.parquet*",
+                        "summary_strips.*.json"):
+                for p in self.dir.glob(pat):
+                    unlink_with_retry(p)
             self._spine_mat.clear()
             with self.connect() as con:
                 con.execute(
@@ -5529,6 +5538,17 @@ for _name in _QUEUE_WRITERS_IF_DONE:
 
 
 _MISSING = object()
+
+
+def _state_cell(state):
+    """A directory row's state as a USPS code when it names one ("Massachusetts"
+    -> MA): a State = MA filter is an exact match and missed the spelled-out
+    rows (review 10 item 3.4). A foreign province / military code stays as
+    NPPES wrote it — the state lists show only real states."""
+    if state is None:
+        return None
+    from .states import state_code_or_none
+    return state_code_or_none(state) or state
 
 
 def generation_cached(name: str, *, daily: bool = False):

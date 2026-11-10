@@ -198,8 +198,15 @@ def test_aggregate_views_skip_the_name_joins_when_no_filter_needs_them(cfg, two_
             b = con.execute(f"SELECT {cols} FROM ({rel_sql('tin', fs)}) ORDER BY ALL",
                             fs.params).fetchall()
             assert a == b and a, qp
-        fs = FilterSet({"latest": "1", "state": "MO"})          # a joined column: joins kept
-        assert stat_rel("tin", fs) == rel_sql("tin", fs)
+        # a joined column: the practices are resolved first and the spine
+        # read by unit (review 10 item 1.3) — the same rows as the joined view
+        fs = FilterSet({"latest": "1", "state": "MO"})
+        cols = "unit_id, payer, billing_code, file_month, negotiated_rate, is_dollar_rate"
+        a = con.execute(f"SELECT {cols} FROM ({stat_rel('tin', fs)}) ORDER BY ALL",
+                        fs.params).fetchall()
+        b = con.execute(f"SELECT {cols} FROM ({rel_sql('tin', fs)}) ORDER BY ALL",
+                        fs.params).fetchall()
+        assert a == b
     c = TestClient(create_app(cfg, two_payers))
     s = c.get("/api/summary?grain=tin&latest=1").json()
     # T1 and its npi-typed twin share digits, so one unit_id: 2 practices

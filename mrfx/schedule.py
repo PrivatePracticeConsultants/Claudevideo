@@ -215,19 +215,22 @@ def payer_scorecard(fee_schedule: dict) -> dict:
     """Rank the subject's payers by how well they pay (§7C.2).
 
     Derived from an already-computed fee schedule (mirrors the
-    benchmark→opportunity split). Two normalized metrics:
-      - median % of Medicare  (when MPFS is loaded — absolute, comparable)
-      - median % of the best payer over HEAD-TO-HEAD codes (codes ≥2 payers
-        priced) — needs no Medicare data, but only ranks payers that actually
-        compete on shared codes.
-    Primary rank uses % of Medicare if available, else % of best.
+    benchmark→opportunity split). The rank is the median % of the best
+    payer's rate over the codes EVERY payer prices (else over the codes at
+    least two price); median % of Medicare is reported, never ranked on.
     """
     codes = fee_schedule["codes"]
-    # ONE ranking scale for the whole scorecard: % of Medicare when the anchor
-    # is loaded (absolute, ~100-200%), else % of best (capped at 100%). Mixing
-    # them — ranking a Medicare-anchored payer against a %-of-best fallback
-    # payer — compares different scales and mis-orders them.
-    use_medicare = bool(fee_schedule.get("mpfs_loaded"))
+    # The RANK compares payers on the SAME codes — the rule Leads' worst payer
+    # and per-visit economics apply. It used % of Medicare over each payer's
+    # OWN codes when the anchor was loaded: Alpha (97110 $45, 97140 $30, 97530
+    # $44) ranked below Beta ($42 on 97110 only, 140 % of Medicare) although
+    # Alpha pays more on the one code both price (review 10 item 2.6). % of
+    # Medicare and the median rate stay as columns, unranked.
+    priced_by = {e["billing_code"]: {p for p, v in e["rates"].items() if v["rate"] is not None}
+                 for e in codes}
+    active = {p for ps in priced_by.values() for p in ps}
+    shared = sorted(c for c, ps in priced_by.items() if active and ps >= active)
+    use_medicare = False
     # best rate per code and how many payers priced it (for head-to-head)
     best_rate: dict[str, float] = {}
     n_payers_for_code: dict[str, int] = {}
@@ -248,7 +251,8 @@ def payer_scorecard(fee_schedule: dict) -> dict:
             rates.append(v["rate"])
             if v["pct_medicare"] is not None:
                 pcts_med.append(v["pct_medicare"])
-            if n_payers_for_code.get(code, 0) >= 2 and best_rate.get(code):
+            if (code in shared if shared else n_payers_for_code.get(code, 0) >= 2) \
+                    and best_rate.get(code):
                 pcts_best.append(100 * v["rate"] / best_rate[code])
         if not rates:
             continue
@@ -269,18 +273,23 @@ def payer_scorecard(fee_schedule: dict) -> dict:
     # payers with a rank metric first (best → worst); the rest by raw median rate
     ranked = sorted(
         [r for r in rows if r["rank_metric"] is not None],
-        key=lambda r: r["rank_metric"], reverse=True,
+        key=lambda r: (-r["rank_metric"], r["payer"]),
     )
     for i, r in enumerate(ranked, 1):
         r["rank"] = i
     unranked = sorted(
         [r for r in rows if r["rank_metric"] is None],
-        key=lambda r: r["median_rate"], reverse=True,
+        key=lambda r: (-r["median_rate"], r["payer"]),
     )
     for r in unranked:
         r["rank"] = None
     return {
-        "metric": "pct_medicare" if fee_schedule.get("mpfs_loaded") else "pct_of_best",
+        # % of the best payer's rate, over the codes EVERY payer prices
+        # ("shared") — or, when they share none, over each code at least two
+        # of them price ("head_to_head")
+        "metric": "pct_of_best",
+        "basis": "shared" if shared else "head_to_head",
+        "shared_codes": shared,
         "rows": ranked + unranked,
         "best_payer": ranked[0]["payer"] if ranked else None,
         "worst_payer": ranked[-1]["payer"] if ranked else None,
@@ -295,13 +304,18 @@ def payer_scorecard(fee_schedule: dict) -> dict:
 def _methodology(store: Store, fee_schedule: dict) -> str:
     market = fee_schedule["market"]
     payers = fee_schedule.get("payers") or []
+    # a document pinned to a month lists the files OF that month, not every
+    # later file of its payers (review 10 item 3.13)
+    month = str(market.get("month") or "latest")
+    pin = None if month.lower() == "latest" else month
     if payers:
         with store.connect() as con:
             files = con.execute(
                 "SELECT filename, payer, last_updated_on FROM files "
                 "WHERE status = 'done' AND file_type = 'in_network' "
                 f"AND payer IN ({', '.join('?' for _ in payers)}) "
-                "ORDER BY filename", payers).fetchall()
+                + ("AND file_month = ? " if pin else "")
+                + "ORDER BY filename", [*payers, *([pin] if pin else [])]).fetchall()
     else:
         # an empty fee schedule matched no payers — listing EVERY ingested file
         # as its "source" would over-claim provenance for a report with no rows
@@ -325,11 +339,14 @@ def _methodology(store: Store, fee_schedule: dict) -> str:
         ] if any(v.get("market_median") is not None
                  for row in fee_schedule["codes"] for v in row["rates"].values())
           else []),
-        "Payer scorecard: payers are ranked by median % of Medicare when an MPFS "
-        "anchor is loaded (absolute), otherwise by the median ratio of this "
-        "payer's rate to the BEST payer's rate over codes at least two payers "
-        "priced (a payer with no head-to-head codes is listed but unranked).",
-        "Source files: " + ("; ".join(f"{f[0]} ({f[1]}, {f[2]})" for f in files) or "none") + ".",
+        "Payer scorecard: payers are ranked by the median ratio of this payer's "
+        "rate to the BEST payer's rate over the codes every payer prices (when "
+        "they share none, over the codes at least two payers price; a payer "
+        "with no such code is listed but unranked). % of Medicare is shown, "
+        "not ranked on — payers are compared on the same codes.",
+        "Source files" + (f" (the files of {pin}; later files are not used)"
+                          if pin else "") + ": "
+        + ("; ".join(f"{f[0]} ({f[1]}, {f[2]})" for f in files) or "none") + ".",
         GHOST_RATE_NOTE,
         COLLECTION_NOTE,
     ]
@@ -403,7 +420,9 @@ def render_rate_card(cfg: MrfxConfig, store: Store, fee_schedule: dict,
 
     sc_head = ("<th class='num'>Rank</th><th>Payer</th><th class='num'>Codes</th>"
                + ("<th class='num'>Median % Medicare</th>" if mp else "")
-               + "<th class='num'>Median % of best</th><th class='num'>Median rate</th>")
+               + "<th class='num'>Median % of best</th>"
+               "<th class='num' title='median of the payer&#39;s own rates — its codes differ "
+               "from the other payers&#39;, so this column is not a ranking'>Median of its rates</th>")
     sc_html = "".join(sc_row(r) for r in scorecard["rows"])
 
     def fee_row(entry) -> str:
@@ -463,7 +482,12 @@ def render_rate_card(cfg: MrfxConfig, store: Store, fee_schedule: dict,
         for entry in fee_schedule["codes"])
     trend_note = (f"<p class='sub'>{e(SPARK_NOTE)}</p>" if has_trend else "")
     footer = _methodology(store, fee_schedule)
-    best_line = (f"Best-paying payer: <b>{e(scorecard['best_payer'])}</b>."
+    shared = scorecard.get("shared_codes") or []
+    best_line = ((f"Best-paying payer: <b>{e(scorecard['best_payer'])}</b> — ranked on "
+                  + (f"the {len(shared)} code(s) every payer prices ({e(', '.join(shared[:8]))}"
+                     f"{' …' if len(shared) > 8 else ''})"
+                     if shared else "the codes at least two of them price")
+                  + ", as % of the best payer's rate.")
                  if scorecard.get("best_payer") else "")
 
     return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
@@ -489,7 +513,8 @@ def render_rate_card(cfg: MrfxConfig, store: Store, fee_schedule: dict,
 {SPARK_CSS}
  footer {{ margin-top: 32px; border-top: 1px solid #d0d5dd; padding-top: 12px;
           color: #475467; font-size: 11px; white-space: pre-wrap; }}
- @media print {{ body {{ margin: 0; }} }}
+ @page {{ size: landscape; margin: 10mm; }}
+ @media print {{ body {{ margin: 0; max-width: none; }} table {{ font-size: 10.5px; }} th, td {{ padding: 3px 5px; }} * {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }} }}
 </style></head><body>
 {_brand_header(cfg)}
 <h1>Rate card — {e(fee_schedule['subject'])}</h1>
@@ -525,9 +550,10 @@ def fee_schedule_csv(fee_schedule: dict, scorecard: dict, store: Store) -> str:
             if not v or v["rate"] is None:
                 continue
             w.writerow([defuse_csv(payer), rank.get(payer) or "", entry["billing_code"],
-                        defuse_csv(entry["description"]) or "", v["rate"],
+                        # money to the cent as printed ("40.00", not 40.0)
+                        defuse_csv(entry["description"]) or "", f"{v['rate']:.2f}",
                         "" if v["pct_medicare"] is None else int(v["pct_medicare"]),
-                        "" if v.get("market_median") is None else v["market_median"],
+                        "" if v.get("market_median") is None else f"{v['market_median']:.2f}",
                         # A suppressed cell reports NO peer figures at all. Printing
                         # the raw count next to a blank median contradicted the
                         # methodology block ("omitted entirely") — and that block

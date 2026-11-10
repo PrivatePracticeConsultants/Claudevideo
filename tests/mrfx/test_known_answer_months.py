@@ -75,9 +75,11 @@ def test_rate_changes_per_payer(ahead):
     got = [(c["display_name"], c["billing_code"], c["old_rate"], c["new_rate"], c["pct_change"],
             c["prev_month"], c["new_month"]) for c in d["changes"]]
     assert got == [("B REHAB", "97110", 20.0, 40.0, 100.0, "2026-05", "2026-06")]
-    # the explicit two-month view is unchanged: 2026-07 vs 2026-06 sees only Tiny
-    # (nothing matched), exactly what it is asked
-    assert ahead.post("/api/changes", json={"market": {"month": "2026-07"}}).json()["count"] == 0
+    # 2026-07 picked: only Tiny published then, and Tiny has no earlier file —
+    # nothing can be compared, and the answer says so instead of "No changes"
+    # (review 10 item 2.4)
+    r = ahead.post("/api/changes", json={"market": {"month": "2026-07"}})
+    assert r.status_code == 422 and "nothing was compared" in r.json()["detail"]
     csv = ahead.post("/api/changes.csv", json={"market": {"month": "latest"}}).text
     assert "Rho Health 2026-05 -> 2026-06" in csv and ",2026-05,2026-06" in csv
 

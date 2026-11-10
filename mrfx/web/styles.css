@@ -465,3 +465,6 @@ code.inline { background: var(--grid); border-radius: 4px; padding: 1px 5px; fon
   margin-right: 6px; min-width: 3px; }
 .idx-up { background: var(--good); }
 .idx-down { background: var(--warning); }
+
+/* previous rows while a new search loads (review 10 1.9) */
+#rates-body.stale { opacity: .45; transition: opacity .15s; }

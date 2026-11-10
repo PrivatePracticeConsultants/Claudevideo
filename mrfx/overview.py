@@ -57,17 +57,19 @@ def market_overview(store: Store, state: str | None = None) -> dict:
                        count(DISTINCT t.tin_value)    AS practices
                 FROM {rel} t {j} WHERE {where}""", params).fetchone()
 
-        # per-TIN median first (the house grain), then median across TINs.
-        # lower(): the parser stores discipline as "PT"/"OT"/"SLP" (catalog.py)
-        # — a literal lowercase IN-list matched nothing on real data and this
-        # whole landing-page section silently never rendered.
+        # ONE comparable service per discipline — its moderate-complexity
+        # evaluation — per-TIN median first, then across TINs. A median over
+        # each discipline's own code mix read "OT $95.45 vs PT $32.23": the OT
+        # rows were only its four evaluation codes, the 42 shared codes (97110,
+        # 97530 …) were in neither (review 10 item 3.5)
         by_discipline = con.execute(
             f"""WITH per_tin AS (
-                    SELECT lower(t.discipline) AS discipline, t.tin_value,
+                    SELECT CASE t.billing_code WHEN '97162' THEN 'pt' WHEN '97166' THEN 'ot'
+                                ELSE 'slp' END AS discipline, t.tin_value,
                            median(t.negotiated_rate) AS rate
                     FROM {rel} t {j}
-                    WHERE {where} AND lower(t.discipline) IN ('pt','ot','slp')
-                    GROUP BY lower(t.discipline), t.tin_value)
+                    WHERE {where} AND t.billing_code IN ('97162', '97166', '92523')
+                    GROUP BY 1, t.tin_value)
                 SELECT discipline, median(rate) AS median,
                        count(DISTINCT tin_value) AS practices
                 FROM per_tin GROUP BY discipline ORDER BY discipline""", params).fetchall()
@@ -126,12 +128,14 @@ def market_overview(store: Store, state: str | None = None) -> dict:
                 ORDER BY idx DESC, b.payer""", params).fetchall()
         con.execute("DROP TABLE IF EXISTS __overview")
 
-    disc_label = {"pt": "Physical therapy", "ot": "Occupational therapy",
-                  "slp": "Speech-language pathology"}
+    disc_label = {"pt": "Physical therapy evaluation (97162)",
+                  "ot": "Occupational therapy evaluation (97166)",
+                  "slp": "Speech-language evaluation (92523)"}
     return {
         "state": st,
         "payers": counts[0], "codes": counts[1], "practices": counts[2],
-        "states": len(store.available_states()),
+        # the states IN SCOPE: under a state filter the card said "69" too
+        "states": 1 if st else len(store.available_states()),
         "by_discipline": [
             {"discipline": d, "label": disc_label.get(d, d),
              "median": half_up(m, 2) if m is not None else None, "practices": n}

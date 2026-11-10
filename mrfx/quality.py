@@ -159,6 +159,10 @@ def payer_freshness(store: Store, *, stale_days: int = 270) -> dict:
                    max(finished_at)                AS last_ingested
             FROM files
             WHERE status = 'done' AND file_type = 'in_network' AND payer IS NOT NULL
+              -- a 0-row file publishes no rate: it is not the payer's newest
+              -- publication of the rates on screen (review 10 item 3.6 — BCBS
+              -- ND "27 days" while its 2.66M rates were from two months earlier)
+              AND coalesce(rows_emitted, 0) > 0
             GROUP BY payer ORDER BY published DESC NULLS LAST, payer
         """).fetchall()
         months = dict(con.execute(
@@ -178,6 +182,8 @@ def payer_freshness(store: Store, *, stale_days: int = 270) -> dict:
             # a date we cannot read must not pass as fresh, and must not be
             # called stale either — it is unknown, and says so
             "stale": (age is not None and age > stale_days),
+            # a header dated after today: say so, never "-21 days"
+            "future_dated": age is not None and age < 0,
             "date_unreadable": bool(published) and d is None,
             "newest_file_month": months.get(payer),
             "n_files": n_files,
@@ -365,15 +371,30 @@ def size_premium(store: Store, market: dict | None = None, *,
                                "it is priced on has fewer than 3 practices to rank "
                                "against — too thin to place it by size")}
         if mine:
-            n = max((r.get("npi_count") or 0) for r in mine)
+            # a mapped group's size is its member TINs' providers together (it
+            # was the biggest single member's: BIG GROUP read "solo" while its
+            # dossier said 2 NPIs — review 10 item 2.8)
+            n = sum((r.get("npi_count") or 0) for r in mine)
             pcts = sorted(r["avg_percentile"] for r in mine)
             mid = len(pcts) // 2
             band = _band(n)
             peer = next((b for b in usable if b["band"] == band), None)
             mypct = half_up(pcts[mid] if len(pcts) % 2
                           else (pcts[mid - 1] + pcts[mid]) / 2, 1)
+            # the practice's ONE overall position (benchmark.overall_position
+            # — Leads, leaderboard, roster, Negotiate, dossier) travels with the
+            # band statistic, which is a different number: the mean of its
+            # positions within each payer x code cell. Printed as "is at p37.5"
+            # it contradicted every other screen's p13 (review 10 item 2.8)
+            overall = None
+            try:
+                from .benchmark import compute_benchmark, overall_position
+                overall = overall_position(compute_benchmark(store, subject, market or {})["rows"])
+            except Exception:  # noqa: BLE001 — the band comparison stands alone
+                overall = None
             subj = {
                 "subject": subject, "npi_count": n, "band": band,
+                "position": None if overall is None else float(overall),
                 "avg_percentile": mypct,
                 "band_avg_percentile": peer["avg_percentile"] if peer else None,
                 "vs_band": (half_up(mypct - peer["avg_percentile"], 1)
@@ -394,9 +415,12 @@ def size_premium(store: Store, market: dict | None = None, *,
                 f"{direction} the smallest in this market.")
     if subj and subj["vs_band"] is not None:
         headline += (
-            f" This practice ({subj['npi_count']} provider(s), {subj['band']}) "
-            f"is at p{subj['avg_percentile']:g} — {abs(subj['vs_band']):g} points "
-            f"{'above' if subj['vs_band'] > 0 else 'below'} others its size.")
+            f" This practice ({subj['npi_count']} provider(s), {subj['band']}"
+            + (f"; overall position p{subj['position']:g}" if subj.get("position") is not None
+               else "")
+            + f") averages p{subj['avg_percentile']:g} within each payer — "
+            f"{abs(subj['vs_band']):g} points "
+            f"{'above' if subj['vs_band'] > 0 else 'below'} others its size on the same measure.")
 
     return {
         "bands": out, "n_practices": len(rows), "spread_points": spread,
@@ -406,6 +430,7 @@ def size_premium(store: Store, market: dict | None = None, *,
     }
 
 
+@generation_cached('quality.code_type_flag')
 def code_type_flag(store: Store, market: dict | None, subject: str) -> dict:
     """What kind of rate the SUBJECT's own rows are — the version of the
     rate-type question that belongs in a client's own report."""
@@ -585,10 +610,12 @@ def payer_posture(store: Store, market: dict | None = None,
         "payers": out, "count": len(out), "min_codes": min_codes,
         "n_winnable": len(winnable),
         "headline": (
-            f"{len(winnable)} of {len(out)} payer(s) demonstrably price "
-            "practices differently — those are the negotiations with room. "
-            + (f"{', '.join(p['payer'] for p in winnable[:4])}."
-               if winnable else "")
+            (f"{len(winnable)} of {len(out)} payer(s) demonstrably price "
+             "practices differently — those are the negotiations with room: "
+             f"{', '.join(p['payer'] for p in winnable[:4])}."
+             if winnable else
+             f"None of the {len(out)} payer(s) demonstrably prices practices "
+             "differently here — no negotiation shows room on this evidence.")
             if out else "No rates match this market."),
         "note": POSTURE_NOTE,
     }

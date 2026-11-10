@@ -100,6 +100,20 @@ def build_client_packet(cfg: MrfxConfig, store: Store, subject: str,
     as_of = (market["month"] if pinned else
              (max(m for _, m in vintage) if vintage else None))
     market.setdefault("therapy_only", True)
+    # a client packet is about ONE practice in ITS market: with no state given
+    # (the Clients button and `mrfx packets` give none) it is the practice's
+    # main state — the dossier's rule. Without one the pitch report refused
+    # every packet ("requires a state … allow_national=true") and the rate card
+    # pooled peers nationally (review 10 item 2.7)
+    scoped_to = None
+    if not market.get("state") and not market.get("allow_national"):
+        try:
+            from .benchmark import anchor_state
+            scoped_to = anchor_state(store, {}, resolve_subject_tins(store, subject))
+        except Exception:  # noqa: BLE001 — no state found: the documents say so
+            scoped_to = None
+        if scoped_to:
+            market["state"] = scoped_to
     written: list[str] = []
     skipped: list[str] = []
     display = subject
@@ -261,7 +275,8 @@ def build_client_packet(cfg: MrfxConfig, store: Store, subject: str,
         written.append("6_closed_referral_sources.html")
     attempt("Closed referral sources", _closed_sources)
 
-    index = _index_html(cfg, display, subject, written, skipped, market,
+    index = _index_html(cfg, display, subject, written, [s.split(":", 1)[0] for s in skipped],
+                        market,
                         as_of, vintage)
     (pdir / "index.html").write_text(index, encoding="utf-8")
     return {"subject": subject, "display_name": display, "dir": str(pdir),
@@ -343,7 +358,8 @@ _CSS = """
  ul { margin: 6px 0 6px 18px; } a { color: #2a78d6; }
  footer { margin-top: 34px; border-top: 1px solid #d0d5dd; padding-top: 12px;
           color: #475467; font-size: 11px; }
- @media print { body { margin: 0; } h2 { break-after: avoid; } }
+ @page { size: landscape; margin: 10mm; }
+ @media print { body { margin: 0; max-width: none; } table { font-size: 10.5px; } th, td { padding: 3px 5px; } * { -webkit-print-color-adjust: exact; print-color-adjust: exact; } h2 { break-after: avoid; } }
 """
 
 
@@ -497,11 +513,15 @@ def _index_html(cfg: MrfxConfig, display: str, subject: str, written: list[str],
     source = ("" if not vintage else
               " Rates are each payer's newest published file: "
               + ", ".join(f"{e(p)} {e(m)}" for p, m in vintage) + ".")
+    if market.get("state"):
+        source += f" Market: practices in {e(str(market['state']))}."
     return _doc(
         cfg, f"{display} — monthly packet",
         f"<p class='meta'>As of month: <b>{e(str(month or market.get('month')))}</b>."
         f"{source} Practice: {e(subject)}.</p>"
         f"<h2>Documents</h2><ul>{docs or '<li>(none)</li>'}</ul>"
+        # section NAMES only: the technical reason (and any setup advice) is
+        # the consultant's, in the book index — not the client's folder
         + (f"<h2>Not included this month</h2><ul>{miss}</ul>"
            "<p class='sub'>A section is omitted when it has nothing to say — an "
            "empty branded document would be worse than none.</p>" if skipped else ""),

@@ -611,7 +611,14 @@ def org_referrals(store: Store, npis: list[str], direction: str = "in",
                    coalesce(n.taxonomy_code, '')          AS taxonomy,
                    sum(p.patients)                        AS patients,
                    sum(p.transactions)                    AS transactions,
-                   round(avg(p.avg_day_wait::DECIMAL(18, 6)), 1) AS avg_day_wait
+                   -- weighted by each pair's transactions: a pair with one
+                   -- referral weighed as much as one with forty (11.3 vs 11.6)
+                   -- (a dataset without transaction counts keeps the plain mean)
+                   round(coalesce(
+                       (sum(p.avg_day_wait::DECIMAL(18, 6) * p.transactions)
+                        / nullif(sum(p.transactions) FILTER (
+                              WHERE p.avg_day_wait IS NOT NULL), 0))::DOUBLE,
+                       avg(p.avg_day_wait::DECIMAL(18, 6))::DOUBLE), 1) AS avg_day_wait
             FROM referral_pairs p
             LEFT JOIN npi_directory n ON n.npi = p.{theirs}
             WHERE p.dataset_id = ?

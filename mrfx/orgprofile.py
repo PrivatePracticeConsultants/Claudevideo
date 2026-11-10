@@ -27,7 +27,7 @@ import datetime as dt
 import io
 
 from . import __version__
-from .benchmark import BenchmarkError, normalize_market, resolve_subject_tins
+from .benchmark import BenchmarkError, normalize_market
 from .catalog import code_info
 from .schedule import (_methodology, compute_fee_schedule,
                        payer_scorecard, require_rate_card_content)
@@ -43,7 +43,10 @@ def _w(rows: list[list]) -> str:
 def compute_org_profile(store: Store, subject: str, market: dict) -> dict:
     """Identity + NPIs + the full rate profile for ONE organization."""
     market = normalize_market(market)
-    tins = resolve_subject_tins(store, subject)
+    # the subject rule (subject_tins_for_market): a name used in two states
+    # is the practice in the market's state (review 10 item 2.9)
+    from .benchmark import subject_tins_for_market
+    tins = subject_tins_for_market(store, subject, market)
     if not tins:
         raise BenchmarkError(f"no practice matched '{subject}'")
 

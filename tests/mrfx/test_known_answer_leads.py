@@ -22,15 +22,18 @@ Practices (professional, GP, POS 11; NPPES names/taxonomies loaded):
 
 By hand — market {latest, MO, therapy practices only} = A..E:
   97110 per-practice rate: A median(30, 34) = 32, B 40, C 50, D 60, E 70
-        percent_rank: A 0, B 25, C 50, D 75, E 100; code median 50
-  97140: A 25 .. E 65 -> same ranks; median 45.  97530: A 40 .. E 80; median 60
+        percent_rank: A 0, B 25, C 50, D 75, E 100
+  97140: A 25 .. E 65 -> same ranks.  97530: A 40 .. E 80
   97112: priced by A alone -> no market, not counted (n_codes stays 3)
-  A: median percentile 0,  avg gap to median = (18 + 20 + 20) / 3 = 19.33
-  B: median percentile 25, avg gap = 10.00          C: 50 (not a lead)
+  The market median is the median of the OTHER practices (Benchmark's rule,
+  review 10 item 3.9): for A, 97110 median(40,50,60,70) = 55, 97140 50,
+  97530 65; for B, 97110 median(32,50,60,70) = 55, 97140 50, 97530 65.
+  A: median percentile 0,  avg gap to median = (23 + 25 + 25) / 3 = 24.33
+  B: median percentile 25, avg gap = 15.00          C: 50 (not a lead)
   -> leads at/below p25: A, then B.
   Worst payer for A, over the codes that HAVE a market: Rho 30/25/40 vs
-  50/45/60 -> 20.00 under on each = 20.00; Sigma 34 vs 50 -> 16.00.
-  -> Rho, $20.00. (Averaging in 97112 — A alone, gap 0 — made Rho 15.00 and
+  55/50/65 -> 25.00 under on each = 25.00; Sigma 34 vs 55 -> 21.00.
+  -> Rho, $25.00. (Averaging in 97112 — A alone, gap 0 — made Rho 18.75 and
   named Sigma: the wrong payer on the outreach line.)
   With therapy practices only OFF, G (5 on every code) joins: 6 practices,
   G at 0, A at 20 (second of six), B at 40 -> leads G, A.
@@ -126,14 +129,14 @@ def test_the_underpaid_list_is_the_hand_answer(leads_app):
     d = _leads(leads_app)
     got = [(x["display_name"], x["median_percentile"], x["n_codes"], x["avg_gap_to_median"])
            for x in d["leads"]]
-    assert got == [("A REHAB", 0.0, 3, 19.33), ("B REHAB", 25.0, 3, 10.0)]
+    assert got == [("A REHAB", 0.0, 3, 24.33), ("B REHAB", 25.0, 3, 15.0)]
     assert d["leads"][0]["state"] == "MO" and d["leads"][0]["npi_count"] == 3
 
 
 def test_the_worst_payer_is_judged_on_codes_with_a_market(leads_app):
     a, b = _leads(leads_app)["leads"]
-    assert (a["worst_payer"], a["worst_payer_gap"]) == ("Rho Health", 20.0)
-    assert (b["worst_payer"], b["worst_payer_gap"]) == ("Rho Health", 10.0)
+    assert (a["worst_payer"], a["worst_payer_gap"]) == ("Rho Health", 25.0)
+    assert (b["worst_payer"], b["worst_payer_gap"]) == ("Rho Health", 15.0)
 
 
 def test_market_scope_changes_who_is_a_lead(leads_app):

@@ -265,7 +265,8 @@ def test_packets_are_written_per_client_and_omissions_explained(cfg, store, tmp_
 
     _seed(store, months=("2026-05", "2026-06"))
     add_client(store, GW)
-    add_client(store, "Ghost Practice LLC")
+    from mrfx.clients import _save_client
+    _save_client(store, "Ghost Practice LLC")     # stopped matching (add refuses it now)
 
     res = build_all_packets(cfg, store, tmp_path / "packets")
     assert res["clients"] == 2 and res["month"] == "2026-06"

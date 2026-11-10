@@ -155,6 +155,9 @@ def save_index_values(store: Store, rows: list[tuple], *, index_name: str | None
             "INSERT OR REPLACE INTO inflation_index "
             "(year, value, index_name, source, added_at) VALUES (?, ?, ?, ?, ?)",
             payload)
+    # the cached trajectory reads this table: after adding a year it kept
+    # "No real-terms figures" until the next rollup (review 10 group 4)
+    store.note_user_edit()
     return len(payload)
 
 

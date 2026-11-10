@@ -125,7 +125,13 @@ def test_watchlist_digest_composes_the_tabs(cfg, store, tmp_path):
     _seed(store)
     assert watchlist(store) == []
     add_client(store, "Gateway Therapy")
-    add_client(store, "No Such Practice LLC")
+    # a name that matches nothing is refused at add time (review 10 group 4);
+    # a client whose practice STOPPED matching (a reset) still gets its own
+    # error cell in the digest — planted directly
+    with pytest.raises(BenchmarkError, match="no practice in the store matches"):
+        add_client(store, "No Such Practice LLC")
+    from mrfx.clients import _save_client
+    _save_client(store, "No Such Practice LLC")
     assert watchlist(store) == ["Gateway Therapy", "No Such Practice LLC"]
     with pytest.raises(BenchmarkError):
         add_client(store, "   ")

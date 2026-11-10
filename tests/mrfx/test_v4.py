@@ -1753,8 +1753,10 @@ def test_changes_csv_defuses_malicious_payer_name(cfg, store):
 
 
 def test_scorecard_does_not_cross_scale_rank_when_medicare_loaded(cfg, store):
-    # PayerC prices only a non-MPFS code; with the anchor loaded it must be
-    # UNRANKED (no % of Medicare), not ranked on its %-of-best (a different scale)
+    # PayerC prices only a non-MPFS code. Every payer is ranked on ONE scale —
+    # % of the best payer over the codes ALL of them price (97140 here) — so
+    # the Medicare anchor (97110 only) cannot put two scales in one ranking
+    # (review 10 item 2.6: the rank used % of Medicare over each payer's own codes)
     for payer, rows in [("PayerA", [("97110", 40.0), ("97140", 50.0)]),
                         ("PayerB", [("97110", 48.0), ("97140", 55.0)]),
                         ("PayerC", [("97140", 60.0)])]:
@@ -1766,10 +1768,10 @@ def test_scorecard_does_not_cross_scale_rank_when_medicare_loaded(cfg, store):
         "m.csv", "code,locality,non_facility_rate\n97110,X,40\n", "text/csv")})
     sc = {r["payer"]: r for r in client.post("/api/schedule/fee", json={
         "subject": "433000000", "market": {"month": "2026-06"}}).json()["scorecard"]["rows"]}
-    assert sc["PayerA"]["rank"] is not None and sc["PayerB"]["rank"] is not None
-    assert sc["PayerC"]["rank"] is None                    # no MPFS code -> unranked
-    assert sc["PayerC"]["median_pct_medicare"] is None
-    assert sc["PayerC"]["median_pct_of_best"] == 100.0     # still computed, just not ranked on
+    assert [sc[p]["rank"] for p in ("PayerC", "PayerB", "PayerA")] == [1, 2, 3]
+    assert sc["PayerC"]["median_pct_medicare"] is None     # shown, never ranked on
+    assert sc["PayerC"]["median_pct_of_best"] == 100.0     # 60 is the best 97140
+    assert sc["PayerA"]["median_pct_of_best"] == 83.0      # 50 / 60, 97140 only
 
 
 def test_rate_changes_biggest_cut_none_when_only_increases(cfg, store):
@@ -1811,7 +1813,9 @@ def test_leads_finds_underpaid_entities_ranked(cfg, market5_store):
     lead = res["leads"][0]                       # most underpaid first
     assert lead["tin_value"] == "431000001"
     assert lead["median_percentile"] == 0.0    # percent_rank: cheapest = p0 (was 20 under cume_dist)
-    assert lead["avg_gap_to_median"] == 10.0   # 10 below each code's median
+    # 12.5 below the median of the OTHER four (35,40,45,50 -> 42.5 vs 30),
+    # Benchmark's market median (review 10 item 3.9; the whole-market 40 read 10)
+    assert lead["avg_gap_to_median"] == 12.5
     assert lead["n_codes"] == 3
 
 

@@ -33,7 +33,7 @@ import logging
 import re
 
 from .benchmark import (BenchmarkError, _market_where, _rates_relation,
-                        normalize_market, resolve_subject_tins)
+                        normalize_market)
 from .parser import clean_code
 from .store import Store
 from .rounding import half_up
@@ -154,8 +154,11 @@ def check_underpayments(store: Store, subject: str, text: str,
     subject = str(subject or "").strip()
     if not subject:
         raise BenchmarkError("pick the practice whose remit this is")
-    tins = resolve_subject_tins(store, subject)
     market = normalize_market(market or {"month": "latest"})
+    # the subject rule (subject_tins_for_market): a name used in two states
+    # is the practice in the market's state (review 10 item 2.9)
+    from .benchmark import subject_tins_for_market
+    tins = subject_tins_for_market(store, subject, market)
     lines, problems = parse_remit(text)
 
     # the practice's OWN published rate — the rate card's rule: state, city

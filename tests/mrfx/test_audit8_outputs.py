@@ -120,8 +120,9 @@ def test_multi_state_subject_rate_is_one_number(cfg, store, mapped):
 
 def test_worst_payer_counts_only_ranked_codes(cfg, store):
     # P1-3: Rho pays A $30 on 97110 (others 40-70) and everyone a flat $50 on
-    # 97530; Sigma pays A $34 on 97110. Market median 97110 = $50.
-    # Rho is $20 under on the only ranked code; Sigma $16.
+    # 97530; Sigma pays A $34 on 97110. A's market median on 97110 is the
+    # median of the OTHER practices, 40/50/60/70 -> $55 (review 10 item 3.9).
+    # Rho is $25 under on the only ranked code; Sigma $21. B: 55 - 40 = 15.
     from mrfx.leads import compute_leaderboard, compute_leads
     T, npis = practices(store, "ABCDE", "80")
     rho = {"97110": dict(zip(T.values(), (30, 40, 50, 60, 70))),
@@ -133,8 +134,8 @@ def test_worst_payer_counts_only_ranked_codes(cfg, store):
     store.rebuild_rollups()
     leads = {x["display_name"]: x for x in compute_leads(
         store, M, threshold_percentile=25, min_codes=1)["leads"]}
-    assert (leads["A REHAB"]["worst_payer"], leads["A REHAB"]["worst_payer_gap"]) == ("Rho Health", 20.0)
-    assert leads["B REHAB"]["worst_payer_gap"] == 10.0
+    assert (leads["A REHAB"]["worst_payer"], leads["A REHAB"]["worst_payer_gap"]) == ("Rho Health", 25.0)
+    assert leads["B REHAB"]["worst_payer_gap"] == 15.0
     lb = {p["display_name"]: p for p in compute_leaderboard(store, M, min_codes=1)["practices"]}
     assert lb["A REHAB"]["median_percentile"] == leads["A REHAB"]["median_percentile"] == 0
 
@@ -227,7 +228,10 @@ def test_outreach_flat_code_is_p50_and_median_matches_sql(cfg, store):
     label_all(store, T, npis)
     store.rebuild_rollups()
     rows, _ = _outreach(cfg, store, dollar_only="1", state="MO")
-    assert rows["A REHAB"]["C97110_MKT_MEDIAN"] == "45.13"
+    # each row's market is the median of the OTHER practices (review 10 3.9):
+    # A (40.25) -> median(40.25, 50, 50) = 50; D (50) -> median(40.25, 40.25, 50)
+    assert rows["A REHAB"]["C97110_MKT_MEDIAN"] == "50.0"
+    assert rows["D REHAB"]["C97110_MKT_MEDIAN"] == "40.25"
     assert rows["A REHAB"]["C97140_PCTL"] == "50"
     from mrfx.overview import market_overview
     top = {c["billing_code"]: c["median"] for c in market_overview(store, "MO")["top_codes"]}

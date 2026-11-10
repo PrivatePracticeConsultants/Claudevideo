@@ -345,14 +345,14 @@ def practice_utilization(store: Store, tins: list[str], year: str | None = None,
 
 
 def suggested_volumes(store: Store, subject: str, year: str | None = None,
-                      multiplier: float = 1.0) -> dict:
+                      multiplier: float = 1.0, market: dict | None = None) -> dict:
     """{code: annual units} to pre-fill a volumes box for `subject`.
 
     `multiplier` lets the user scale Medicare units to their whole book when
     they know the share (e.g. Medicare is a third of their visits -> 3.0). It
     defaults to 1.0 — Medicare only — and whatever is used is echoed back and
     printed, so a scaled number can never masquerade as a measured one."""
-    from .benchmark import BenchmarkError, resolve_subject_tins
+    from .benchmark import BenchmarkError
 
     try:
         mult = float(multiplier)
@@ -360,7 +360,10 @@ def suggested_volumes(store: Store, subject: str, year: str | None = None,
         raise BenchmarkError("the volume multiplier must be a number (1 = Medicare only)")
     if not 0.1 <= mult <= 20:
         raise BenchmarkError("the volume multiplier must be between 0.1 and 20")
-    tins = resolve_subject_tins(store, subject)
+    # the subject rule (subject_tins_for_market): a name used in two states
+    # is the practice in the market's state (review 10 item 2.9)
+    from .benchmark import subject_tins_for_market
+    tins = subject_tins_for_market(store, subject, market or {})
     u = practice_utilization(store, tins, year)
     if not u["codes"]:
         raise BenchmarkError(
@@ -412,7 +415,7 @@ def available_years(store: Store) -> list[str]:
 
 
 def practice_growth(store: Store, subject: str, *, from_year: str | None = None,
-                    to_year: str | None = None) -> dict:
+                    to_year: str | None = None, market: dict | None = None) -> dict:
     """A practice's Medicare volume between two PUF years.
 
     A growing practice is a better prospect; a shrinking referral source is a
@@ -420,7 +423,7 @@ def practice_growth(store: Store, subject: str, *, from_year: str | None = None,
     because CMS suppression can create or destroy a code line without anything
     changing in the practice.
     """
-    from .benchmark import BenchmarkError, resolve_subject_tins
+    from .benchmark import BenchmarkError
 
     years = available_years(store)
     if len(years) < 2:
@@ -442,7 +445,10 @@ def practice_growth(store: Store, subject: str, *, from_year: str | None = None,
                 f"no Medicare utilization loaded for {y} — years present: "
                 f"{', '.join(years)}")
 
-    tins = resolve_subject_tins(store, subject)
+    # the subject rule (subject_tins_for_market): a name used in two states
+    # is the practice in the market's state (review 10 item 2.9)
+    from .benchmark import subject_tins_for_market
+    tins = subject_tins_for_market(store, subject, market or {})
     if not tins:
         raise BenchmarkError(f"no practice matches {subject!r}")
     old_u = practice_utilization(store, tins, older)
@@ -505,7 +511,7 @@ def practice_growth(store: Store, subject: str, *, from_year: str | None = None,
 
 def service_line_gaps(store: Store, subject: str, *, zip_code: str | None = None,
                       radius_miles: float = 25.0, year: str | None = None,
-                      min_peers: int = 3, centroids_path=None) -> dict:
+                      min_peers: int = 3, centroids_path=None, market: dict | None = None) -> dict:
     """Codes nearby therapy practices bill Medicare that this one does not.
 
     Distinct from contract gaps: that asks "what do peers have RATES for?",
@@ -513,11 +519,14 @@ def service_line_gaps(store: Store, subject: str, *, zip_code: str | None = None
     be a service line worth adding — or one it deliberately doesn't offer, so
     every row is a question for the owner.
     """
-    from .benchmark import BenchmarkError, resolve_subject_tins
+    from .benchmark import BenchmarkError
     from .catalog import therapy_taxonomy_sql
     from .medicare import haversine_miles_sql, load_centroids
 
-    tins = resolve_subject_tins(store, subject)
+    # the subject rule (subject_tins_for_market): a name used in two states
+    # is the practice in the market's state (review 10 item 2.9)
+    from .benchmark import subject_tins_for_market
+    tins = subject_tins_for_market(store, subject, market or {})
     if not tins:
         raise BenchmarkError(f"no practice matches {subject!r}")
     try:

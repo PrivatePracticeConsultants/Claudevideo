@@ -72,6 +72,69 @@ def for_states(sources: list[dict], states) -> list[dict]:
     return [s for s in sources if "US" in s.get("states", []) or want & set(s.get("states", []))]
 
 
+def _name_tokens(name: str) -> set[str]:
+    import re
+    t = (name or "").lower().replace("bcbs", "blue cross blue shield")
+    t = t.split("(")[0]           # "The Health Plan (West Virginia / …)"
+    drop = {"the", "of", "and", "inc", "health", "plan", "plans", "insurance", "co"}
+    return {w for w in re.findall(r"[a-z0-9]+", t) if w not in drop}
+
+
+def _match_score(a: str, b: str) -> float:
+    """Jaccard of the name tokens; 0 unless one name's tokens contain the
+    other's or they overlap by ≥ 0.6. Greedy best-first pairing (below) keeps
+    "BCBS of Kansas" off "BCBS of Kansas City" when both are listed."""
+    ta, tb = _name_tokens(a), _name_tokens(b)
+    if not ta or not tb:
+        return 0.0
+    j = len(ta & tb) / len(ta | tb)
+    return j if (ta <= tb or tb <= ta or j >= 0.6) else 0.0
+
+
+def merge_registry_cards(cards: list[dict], known: list[dict], state: str) -> list[dict]:
+    """The registry's cards for `state` ("US" = the national list) with the
+    tested-sources catalog folded in: a card the catalog covers is marked
+    `tested` (its verified date, link, and whether Files can queue it); a
+    tested source with no card becomes one. Order: the registry's cards in
+    their order, then the tested-only cards by name (deterministic)."""
+    st = (state or "").strip().upper()
+    if st == "US":
+        mine = [k for k in known if "US" in k.get("states", [])]
+    else:
+        mine = [k for k in known if st in k.get("states", []) and "US" not in k.get("states", [])]
+    pairs = []
+    for ci, c in enumerate(cards):
+        for ki, k in enumerate(mine):
+            sc = 2.0 if c.get("mrf_url") and c.get("mrf_url") == k["url"] else \
+                _match_score(c.get("name", ""), k["name"])
+            if sc > 0:
+                pairs.append((-sc, ci, ki))
+    match: dict[int, int] = {}
+    used: set[int] = set()
+    for _, ci, ki in sorted(pairs):
+        if ci not in match and ki not in used:
+            match[ci] = ki
+            used.add(ki)
+    out = []
+    for ci, c in enumerate(cards):
+        c = dict(c)
+        if ci in match:
+            c["tested"] = _tested(mine[match[ci]])
+        out.append(c)
+    for i, k in sorted(enumerate(mine), key=lambda x: (x[1]["name"], x[0])):
+        if i in used:
+            continue
+        out.append({"key": f"tested:{st}:{k['name']}", "name": k["name"], "parent": "",
+                    "mrf_url": None, "verified": False, "verified_locally": False,
+                    "notes": None, "tested": _tested(k), "tested_only": True})
+    return out
+
+
+def _tested(k: dict) -> dict:
+    return {"url": k["url"], "verified": k.get("verified") or "", "queueable": k["queueable"],
+            "kind": k.get("kind") or "", "notes": k.get("notes") or ""}
+
+
 def starter_links_text(path: Path | str) -> str:
     """config/starter_links.txt, generated from the catalog: every queueable
     entry, with its {FIRST_OF_MONTH} placeholder kept (resolved at queue

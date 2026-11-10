@@ -83,11 +83,17 @@ def visit_economics(store: Store, subject: str, market: dict | None = None, *,
                     units_per_visit: float | None = None,
                     year: str | None = None) -> dict:
     """What one payer's visit is worth to this practice, versus the others."""
-    from .benchmark import BenchmarkError, resolve_subject_tins
+    from .benchmark import BenchmarkError
     from .schedule import compute_fee_schedule
     from .utilization import practice_utilization
 
-    tins = resolve_subject_tins(store, subject)
+    # the subject rule (subject_tins_for_market): a name used in two states
+    # is the practice in the market's state (review 10 item 2.9)
+    from .benchmark import normalize_market, subject_tins_for_market
+    # shape-check the market BEFORE the subject rule reads it (a non-object
+    # market was a 500 here once the rule looked at its state — fuzz, round 10)
+    normalize_market(market or {})
+    tins = subject_tins_for_market(store, subject, market or {})
     if not tins:
         raise BenchmarkError(f"no practice matches {subject!r}")
     if units_per_visit is not None:
@@ -246,8 +252,9 @@ def weighted_position(store: Store, subject: str, market: dict | None = None, *,
     src = "supplied"
     vols = clean_volumes(volumes) if volumes else {}
     if not vols:
-        from .benchmark import resolve_subject_tins
-        util = practice_utilization(store, resolve_subject_tins(store, subject), year)
+        from .benchmark import subject_tins_for_market
+        util = practice_utilization(store, subject_tins_for_market(store, subject, market or {}),
+                                    year)
         vols = {c["billing_code"]: float(c["units"] or 0) for c in util["codes"]
                 if (c["units"] or 0) > 0}
         src = "medicare"
@@ -257,11 +264,20 @@ def weighted_position(store: Store, subject: str, market: dict | None = None, *,
                                "on file, so position cannot be weighted"),
                     "note": MIX_NOTE}
 
+    # the codes a position rests on (all-tied codes rank no one) at their
+    # UNROUNDED mid-ranks, rounded once at the end: per-code positions rounded
+    # to whole points and all-tied codes at p50 read 37.7 where the exact
+    # figure is 37.5 (review 10 group 4)
+    def _pct(r):
+        x = r.get("subject_percentile_exact")
+        return x if x is not None else r["subject_percentile"]
+    rows = [r for r in rows if r.get("in_position", True)] or rows
     weighted_rows = [r for r in rows if vols.get(r["billing_code"], 0) > 0]
     covered_codes = len(weighted_rows)
     coverage = half_up(100.0 * covered_codes / len(rows), 1) if rows else 0.0
 
-    unweighted = half_up(sum(r["subject_percentile"] for r in rows) / len(rows), 1)
+    unweighted_x = sum(_pct(r) for r in rows) / len(rows)
+    unweighted = half_up(unweighted_x, 1)
     from .benchmark import overall_position
     median_pct = overall_position(rows)      # the one overall-position rule (4.3)
     if coverage < MIN_WEIGHT_COVERAGE_PCT or not weighted_rows:
@@ -279,9 +295,9 @@ def weighted_position(store: Store, subject: str, market: dict | None = None, *,
         }
 
     total_w = sum(vols[r["billing_code"]] for r in weighted_rows)
-    weighted = half_up(sum(r["subject_percentile"] * vols[r["billing_code"]]
-                         for r in weighted_rows) / total_w, 1)
-    shift = half_up(weighted - unweighted, 1)
+    weighted_x = sum(_pct(r) * vols[r["billing_code"]] for r in weighted_rows) / total_w
+    weighted = half_up(weighted_x, 1)
+    shift = half_up(weighted_x - unweighted_x, 1)
     heaviest = max(weighted_rows, key=lambda r: vols[r["billing_code"]])
     return {
         "loaded": True, "subject": subject,

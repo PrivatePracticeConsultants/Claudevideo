@@ -71,7 +71,7 @@
       </div>
       <button class="btn" id="cl-add">Add</button>
       <span class="muted" style="max-width:560px">Every cell reuses the same math as its own tab —
-        rate moves from <b>Changes</b> (newest month vs the one before), gaps from
+        rate moves from <b>Changes</b> (each payer's newest file vs its previous one), gaps from
         <b>Benchmark</b>, and referral alerts from <b>Medicare</b> — so the digest can never
         disagree with a drill-down. Click through to investigate.</span>
     </div>
@@ -176,8 +176,8 @@
         </div>
       </div>
       <div class="field">
-        <label>Month <span class="muted" style="text-transform:none" title="With 'all months' the medians and row counts pool every ingested vintage of a contract; the report tabs (Benchmark, Rate card, Leads, Markets) default to 'latest' — one current rate per contract. Pick a month here to match them.">(all months = pooled)</span></label>
-        <select id="f-month"><option value="">all months</option></select>
+        <label>Month <span class="muted" style="text-transform:none" title="'latest' shows each contract's newest file — one current rate per contract, the basis of every report tab (Benchmark, Rate card, Leads, Markets). 'all months' pools every loaded vintage (a rate republished monthly counts once per month).">(latest = current rates)</span></label>
+        <select id="f-month"><option value="latest">latest — each contract's newest file</option><option value="">all months (pooled)</option></select>
       </div>
       <div class="field" style="max-width:640px">
         <label>Code quick-pick <span class="muted" style="text-transform:none">(grouped by discipline)</span></label>
@@ -313,6 +313,12 @@
         <datalist id="cpt-state-opts"></datalist>
       </label>
       <label class="toggle"><input type="checkbox" id="cpt-base-only" checked> base rates only (no CQ/CO)</label>
+      <label title="Professional = a practice's own claim. Institutional = a hospital/facility line for the same code — a different payment, ranked on its own (review 10)">Claim type
+        <select id="cpt-class">
+          <option value="professional" selected>professional (practices)</option>
+          <option value="institutional">institutional (facilities)</option>
+          <option value="">both</option>
+        </select></label>
       <button class="btn primary" id="cpt-export" title="The rows behind this page, one per contract line (each place-of-service set separately), so every median shown can be recomputed">Export + methodology</button>
     </div>
     <div class="chips codechips" id="cpt-chips" style="margin-bottom:10px"></div>
@@ -1104,6 +1110,7 @@
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:6px">
         <input type="text" id="rm-subject" list="rm-subjects" placeholder="the practice…" style="width:240px">
         <datalist id="rm-subjects"></datalist>
+        <input type="text" id="rm-state" placeholder="state" style="width:52px" title="Only needed when the practice's name is used in more than one state: the state picks which practice the remit is from.">
         <label class="toggle" style="text-transform:none">These amounts are
           <select id="rm-basis" style="margin-left:4px" title="ALLOWED is the amount comparable to a published rate. PAYER-PAID excludes patient deductible/copay, so nearly every line would look short.">
             <option value="allowed">allowed amounts</option>

@@ -153,7 +153,7 @@ def new_to_network(store: Store, market: dict | None = None,
                    radius_miles: float | None = None, therapy_only: bool = True,
                    limit: int = 200, centroids_path=None) -> dict:
     """Practices in a payer's published book THIS month that were absent from
-    the same payer LAST month — i.e. newly contracted.
+    every earlier book of the same payer — i.e. newly contracted.
 
     Needs two loaded vintages of the same payer, and says so plainly when it
     doesn't have them. A practice missing last month because the payer's file
@@ -238,8 +238,11 @@ def new_to_network(store: Store, market: dict | None = None,
                 SELECT t.payer, t.tin_value, t.billing_code, t.negotiated_rate,
                        t.file_month = pp.m_now AS is_now
                 FROM rates_by_tin t LEFT JOIN tin_directory td USING (tin_value)
-                JOIN pairs pp ON pp.payer = t.payer
-                     AND (t.file_month = pp.m_now OR t.file_month = pp.m_prev)
+                -- every month up to this one, not only the previous: a
+                -- practice in the payer's book two months ago that a partly
+                -- loaded middle month lacks is not newly contracted (review
+                -- 10 item 3.8). "New" = absent from EVERY earlier book.
+                JOIN pairs pp ON pp.payer = t.payer AND t.file_month <= pp.m_now
                 WHERE {where}
             ),
             -- the newcomers FIRST (in this month's book, absent from the

@@ -19,7 +19,7 @@ import datetime as dt
 from decimal import ROUND_HALF_UP, Decimal
 
 from . import __version__
-from .benchmark import (BenchmarkError, _market_where, _rates_relation, market_in_words,
+from .benchmark import (BenchmarkError, _market_where, _rates_relation, is_latest, market_in_words,
                         normalize_market, practice_base_sql, resolve_subject_tins)
 from .store import Store, defuse_csv, generation_cached, mask_tin
 
@@ -55,6 +55,55 @@ def midrank_pct_sql(partition: str = "billing_code") -> str:
 
 
 MIDRANK_PCT = midrank_pct_sql("billing_code")
+
+
+def others_median_sql(base: str) -> str:
+    """SELECT billing_code, tin_value, others_median FROM `base` (one `rate`
+    per (billing_code, tin_value)): each practice's market median is the
+    median of the OTHER practices — Benchmark's rule (review 10 item 3.9: a
+    6-practice market read $47.50 on Leads and $48.00 on Benchmark). Exact,
+    without a per-row list: removing the practice at sorted position rk
+    leaves a median made of at most two of the code's order statistics."""
+    return f"""
+    WITH _o AS (
+        SELECT billing_code, tin_value, rate,
+               row_number() OVER (PARTITION BY billing_code ORDER BY rate, tin_value) AS rk,
+               count(*) OVER (PARTITION BY billing_code) AS n
+        FROM {base}),
+    _s AS (
+        SELECT billing_code,
+               max(rate) FILTER (WHERE rk = (n - 1) // 2) AS v_lo,
+               max(rate) FILTER (WHERE rk = (n + 1) // 2) AS v_mid,
+               max(rate) FILTER (WHERE rk = (n + 3) // 2) AS v_hi,
+               max(rate) FILTER (WHERE rk = n // 2)       AS e_lo,
+               max(rate) FILTER (WHERE rk = n // 2 + 1)   AS e_hi
+        FROM _o GROUP BY billing_code)
+    SELECT o.billing_code, o.tin_value,
+           CASE WHEN o.n < 2 THEN NULL
+                WHEN o.n % 2 = 0 THEN CASE WHEN o.rk <= o.n // 2 THEN s.e_hi ELSE s.e_lo END
+                WHEN o.rk <= (o.n - 1) // 2 THEN (s.v_mid + s.v_hi) / 2
+                WHEN o.rk = (o.n + 1) // 2  THEN (s.v_lo + s.v_hi) / 2
+                ELSE (s.v_lo + s.v_mid) / 2 END AS others_median
+    FROM _o o JOIN _s s USING (billing_code)"""
+
+
+def median_of_others(sorted_vals: list, x) -> float | None:
+    """Python twin of others_median_sql: the median of `sorted_vals` with ONE
+    occurrence of `x` removed (x must be in the list)."""
+    import bisect
+    n = len(sorted_vals)
+    if n < 2:
+        return None
+    rk = bisect.bisect_left(sorted_vals, x) + 1      # 1-based; ties are equal values
+    v = sorted_vals
+    if n % 2 == 0:
+        return v[n // 2] if rk <= n // 2 else v[n // 2 - 1]
+    lo, mid, hi = v[(n - 1) // 2 - 1], v[(n + 1) // 2 - 1], v[(n + 3) // 2 - 1]
+    if rk <= (n - 1) // 2:
+        return (mid + hi) / 2
+    if rk == (n + 1) // 2:
+        return (lo + hi) / 2
+    return (lo + mid) / 2
 
 
 def _worst_payer(by_payer: dict) -> dict | None:
@@ -123,13 +172,14 @@ def compute_leads(store: Store, market: dict, *, threshold_percentile: int = 25,
     ranked AS (
         -- MID-RANK among the other practices (MIDRANK_PCT): the cheapest of
         -- a thin market still sits at 0, so the finder still surfaces it,
-        -- and a flat fee schedule no longer makes everyone a p0 lead
-        SELECT billing_code, tin_value, rate,
-               {MIDRANK_PCT} AS pct,
-               median(rate)      OVER (PARTITION BY billing_code) AS code_median,
-               count(*)          OVER (PARTITION BY billing_code) AS n_in_code,
-               count(DISTINCT round(rate, 2)) OVER (PARTITION BY billing_code) AS n_rates
-        FROM base
+        -- and a flat fee schedule no longer makes everyone a p0 lead. The
+        -- gap is to the median of the OTHER practices (others_median_sql)
+        SELECT b.billing_code, b.tin_value, b.rate,
+               {midrank_pct_sql("b.billing_code")} AS pct,
+               om.others_median  AS code_median,
+               count(*)          OVER (PARTITION BY b.billing_code) AS n_in_code,
+               count(DISTINCT round(b.rate, 2)) OVER (PARTITION BY b.billing_code) AS n_rates
+        FROM base b JOIN _lead_om om USING (billing_code, tin_value)
     ),
     per_tin AS (
         -- only codes with a real market (≥2 TINs) count toward a position
@@ -155,6 +205,7 @@ def compute_leads(store: Store, market: dict, *, threshold_percentile: int = 25,
     filter_state = (market.get("state") or "").upper() or None
     with store.connect() as con:
         con.execute(f"CREATE OR REPLACE TEMP TABLE _lead_base AS {base_sql}", base_params)
+        con.execute(f"CREATE OR REPLACE TEMP TABLE _lead_om AS {others_median_sql('_lead_base')}")
         # one row past the cap says whether the list was CUT: a 1,000-row
         # list used to look complete when the market held more leads
         cur = con.execute(sql, [min_codes, threshold_percentile, *excl_params, limit + 1])
@@ -181,11 +232,15 @@ def compute_leads(store: Store, market: dict, *, threshold_percentile: int = 25,
                 -- the SAME code set the position counts: ≥2 practices AND ≥2
                 -- distinct rates. An all-tied code has no "under market" —
                 -- counting its 0 gap diluted the payer that underpays on the
-                -- codes that DO rank (audit 8 P1-3: Sigma $16 named over Rho $20)
-                SELECT billing_code, median(rate) AS code_median,
-                       count(*) AS n_in_code
-                FROM _lead_base GROUP BY billing_code
-                HAVING count(DISTINCT round(rate, 2)) >= 2
+                -- codes that DO rank (audit 8 P1-3: Sigma $16 named over Rho $20).
+                -- The market is the median of the OTHER practices (3.9)
+                SELECT om.billing_code, om.tin_value, om.others_median AS code_median,
+                       c.n_in_code
+                FROM _lead_om om JOIN (
+                    SELECT billing_code, count(*) AS n_in_code
+                    FROM _lead_base GROUP BY billing_code
+                    HAVING count(DISTINCT round(rate, 2)) >= 2) c USING (billing_code)
+                WHERE om.tin_value IN (SELECT unnest(?::VARCHAR[]))
             ),
             gap AS (
                 -- the SAME codes the position counts: a code only this practice
@@ -195,7 +250,7 @@ def compute_leads(store: Store, market: dict, *, threshold_percentile: int = 25,
                 -- under on one code (tests/mrfx/test_known_answer_leads.py)
                 SELECT tp.tin_value, tp.payer, tp.billing_code,
                        greatest(0, m.code_median - tp.rate)::DECIMAL(18, 6) AS gap
-                FROM tp JOIN mkt m USING (billing_code)
+                FROM tp JOIN mkt m USING (billing_code, tin_value)
                 WHERE m.n_in_code >= 2
             )
             SELECT tin_value, payer, billing_code, gap FROM gap
@@ -203,12 +258,33 @@ def compute_leads(store: Store, market: dict, *, threshold_percentile: int = 25,
             """
             per: dict[str, dict] = {}
             for tv, payer, code, gap in con.execute(
-                    wsql, [*params, lead_tins]).fetchall():
+                    wsql, [*params, lead_tins, lead_tins]).fetchall():
                 per.setdefault(tv, {}).setdefault(payer, {})[code] = gap
             for tv, by_payer in per.items():
                 w = _worst_payer(by_payer)
                 if w:
                     worst_payer[tv] = w
+        # A contract line the payer's NEWER files no longer carry stays the
+        # practice's "latest" line (one row per contract, newest file it
+        # appears in), so a practice the payer dropped can still top the list
+        # (review 10 item 3.12). Flag it: for each lead, the payers whose
+        # newest loaded month does not include it. Flag, not drop — a payer's
+        # newest month may be only partly loaded.
+        dropped: dict[str, list[dict]] = {}
+        if lead_tins and is_latest(market):
+            for tv, payer, seen, newest in con.execute("""
+                WITH pm AS (SELECT payer, max(file_month) AS newest
+                            FROM rates_by_tin GROUP BY payer)
+                SELECT t.tin_value, t.payer, max(t.file_month) AS seen, any_value(pm.newest)
+                FROM rates_by_tin t JOIN pm USING (payer)
+                WHERE t.tin_value IN (SELECT unnest(?::VARCHAR[]))
+                GROUP BY t.tin_value, t.payer
+                HAVING max(t.file_month) < any_value(pm.newest)
+                ORDER BY t.tin_value, t.payer""", [lead_tins]).fetchall():
+                if market.get("payers") and payer not in market["payers"]:
+                    continue
+                dropped.setdefault(tv, []).append(
+                    {"payer": payer, "last_seen": seen, "payer_newest": newest})
     sites = store.org_websites()
     leads = []
     for r in rows:
@@ -244,6 +320,8 @@ def compute_leads(store: Store, market: dict, *, threshold_percentile: int = 25,
             # compared on a common basket ("shared") or each on its own
             "worst_payer_codes": (worst_payer.get(r["tin_value"]) or {}).get("n_codes"),
             "worst_payer_basis": (worst_payer.get(r["tin_value"]) or {}).get("basis"),
+            # payers whose newest loaded month no longer lists this practice
+            "not_in_newest": dropped.get(r["tin_value"], []),
         })
     return {
         "market": {k: v for k, v in market.items() if v not in (None, [], "")},
@@ -523,22 +601,31 @@ def leads_csv(store: Store, result: dict) -> str:
         "opportunity model per lead). Geography/name from NPPES enrichment.",
         "worst_payer is compared on the codes every one of the practice's "
         "payers prices (worst_payer_codes of them); when they share none, each "
-        "payer's own codes are averaged.",
+        "payer's own codes are averaged. avg_gap_to_median is to the median of "
+        "the OTHER practices (Benchmark's market median).",
+        "not_in_payers_newest_file names a payer whose newest loaded month no "
+        "longer lists the practice — its rate here is from an older file; the "
+        "payer may have dropped it (or that month is only partly loaded).",
     ]:
         out.write(f"# {line}\n")
     w = csv.writer(out)
     # `state` is the matched/primary state; `all_states` is the full list so a
     # multi-state billing entity is never silently presented as single-state
+    # the columns 0.7.2 had keep their places (a mail merge mapped by position
+    # shifted when 0.7.3 put worst_payer_codes before website); new ones go last
     w.writerow(["display_name", "tin", "entity_kind", "state", "all_states",
                 "city", "npi_count", "n_codes", "median_percentile",
                 "avg_gap_to_median", "worst_payer", "worst_payer_gap",
-                "worst_payer_codes", "website"])
+                "website", "worst_payer_codes", "not_in_payers_newest_file"])
     for x in result["leads"]:
         w.writerow([defuse_csv(x["display_name"]), x["tin_value"], x["entity_kind"],
                     x["state"] or "", "; ".join(x.get("states") or []),
                     defuse_csv(x["city"]) or "", x["npi_count"],
                     x["n_codes"], x["median_percentile"], x["avg_gap_to_median"],
                     defuse_csv(x.get("worst_payer")) or "", x.get("worst_payer_gap") or "",
+                    defuse_csv(x["website"]) or "",
                     x.get("worst_payer_codes") or "",
-                    defuse_csv(x["website"]) or ""])
+                    "; ".join(defuse_csv(f"{d['payer']} (last in {d['last_seen']}, newest "
+                                         f"{d['payer_newest']})")
+                              for d in x.get("not_in_newest") or [])])
     return out.getvalue()

@@ -177,6 +177,8 @@ def compare_to_baseline(store: Store, subject: str, label: str = "engagement sta
     # month is DROPPED, not defaulted around: it pinned the baseline, and
     # inheriting it would measure "after" in the past and report every real
     # win as zero.
+    if market is not None and not isinstance(market, dict):
+        raise BenchmarkError("market must be an object of filters")
     cmp_market = {k: v for k, v in saved.get("market", {}).items() if k != "month"}
     cmp_market.update(market or {})
     cmp_market.setdefault("month", "latest")

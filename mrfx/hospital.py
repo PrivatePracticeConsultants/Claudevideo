@@ -683,10 +683,12 @@ def hospital_parity(store: Store, market: dict | None = None, *,
             r["subject_rate"] = s
             r["subject_multiple"] = half_up(hm / s, 2) if s else None
 
+    # the median of the UNROUNDED multiples, rounded once (3.15x where the
+    # rounded-then-medianed figure read 3.14x — review 10 group 4)
     with_mult = [r for r in rows if r.get("hospital_multiple")]
     med_mult = None
     if with_mult:
-        vals = sorted(r["hospital_multiple"] for r in with_mult)
+        vals = sorted(r["hospital_median"] / r["practice_median"] for r in with_mult)
         mid = len(vals) // 2
         med_mult = half_up(vals[mid] if len(vals) % 2 else
                          (vals[mid - 1] + vals[mid]) / 2, 2)

@@ -193,8 +193,10 @@ def test_code_view_uses_newest_month_per_contract(ka):
 def test_trend_is_per_month(ka):
     _, c = ka
     rows = c.get(f"/api/trend?grain=npi&q={X}&cpt=97110").json()["rows"]
-    # May: X's 40 (GP), 40 (59|GP), 44 (T2) -> median 40; June: 42
-    assert [(r["file_month"], r["median_rate"]) for r in rows] == [("2026-05", 40.0), ("2026-06", 42.0)]
+    # the payer table's basis (review 10 item 3.1): base modifiers, so May's
+    # 59|GP line is out; X's base lines are 40 (T1) and 44 (T2) -> 42. The raw
+    # line median (40, 40, 44) read 40 here and 42 in the payer table. June: 42
+    assert [(r["file_month"], r["median_rate"]) for r in rows] == [("2026-05", 42.0), ("2026-06", 42.0)]
 
 
 def test_months_listed(ka):
@@ -230,11 +232,12 @@ def test_export_equals_screen(ka, grain):
     # the sidecar describes the filter that was ACTUALLY applied
     method = z.read([n for n in names if n.endswith("_methodology.txt")][0]).decode()
     assert f"Grain: {grain}" in method
-    assert "ALL months pooled" in method and '"dollar_rates_only": true' in method
+    # filters in words (review 10 item 3.13 — it was raw JSON)
+    assert "ALL months pooled" in method and "dollar rates only: yes" in method
     z2 = zipfile.ZipFile(io.BytesIO(c.get(f"/api/export.zip?{qs}&month=2026-05&dollar_only=0").content))
     m2 = z2.read([n for n in z2.namelist() if n.endswith("_methodology.txt")][0]).decode()
     assert "As-of month: 2026-05 (only this month's rates)" in m2
-    assert '"dollar_rates_only": false' in m2
+    assert "dollar rates only: no" in m2
 
 
 def _leaks(obj, path=""):

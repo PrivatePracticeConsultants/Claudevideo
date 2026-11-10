@@ -62,8 +62,7 @@ def network_leverage(store: Store, subject: str, payer: str,
                      centroids_path=None) -> dict:
     """The payer's published alternatives to this practice, inside a radius."""
     from .benchmark import (BenchmarkError, _market_where, _rates_relation,
-                            normalize_market, resolve_plan_scope,
-                            resolve_subject_tins)
+                            normalize_market, resolve_plan_scope)
     from .medicare import haversine_miles_sql, load_centroids
 
     payer = str(payer or "").strip()
@@ -75,9 +74,17 @@ def network_leverage(store: Store, subject: str, payer: str,
 
     m = resolve_plan_scope(store, normalize_market(market or {}))
     m = {**m, "payers": [payer]}
-    subject_tins = resolve_subject_tins(store, subject)
+    # the subject rule (subject_tins_for_market): a name used in two states
+    # is the practice in the market's state (review 10 item 2.9)
+    from .benchmark import subject_tins_for_market
+    subject_tins = subject_tins_for_market(store, subject, m)
     if not subject_tins:
         raise BenchmarkError(f"no practice matches {subject!r}")
+    # the RADIUS is the geography: a State filter dropped alternatives across
+    # the state line (10 with State MO vs 13 without, three Kansas City KS
+    # practices 2 miles away — review 10 item 2.9); the state still decides
+    # which practice a name means (above)
+    m = {k: v for k, v in m.items() if k not in ("state", "city")}
     where, params = _market_where(m, bool(m.get("include_assistant")),
                                   bool(m.get("include_non_dollar")))
     rel = _rates_relation(m)

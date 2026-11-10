@@ -641,6 +641,11 @@ def subject_tins_for_market(store: Store, subject: str, market: dict) -> list[st
     user named and keeps every rate it has, whatever state or therapists-only
     scope the PEERS are drawn from (subject_market). Falls back to every TIN
     when none of the same-named practices is in the state."""
+    if market is not None and not isinstance(market, dict):
+        # round 10 routed seven more surfaces through here: a non-object
+        # market must be a 422 sentence on every one, never a .get 500
+        raise BenchmarkError("market must be an object of filters")
+    market = market or {}
     tins = resolve_subject_tins(store, subject)
     st = str(market.get("state") or "").strip().upper()
     if not st or len(tins) < 2 or " · " in subject:
@@ -1586,7 +1591,8 @@ def render_payer_compare_report(cfg: MrfxConfig, store: Store, comp: dict) -> st
           padding: 10px 14px; border-radius: 6px; font-size: 12.5px; margin: 12px 0; }}
  footer {{ margin-top: 36px; border-top: 1px solid #d0d5dd; padding-top: 12px;
           color: #475467; font-size: 11px; white-space: pre-wrap; }}
- @media print {{ body {{ margin: 0; }} h2 {{ break-after: avoid; }} }}
+ @page {{ size: landscape; margin: 10mm; }}
+ @media print {{ body {{ margin: 0; max-width: none; }} table {{ font-size: 10.5px; }} th, td {{ padding: 3px 5px; }} * {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }} h2 {{ break-after: avoid; }} }}
 </style></head><body>
 {_brand_header(cfg)}
 <h1>Payer negotiation — {e(comp['subject'])} vs {e(comp['payer'])}</h1>
@@ -1767,7 +1773,8 @@ def render_proposal_report(cfg: MrfxConfig, store: Store, prop: dict) -> str:
           padding: 10px 14px; border-radius: 6px; font-size: 12.5px; margin: 12px 0; }}
  footer {{ margin-top: 36px; border-top: 1px solid #d0d5dd; padding-top: 12px;
           color: #475467; font-size: 11px; white-space: pre-wrap; }}
- @media print {{ body {{ margin: 0; }} h2 {{ break-after: avoid; }} }}
+ @page {{ size: landscape; margin: 10mm; }}
+ @media print {{ body {{ margin: 0; max-width: none; }} table {{ font-size: 10.5px; }} th, td {{ padding: 3px 5px; }} * {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }} h2 {{ break-after: avoid; }} }}
 </style></head><body>
 {_brand_header(cfg)}
 <h1>Rate proposal — {e(prop['subject'])} to {e(prop['payer'])}</h1>
@@ -1960,7 +1967,8 @@ def render_negotiation_report(cfg: MrfxConfig, store: Store, neg: dict) -> str:
           padding: 10px 14px; border-radius: 6px; font-size: 12.5px; margin: 12px 0; }}
  footer {{ margin-top: 36px; border-top: 1px solid #d0d5dd; padding-top: 12px;
           color: #475467; font-size: 11px; white-space: pre-wrap; }}
- @media print {{ body {{ margin: 0; }} h2 {{ break-after: avoid; }} }}
+ @page {{ size: landscape; margin: 10mm; }}
+ @media print {{ body {{ margin: 0; max-width: none; }} table {{ font-size: 10.5px; }} th, td {{ padding: 3px 5px; }} * {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }} h2 {{ break-after: avoid; }} }}
 </style></head><body>
 {_brand_header(cfg)}
 <h1>Payer negotiation one-pager — {e(subject)}</h1>
@@ -2221,7 +2229,8 @@ def render_pitch_report(cfg: MrfxConfig, store: Store, benchmark: dict,
 {SPARK_CSS}
  footer {{ margin-top: 36px; border-top: 1px solid #d0d5dd; padding-top: 12px;
           color: #475467; font-size: 11px; white-space: pre-wrap; }}
- @media print {{ body {{ margin: 0; }} }}
+ @page {{ size: landscape; margin: 10mm; }}
+ @media print {{ body {{ margin: 0; max-width: none; }} table {{ font-size: 10.5px; }} th, td {{ padding: 3px 5px; }} * {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }} }}
 </style></head><body>
 {_brand_header(cfg)}
 <h1>Negotiated-rate benchmark — {e(benchmark['subject'])}</h1>

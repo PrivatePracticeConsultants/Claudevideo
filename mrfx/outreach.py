@@ -4,12 +4,13 @@ for contact-list cross-referencing and cold-email mail merge (e.g. Brevo).
 Columns are Brevo-attribute-friendly (UPPER_SNAKE, letter-first). Geography
 (city / state / zip / address / phone) comes from the NPPES enrichment of each
 entity's NPIs — the join keys for matching against a user's own contact list.
-WEBSITE ships as an always-empty column for template consistency: neither MRFs
-nor NPPES publish websites, so it is left for the user's own list to fill.
+WEBSITE carries a website you verified for any of the org's tax IDs (neither
+MRFs nor NPPES publish one); WEBSITE_LOOKUP is a search link to find one.
 
 Per-code merge fields let a template say "your 97110 sits at the 32nd
-percentile in this market": C{code}_RATE (entity median), C{code}_MKT_MEDIAN,
-C{code}_PCTL (share of entities at or below), C{code}_GAP_TO_MEDIAN.
+percentile in this market": C{code}_RATE (entity median), C{code}_MKT_MEDIAN
+(the median of the OTHER organizations), C{code}_PCTL (mid-rank among the
+other organizations), C{code}_GAP_TO_MEDIAN.
 """
 
 from __future__ import annotations
@@ -106,8 +107,8 @@ OUTREACH_COLUMNS_NOTE = (
     "Benchmark, Leads and Markets:\n"
     "  C<code>_RATE: the organization's rate = median across its tax IDs of each "
     "tax ID's median rate.\n"
-    "  C<code>_MKT_MEDIAN: the median of that rate over every organization in "
-    "this export priced on the code.\n"
+    "  C<code>_MKT_MEDIAN: the median of that rate over the OTHER organizations in "
+    "this export priced on the code (Benchmark's and Leads' market median).\n"
     "  C<code>_PCTL: the organization's mid-rank among the OTHER organizations "
     "in this export (those below, plus half of those paid the same) — paid the "
     "same as everyone = 50; blank when no other organization is priced on the code.\n"
@@ -201,14 +202,11 @@ def build_outreach_rows(store: Store, rel_sql: str, params: list,
         log.info("outreach export: limiting to the %d most-covered codes of %d "
                  "(pass explicit codes to choose)", MAX_CODE_COLUMNS, n_codes_total)
 
-    def market_median(code: str) -> float | None:
-        vals = sorted(by_code.get(code, {}).values())
-        if not vals:
-            return None
-        mid = len(vals) // 2
-        return half_up((vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2), 2)
-
-    medians = {c: market_median(c) for c in wanted}
+    # each practice's market median is the median of the OTHER practices
+    # (leads.median_of_others — Benchmark's and Leads' rule; review 10 item
+    # 3.9: one median for the column included the practice itself)
+    from .leads import median_of_others
+    raw_sorted = {c: sorted(by_code.get(c, {}).values()) for c in wanted}
     # each code's rates (to the cent, as leads.MIDRANK_PCT compares them)
     # sorted ONCE: the mid-rank is two binary searches. Counting per practice
     # per code was quadratic — one state's export (5,700 practices) spent
@@ -259,7 +257,8 @@ def build_outreach_rows(store: Store, rel_sql: str, params: list,
             # mid-rank among the OTHER organizations (leads.MIDRANK_PCT)
             pctl = (half_up(100.0 * (lo + 0.5 * (hi - lo - 1)) / (len(vals) - 1))
                     if len(vals) > 1 else "")
-            med = medians[c]
+            om = median_of_others(raw_sorted[c], rate)
+            med = half_up(om, 2) if om is not None else None
             row[f"C{c}_RATE"] = half_up(rate, 2)
             row[f"C{c}_MKT_MEDIAN"] = med if med is not None else ""
             row[f"C{c}_PCTL"] = pctl

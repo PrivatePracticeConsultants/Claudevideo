@@ -30,6 +30,7 @@ import logging
 from . import __version__
 from .config import MrfxConfig
 from .sqlfn import modal_zip_of
+from .rounding import signed_pct
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -76,7 +77,8 @@ def _doc(cfg: MrfxConfig, title: str, body: str, footer: str = "") -> str:
 {SPARK_CSS}
  footer {{ margin-top: 34px; border-top: 1px solid #d0d5dd; padding-top: 12px;
           color: #475467; font-size: 11px; white-space: pre-wrap; }}
- @media print {{ body {{ margin: 0; }} }}
+ @page {{ size: landscape; margin: 10mm; }}
+ @media print {{ body {{ margin: 0; max-width: none; }} table {{ font-size: 10.5px; }} th, td {{ padding: 3px 5px; }} * {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }} }}
 </style></head><body>
 {_brand_header(cfg)}
 <h1>{e(title)}</h1>
@@ -219,7 +221,14 @@ def build_prospect_dossier(cfg: MrfxConfig, store: Store, subject: str,
         # Leads list and the per-payer view use. This was a mean stored under
         # this name, so one outlier code swung the dossier but not the list.
         from .benchmark import overall_position
-        facts["median_percentile"] = overall_position(rows)
+        pos = overall_position(rows)
+        # a float like every other surface's median_percentile (Leads 51.0;
+        # 0.7.3 sent 51 here — review 10 group 4)
+        facts["median_percentile"] = None if pos is None else float(pos)
+        # the count the position rests on: the codes it ranks (an all-tied
+        # code is compared but ranks no one — review 10 item 3.11)
+        n_pos = sum(1 for r in rows if r.get("subject_percentile") is not None
+                    and r.get("in_position", True))
         body = "".join(
             f"<tr><td>{e(r['billing_code'])}</td>"
             f"<td class='num'>${(r['subject_rate'] or 0):,.2f}</td>"
@@ -230,7 +239,7 @@ def build_prospect_dossier(cfg: MrfxConfig, store: Store, subject: str,
             f"<td class='num'>{int(r.get('n_peers') or 0):,}</td></tr>"
             for r in low)
         return ("<h2>Where their rates sit</h2>"
-                f"<p>Across {len(rows)} comparable code(s) their median position "
+                f"<p>Across {n_pos} code(s) whose rates differ in their market, their median position "
                 f"is <b>p{facts['median_percentile']:g}</b> against their market. "
                 "Weakest lines:</p>"
                 + (f"<p class='note'>{e(scope_note)}</p>" if scope_note else "")
@@ -263,8 +272,11 @@ def build_prospect_dossier(cfg: MrfxConfig, store: Store, subject: str,
             for s in secs[:6])
         facts["weakest_payer"] = secs[0]["payer"]
         return ("<h2>Which payer is weakest for them</h2>"
-                "<p>Ordered weakest first — the contract with the most room:</p>"
-                "<table><thead><tr><th>Payer</th><th class='num'>Their position</th>"
+                "<p>Ordered by their position among each payer's practices, lowest "
+                "first — the contract with the most room. (The Leads list's "
+                "\u201cunderpaid most by\u201d is a different measure: the most "
+                "dollars under the market on the codes all their payers price.)</p>"
+                "<table><thead><tr><th>Payer</th><th class='num'>Their position among this payer's practices</th>"
                 "<th class='num'>Codes below median</th></tr></thead>"
                 f"<tbody>{rows}</tbody></table>")
 
@@ -333,9 +345,13 @@ def build_prospect_dossier(cfg: MrfxConfig, store: Store, subject: str,
     section("Market size", _market)
 
     parts.append(_omitted_html(skipped))
+    # WHEN and WHERE the numbers are from, in words (review 10 item 3.11: the
+    # dossier stated neither month nor market)
+    from .benchmark import market_in_words
     footer = (
         f"Generated {dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} "
-        f"by MRF Explorer v{__version__}.\n{DOSSIER_NOTE}")
+        f"by MRF Explorer v{__version__}. Market: "
+        f"{market_in_words({'month': 'latest', **market})}.\n{DOSSIER_NOTE}")
     title = f"Practice profile — {facts.get('display_name') or subject}"
     return {"subject": subject, "html": _doc(cfg, title, "\n".join(parts), footer),
             "facts": facts, "skipped": skipped, "note": DOSSIER_NOTE}
@@ -381,7 +397,7 @@ def build_market_report(cfg: MrfxConfig, store: Store, *, state: str,
         rows = "".join(
             f"<tr><td>{e(c['city'].title())}</td>"
             f"<td class='num'>${c['median_rate']:,.2f}</td>"
-            f"<td class='num'>{'' if c['vs_state_pct'] is None else ('%+.1f%%' % c['vs_state_pct'])}</td>"
+            f"<td class='num'>{'' if c['vs_state_pct'] is None else signed_pct(c['vs_state_pct'])}</td>"
             f"<td class='num'>{c['n_practices']:,}</td></tr>" for c in r["cities"][:15])
         return (f"<h2>What {e(code)} pays across {e(st)}</h2>"
                 f"<p>{e(r['headline'])}</p>"
@@ -485,9 +501,11 @@ def build_market_report(cfg: MrfxConfig, store: Store, *, state: str,
         f"<p class='note'>As of: {e(asof)}. {e(BASIS_NOTE)}</p>"
         "<p class='note'>Rate files in the store: "
         + e("; ".join(f"{f[0]} ({f[1]}, {f[2]})" for f in files) or "none") + ".</p>")
+    from .benchmark import market_in_words
     footer = (
         f"Generated {dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} "
-        f"by MRF Explorer v{__version__}. As of {asof}.\n{DOSSIER_NOTE}")
+        f"by MRF Explorer v{__version__}. As of {asof}. Market: {market_in_words(m)}.\n"
+        + DOSSIER_NOTE.replace("this dossier", "this report"))
     return {"state": st, "code": code,
             "html": _doc(cfg, f"Therapy market report — {st}",
                          "\n".join(parts), footer),

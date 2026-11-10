@@ -44,11 +44,30 @@ def add_client(store: Store, subject: str) -> list[str]:
         raise BenchmarkError("type a practice (entity name, TIN, or NPI) to add")
     if len(subject) > 200:
         raise BenchmarkError("that doesn't look like a practice name/TIN/NPI")
+    # a name that matches no practice was saved and then reported as "no
+    # longer matches" — it never did (review 10 group 4). Refuse it now.
+    from .benchmark import resolve_subject_tins
+    tins = resolve_subject_tins(store, subject)   # falls back to the text itself
+    with store.connect() as con:
+        known = tins and con.execute(
+            "SELECT 1 FROM tin_directory WHERE tin_value IN (SELECT unnest(?::VARCHAR[])) "
+            "LIMIT 1", [tins]).fetchone()
+    if not known:
+        raise BenchmarkError(
+            f"no practice in the store matches {subject!r} — check the spelling, "
+            "or use its tax ID or an NPI")
+    _save_client(store, subject)
+    return watchlist(store)
+
+
+def _save_client(store: Store, subject: str) -> None:
+    """Write one watchlist row (no matching check — add_client's caller has
+    done it; tests use this to plant a client whose practice later stopped
+    matching, e.g. after a store reset)."""
     with store.write_lock, store.connect() as con:
         _ensure_table(con)
         con.execute("INSERT OR REPLACE INTO client_watchlist VALUES (?, ?)",
                     [subject, dt.datetime.now(dt.timezone.utc)])
-    return watchlist(store)
 
 
 def remove_client(store: Store, subject: str) -> list[str]:

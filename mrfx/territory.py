@@ -102,35 +102,47 @@ def local_rate_map(store: Store, code: str, market: dict, *,
     where, params = _market_where(m, bool(m.get("include_assistant")),
                                   bool(m.get("include_non_dollar")))
     rel = _rates_relation(m)
-    sql = f"""
-    WITH base AS (
-        SELECT t.tin_value, any_value(td.cities) AS cities,
-               median(t.negotiated_rate) AS rate
-        FROM {rel} t JOIN tin_directory td USING (tin_value)
-        WHERE {where} AND td.cities IS NOT NULL AND len(td.cities) > 0
+    # A practice's cities IN THIS STATE: the cities of its own NPIs located in
+    # the state (NPPES). tin_directory.cities is every city of a TIN with ANY
+    # location in the state, so "Therapy market report — ND" read "Within ND,
+    # Tampa pays 8.1% more than Tuscaloosa" — 10 of its 12 cities had no
+    # provider in ND (review 10 item 2.1)
+    cities_cte = f"""
+    base AS (
+        SELECT t.tin_value, median(t.negotiated_rate) AS rate
+        FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
+        WHERE {where}
         GROUP BY t.tin_value
     ),
     exploded AS (
-        SELECT upper(trim(unnest(cities))) AS city, tin_value, rate FROM base
-    )
+        SELECT DISTINCT upper(trim(n.city)) AS city, r.tin_value
+        FROM (SELECT DISTINCT tin_value, npi FROM rates
+              WHERE tin_value IN (SELECT tin_value FROM base) AND npi IS NOT NULL) r
+        JOIN npi_directory n ON n.npi = r.npi
+        WHERE n.state = ? AND coalesce(trim(n.city), '') <> ''
+    )"""
+    sql = f"""
+    WITH {cities_cte}
     SELECT city,
            count(DISTINCT tin_value)          AS n_practices,
            round(median(rate), 2)             AS median_rate,
            round(quantile_cont(rate, .25), 2) AS p25,
            round(quantile_cont(rate, .75), 2) AS p75
-    FROM exploded
-    WHERE city <> ''
+    FROM exploded JOIN base USING (tin_value)
     GROUP BY city
     HAVING count(DISTINCT tin_value) >= ?
     -- city breaks the tie: two cities on the same median must not swap places
     -- between refreshes (DuckDB scans in parallel, so a tied ORDER BY is
     -- returned in whichever order finished first)
     ORDER BY median_rate DESC, city
-    LIMIT ?
     """
     with store.connect() as con:
-        cur = con.execute(sql, [*params, MIN_CELL, int(limit)])
-        rows = [dict(zip([d[0] for d in cur.description], r)) for r in cur.fetchall()]
+        cur = con.execute(sql, [*params, st, MIN_CELL])
+        every = [dict(zip([d[0] for d in cur.description], r)) for r in cur.fetchall()]
+        # the headline compares the best- and the worst-paying city of ALL that
+        # qualify; the list shown is cut at `limit` (it compared the first
+        # city with the 60th when more qualified)
+        rows = every[:int(limit)]
         ref = con.execute(f"""
             WITH base AS (
                 SELECT t.tin_value, median(t.negotiated_rate) AS rate
@@ -138,15 +150,10 @@ def local_rate_map(store: Store, code: str, market: dict, *,
                 WHERE {where} GROUP BY t.tin_value)
             SELECT round(median(rate), 2), count(*) FROM base""", params).fetchone()
         suppressed = con.execute(f"""
-            WITH base AS (
-                SELECT t.tin_value, any_value(td.cities) AS cities
-                FROM {rel} t JOIN tin_directory td USING (tin_value)
-                WHERE {where} AND td.cities IS NOT NULL AND len(td.cities) > 0
-                GROUP BY t.tin_value),
-            exploded AS (SELECT upper(trim(unnest(cities))) AS city, tin_value FROM base)
+            WITH {cities_cte}
             SELECT count(*) FROM (
-                SELECT city FROM exploded WHERE city <> '' GROUP BY city
-                HAVING count(DISTINCT tin_value) < ?)""", [*params, MIN_CELL]).fetchone()[0]
+                SELECT city FROM exploded GROUP BY city
+                HAVING count(DISTINCT tin_value) < ?)""", [*params, st, MIN_CELL]).fetchone()[0]
 
     state_median = ref[0]
     for r in rows:
@@ -154,9 +161,9 @@ def local_rate_map(store: Store, code: str, market: dict, *,
                                    / state_median, 1)
                              if state_median else None)
     spread = None
-    if len(rows) >= 2:
-        spread = half_up(100.0 * (rows[0]["median_rate"] - rows[-1]["median_rate"])
-                       / rows[-1]["median_rate"], 1) if rows[-1]["median_rate"] else None
+    if len(every) >= 2:
+        spread = half_up(100.0 * (every[0]["median_rate"] - every[-1]["median_rate"])
+                         / every[-1]["median_rate"], 1) if every[-1]["median_rate"] else None
     return {
         "code": code, "description": code_info(code)[0], "state": st,
         "as_of": month_label(m["month"]),
@@ -165,9 +172,9 @@ def local_rate_map(store: Store, code: str, market: dict, *,
         "suppressed_cities": suppressed, "min_practices": MIN_CELL,
         "spread_pct": spread,
         "headline": (
-            f"Within {st}, {rows[0]['city'].title()} pays {spread:g}% more than "
-            f"{rows[-1]['city'].title()} for {code}."
-            if spread and len(rows) >= 2 else
+            f"Within {st}, {every[0]['city'].title()} pays {spread:g}% more than "
+            f"{every[-1]['city'].title()} for {code}."
+            if spread and len(every) >= 2 else
             f"Not enough cities in {st} with {MIN_CELL}+ practices to compare."
             if not rows else f"{len(rows)} city market(s) in {st}."),
         "note": LOCAL_NOTE,
@@ -595,7 +602,9 @@ def radius_rate_map(store: Store, code: str, market: dict, *,
             f"No meaningful distance effect for {code} within {max_miles:g} "
             f"miles of {zip_code}."
             if len(usable) >= 2 else
-            f"Only {len(usable)} distance band around {zip_code} has "
-            f"{MIN_CELL}+ practices — too thin to compare."),
+            (f"No distance band around {zip_code} has {MIN_CELL}+ practices — "
+             "too thin to compare." if not usable else
+             f"Only one distance band around {zip_code} has "
+             f"{MIN_CELL}+ practices — too thin to compare.")),
         "note": RADIUS_NOTE,
     }
