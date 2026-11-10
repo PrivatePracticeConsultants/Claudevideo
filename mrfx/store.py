@@ -1397,25 +1397,59 @@ class Store:
         Python function the parser calls: the modifier rule (mrfx/modifiers.py)
         over (billing_code, billing_code_modifier, service_code), the month
         rule (parser.file_month_for) over (last_updated_on, source_file, the
-        month of ingested_at). The distinct inputs of a part are few (hundreds),
-        so only rows whose inputs change are rewritten, via a hash join. Each
-        part is swapped atomically through finalize_rates_part, which queues its
-        payers and TINs for the next incremental rollup. A part that can't be
-        read or written is left as it was and retried at the next start."""
+        month of ingested_at), the negotiated-type spelling
+        (parser.normalize_negotiated_type). Only rows whose inputs change are
+        rewritten, via a hash join; each part is swapped atomically through
+        finalize_rates_part, which queues its payers and TINs for the next
+        incremental rollup. A part that can't be read or written is left as
+        it was and retried at the next start.
+
+        It runs BEFORE the dashboard opens, so it must be fast and must say
+        what it is doing: 0.7.1 ran every rule over every part one by one and
+        logged nothing until the end — on a store of many files on an external
+        drive the program sat silent after "analytics memory budget" for many
+        minutes, which reads as a hang. Files already at rules 2 now need only
+        the rule-3 check, answered for ALL of them by one narrow scan of two
+        columns; only parts that actually change are rewritten (each logged),
+        and progress is logged every 15 s."""
         log = logging.getLogger(__name__)
         try:
             with self.connect() as con:
-                todo = [r[0] for r in con.execute(
-                    "SELECT filename FROM files WHERE coalesce(row_rules, 0) < ? "
-                    "ORDER BY filename", [ROW_RULES_VERSION]).fetchall()]
+                todo = con.execute(
+                    "SELECT filename, coalesce(row_rules, 0) FROM files "
+                    "WHERE coalesce(row_rules, 0) < ? ORDER BY filename",
+                    [ROW_RULES_VERSION]).fetchall()
         except Exception as e:  # noqa: BLE001 — never block the app from opening
             log.warning("row-rules check skipped (%s)", e)
             return
         if not todo:
             return
         t0 = time.monotonic()
-        fixed = rows_fixed = 0
-        for name in todo:
+        log.info("one-time update of %d stored file(s) to this version's rules — the "
+                 "dashboard opens as soon as it is done (progress below)", len(todo))
+        tick = [t0]
+
+        def progress(done: int) -> None:
+            if time.monotonic() - tick[0] >= 15:
+                tick[0] = time.monotonic()
+                log.info("  … %d of %d files checked (%.0f s)", done, len(todo),
+                         tick[0] - t0)
+
+        fixed = rows_fixed = done = 0
+        # files at rules 2: only the type-spelling rule is new for them
+        recent = [n for n, r in todo if r >= 2]
+        if recent:
+            try:
+                f, n_rows = self._migrate_types_only(recent, progress)
+                fixed += f
+                rows_fixed += n_rows
+            except Exception as e:  # noqa: BLE001 — never block the app from opening
+                log.warning("could not update the stored rows to the current rules "
+                            "(%s) — they are unchanged; will retry at the next start", e)
+            done = len(recent)
+        for name, _r in todo:
+            if _r >= 2:
+                continue
             try:
                 n = self._normalize_part(name)
             except Exception as e:  # noqa: BLE001 — one bad part never blocks the rest
@@ -1423,14 +1457,105 @@ class Store:
                             "(%s) — its rows are unchanged; will retry at the next start",
                             name, e)
                 continue
+            finally:
+                done += 1
+                progress(done)
             if n:
                 fixed += 1
                 rows_fixed += n
-        if fixed:
-            log.info("updated %s stored row(s) in %d file(s) to the current rules "
-                     "(modifier / place-of-service fields, future-dated months, 'fee_schedule' spelling) in "
-                     "%.0f s — one time; see the Files tab's data-quality line",
-                     f"{rows_fixed:,}", fixed, time.monotonic() - t0)
+        log.info("stored rows are up to date: %d file(s) checked, %s row(s) in %d file(s) "
+                 "rewritten (modifier / place-of-service fields, future-dated months, "
+                 "'fee_schedule' spelling) in %.0f s — one time",
+                 len(todo), f"{rows_fixed:,}", fixed, time.monotonic() - t0)
+
+    def _migrate_types_only(self, names: list[str], progress) -> tuple[int, int]:
+        """Rule 3 for files already at rules 2: ONE scan of (negotiated_type,
+        is_dollar_rate) across their parts, a rewrite only where a stored
+        spelling changes, then one batched files update. Returns (files
+        rewritten, rows rewritten)."""
+        from .config import DOLLAR_TYPES
+        from .parser import normalize_negotiated_type
+        log = logging.getLogger(__name__)
+        by_path = {}
+        for name in names:
+            path = self.rates_dir / f"{file_key(name)}.parquet"
+            if path.exists():
+                by_path[str(path)] = name
+        types: dict[str, list] = {}
+        if by_path:
+            with self.connect() as con:
+                rows = con.execute(
+                    "SELECT DISTINCT filename, negotiated_type, is_dollar_rate "
+                    "FROM read_parquet(?, filename = true, union_by_name = true)",
+                    [sorted(by_path)]).fetchall()
+            for f, t, d in rows:
+                name = by_path.get(str(f)) or by_path.get(str(Path(f)))
+                if name is not None:
+                    types.setdefault(name, []).append((t, d))
+        fixed = rows_fixed = 0
+        ok: list[str] = []
+        for i, name in enumerate(names, 1):
+            type_map = []
+            for old_t, old_d in types.get(name, []):
+                new_t = normalize_negotiated_type(old_t)
+                new_d = new_t in DOLLAR_TYPES
+                if old_t is not None and (new_t != old_t or bool(old_d) != new_d):
+                    type_map.append((old_t, new_t, new_d))
+            if type_map:
+                path = self.rates_dir / f"{file_key(name)}.parquet"
+                log.info("  rewriting %s (%s)", name, ", ".join(
+                    f"{o!r} -> {n!r}" for o, n, _d in type_map))
+                try:
+                    n = self._rewrite_part(name, f"read_parquet('{sql_path(path)}')",
+                                           [], [], "", type_map, keep_qa=True)
+                except Exception as e:  # noqa: BLE001 — one bad part never blocks the rest
+                    log.warning("could not update the stored rows of %s to the current "
+                                "rules (%s) — its rows are unchanged; will retry at the "
+                                "next start", name, e)
+                    continue
+                fixed += 1
+                rows_fixed += n
+            ok.append(name)
+            progress(i)
+        self._finish_rules(ok)
+        return fixed, rows_fixed
+
+    def _finish_rules(self, names: list[str]) -> None:
+        """Stamp files as on the current rules, in ONE transaction, and flag
+        those an older arrangement rule may have trimmed: items excluded as
+        "bundled" before rule 3 may have been "fee for service" spelled out —
+        they were never stored, so only a re-ingest can tell (the Files tab
+        says so)."""
+        if not names:
+            return
+        with self.write_lock, self.connect() as con:
+            rows = con.execute(
+                "SELECT filename, qa FROM files WHERE coalesce(row_rules, 0) < 3 "
+                "AND filename IN (SELECT unnest(?::VARCHAR[])) AND qa LIKE '%bundled_items%'",
+                [names]).fetchall()
+            flags = []
+            for name, raw in rows:
+                try:
+                    qa = json.loads(raw)
+                except (TypeError, ValueError):
+                    continue
+                if isinstance(qa, dict) and (qa.get("bundled_items") or 0) > 0:
+                    qa["reingest_suggested"] = (
+                        f"{qa['bundled_items']:,} item(s) were left out as bundle/capitation "
+                        "by an older version, which also read a spelled-out "
+                        "\"fee for service\" that way — re-ingest this file to check")
+                    flags.append((json.dumps(qa), name))
+            con.execute("BEGIN")
+            try:
+                if flags:
+                    con.executemany("UPDATE files SET qa = ? WHERE filename = ?", flags)
+                con.execute("UPDATE files SET row_rules = ? "
+                            "WHERE filename IN (SELECT unnest(?::VARCHAR[]))",
+                            [ROW_RULES_VERSION, names])
+                con.execute("COMMIT")
+            except BaseException:
+                con.execute("ROLLBACK")
+                raise
 
     def _normalize_part(self, name: str) -> int:
         """One file's part -> the current row rules. Returns rows changed."""
@@ -1477,26 +1602,8 @@ class Store:
                 changed_rows = self._rewrite_part(name, src, mod_map, month_map,
                                                   months.get("future_header_date", ""),
                                                   type_map)
+        self._finish_rules([name])
         with self.write_lock, self.connect() as con:
-            # items excluded as "bundled" by a build before rule 3 may have
-            # been "fee for service" spelled out — they were never stored, so
-            # only a re-ingest can tell: say so on the Files tab
-            raw = con.execute("SELECT qa, coalesce(row_rules, 0) FROM files "
-                              "WHERE filename = ?", [name]).fetchone()
-            if raw and raw[1] < 3 and raw[0]:
-                try:
-                    qa = json.loads(raw[0])
-                except ValueError:
-                    qa = None
-                if isinstance(qa, dict) and (qa.get("bundled_items") or 0) > 0:
-                    qa["reingest_suggested"] = (
-                        f"{qa['bundled_items']:,} item(s) were left out as bundle/capitation "
-                        "by an older version, which also read a spelled-out "
-                        "\"fee for service\" that way — re-ingest this file to check")
-                    con.execute("UPDATE files SET qa = ? WHERE filename = ?",
-                                [json.dumps(qa), name])
-            con.execute("UPDATE files SET row_rules = ? WHERE filename = ?",
-                        [ROW_RULES_VERSION, name])
             if months:
                 con.execute("UPDATE files SET file_month = coalesce(file_month, ?), "
                             "published_month = coalesce(published_month, ?) "
@@ -1505,7 +1612,8 @@ class Store:
         return changed_rows
 
     def _rewrite_part(self, name: str, src: str, mod_map: list, month_map: list,
-                      future_header: str, type_map: list | None = None) -> int:
+                      future_header: str, type_map: list | None = None,
+                      keep_qa: bool = False) -> int:
         tmp = self.rates_dir / f".{file_key(name)}.{os.getpid()}.parquet.tmp"
         # hash joins on the rules' inputs — measured 12 s for a 13.5M-row part
         # vs 50 s for a per-row map lookup
@@ -1565,7 +1673,7 @@ class Store:
                 qa = json.loads(raw[0]) if raw and raw[0] else {}
             except ValueError:
                 qa = {}
-            if isinstance(qa, dict):
+            if isinstance(qa, dict) and not keep_qa:
                 qa["modifier_split_rows"] = int(split_rows)
                 qa["pos_in_modifier_rows"] = int(moved_rows)
                 qa["future_header_date"] = future_header

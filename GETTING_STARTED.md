@@ -1025,6 +1025,17 @@ Downloads and files:
 - **"fee for service" / "fee_schedule"** spelled differently by a payer no
   longer drop rates.
 
+## Version 0.7.2 — start-up fix
+
+0.7.1 updated the stored rows of every file once, at the first start, before
+the dashboard opened — and printed nothing while it worked. On a big store it
+sat after the "analytics memory budget" line for a long time, which looked
+like a hang. 0.7.2 does the same update in about a second for most stores
+(measured: 2,000 files, 94 s → 0.9 s), only rewrites the files whose rows
+actually change, and prints what it is doing:
+`one-time update of N stored file(s)…`, a progress line every 15 seconds,
+and `stored rows are up to date…` when it is done.
+
 ## What changed in the November 2026 (audit 8) update — version 0.7.1
 
 Downloads:

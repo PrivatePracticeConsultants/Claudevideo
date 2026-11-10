@@ -250,3 +250,33 @@ def test_pooled_worker_paths_agree(cfg, store, monkeypatch, big):
     finally:
         set_parse_pool(None)
         pool.shutdown_now()
+
+
+def test_rule3_migration_rewrites_only_what_changes_and_says_so(cfg, store, caplog):
+    # 0.7.1 ran every rule over every part one by one before the dashboard
+    # opened and logged nothing until the end: on a big store the program sat
+    # silent after "analytics memory budget" for many minutes. A file already
+    # at rules 2 now needs one narrow scan; only a changed part is rewritten.
+    import logging
+    cfg.move_processed = False
+    for i in range(6):
+        ingest_file(cfg, store, put(cfg, f"acme{i}_2026-05.json", _doc(40.0 + i)))
+    target = store.rates_dir / f"{S.file_key('acme3_2026-05.json')}.parquet"
+    with store.connect() as con:
+        con.execute(f"COPY (SELECT * REPLACE ('fee_schedule' AS negotiated_type, false AS "
+                    f"is_dollar_rate) FROM read_parquet('{S.sql_path(target)}')) TO "
+                    f"'{S.sql_path(target.with_suffix('.old'))}' (FORMAT parquet)")
+        con.execute("UPDATE files SET row_rules = 2")
+    target.with_suffix(".old").replace(target)
+    before = {p.name: p.stat().st_mtime_ns for p in store.rates_dir.glob("*.parquet")}
+    with caplog.at_level(logging.INFO, logger="mrfx.store"):
+        st2 = S.Store(cfg.store_dir)
+    text = caplog.text
+    assert "one-time update of 6 stored file(s)" in text
+    assert "rewriting acme3_2026-05.json ('fee_schedule' -> 'fee schedule')" in text
+    assert "stored rows are up to date: 6 file(s) checked, 1 row(s) in 1 file(s)" in text
+    after = {p.name: p.stat().st_mtime_ns for p in st2.rates_dir.glob("*.parquet")}
+    assert [n for n in before if before[n] != after.get(n)] == [target.name]
+    assert q(st2, "SELECT DISTINCT row_rules FROM files") == [(S.ROW_RULES_VERSION,)]
+    assert q(st2, "SELECT negotiated_type, is_dollar_rate FROM rates WHERE negotiated_rate = 43") == [
+        ("fee schedule", True)]
