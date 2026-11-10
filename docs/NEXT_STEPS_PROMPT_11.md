@@ -73,7 +73,25 @@ and work the pipeline does twice.
 
 ## Group 1 — silently wrong or missing data (P1)
 
-_(filled from the download and ingest passes — pending)_
+_(download and ingest passes — pending)_
+
+### 1.1 (P1, Windows) The download's final rename has no lock tolerance, and its failure path discards the complete `.part` (throughput `FINDINGS.md` finding 2 — code read, confidence high on the path, medium on how often AV holds the handle)
+- `fetch.py:1004-1005` (`part.replace(dest)`), `:1798` (`_write_meta`'s
+  rename). A `PermissionError` (antivirus / indexer holding the file
+  without FILE_SHARE_DELETE — the code itself calls this "routine" at
+  `ingest.py:396-401` and `store.py:246-250`) escapes
+  `_download_reserved` / `fetch_url_record` (`:2168-2176`) to the
+  downloader's `except BaseException` (`:2896-2906`) → "failed: unexpected
+  download error", a manual retry; the retry sends `Range: bytes=<total>-`
+  → 416 → `fetch.py:762-769` unlinks the .part and restarts from byte 0
+  (and a Range-ignoring host restarts from 0 after three refusals).
+- Fix: `replace_with_retry` / `unlink_with_retry` (the store already has
+  them) at both renames; on a 416 for a `.part` whose size equals the
+  known total, treat the file as complete (hash it) instead of discarding
+  it. Then the same for the raw `dest.unlink` calls listed in Group 4.4(a):
+  a locked file there raises into the processor's `except BaseException`
+  (`fetch.py:3047-3058`), which overwrites a correct `skipped`/`done` row
+  with "failed: unexpected worker error".
 
 ### 1.x A republished file under the same URL is never fetched again (seams `stale_reuse.py`, `refresh_static_children.py`)
 - `fetch_url_record` reuses `dest` + `.fetchmeta` without asking the server
@@ -219,7 +237,75 @@ FINDINGS (it is the one place the whole machine is written down).
 
 ## Group 3 — waste measured (P2)
 
-_(filled from the download, ingest and throughput passes — pending)_
+_(download and ingest passes — pending)_
+
+**Where a realistic queue spends its time** (throughput `FINDINGS.md` §1,
+`throughput/queue_timeline.py default_warm`; 27 files, 753 MB gz, 32.0 M
+rows, 3 parser workers, 6 downloaders; ±15 % — other reviewers' tests ran
+on the same 4-core box): wall 163.6 s. Downloads + parses t = 0 → 78.6 s
+(sum download 14.3 s, sum ingest 224.5 s over 3 workers, parsers starved
+≤ 1 s); then the idle-triggered rollup: `update_rollups_incremental`
+raises on a fresh store ("built by an older version (or never built)") →
+full `rebuild_rollups` **85.0 s** (t = 78.6 → 163.6). The main process
+read 6.2–7.7 GB for 191 MB of parquet parts. What moves: only
+`parallel_ingests` (ingests done at 156 / 90 / 78 s for 1 / 2 / 3
+workers); `parallel_downloads` 1 / 2 / 6, lanes, `early_dedup_mb`,
+`delete_raw_after_ingest` are all within noise. A second wave of 14 files
+from 7 never-seen payers onto the finished store: 80.6 s, incremental
+rollup 41.1 s, no fallback.
+
+**Per byte, one real 118.7 MB gz** (wy_710, 1.11 GB inflated, 1.76 M rows,
+under strace; §2): download 4.75 s, ingest 9.8 s, rollup 2.5 s; the file
+is read once and inflated once by the worker (rchar 184 MB = 1.55× the
+file; the rest is head/tail/window fingerprinting, done twice — 3.4); 4
+`url_progress` UPDATEs per download; 83 fsyncs, WAL ≤ 1.8 MB, no
+checkpoint stall. Memory: workers 548–786 MB VmHWM (single-read big file
+748 MB); main 3.2–3.6 GB during the full rollup, 4.4 GB when a rollup
+overlaps ingest. Invariants 1 and 2 hold.
+
+### 3.1 (P1) The analytics rollup doubles a fresh grind and reads the store ~35× (throughput finding 1)
+- `fetch.py:2820-2870` (`rebuild_now`), `store.py:3907`
+  (`update_rollups_incremental` precondition: a prior full build),
+  `store.py:4181-4510` (the build).
+- Numbers above: 78 s of parsing, then a 62–85 s serial tail (45–52 % of
+  wall) at ≈ 2.3 s per million rows, nothing else running; with 1 worker
+  the end-of-grind incremental for all-new payers (73.6 s) costs as much
+  as a full one. Overlapping rebuilds mid-grind (`ROLLUP_MAX_STALE_SECONDS
+  = 20` experiment) cut wall only 5 % and slowed the parsers 28 %.
+- Fix: the designed single-pass `COPY … PARTITION_BY` build (AI_HANDOFF
+  C1); on an EMPTY store skip the incremental attempt and go straight to
+  the full build; measure s/M rows before and after on this fixture.
+
+### 3.2 (P2) The CLI drain path opens the store without `keep_warm`: 12.6 ms per connection, `write_lock` held 14.9 % of wall (throughput finding 3)
+- `cli.py:415` (`mrfx add` with no dashboard), `:543` (`mrfx ingest`).
+  `url_progress` 19.3 ms vs 1.2 ms pinned (236 ms each under contention);
+  57 s of lock waits over the 27-file drain (6 % per downloader thread;
+  longest wait 433 ms) vs ≤ 1 % and 79 ms in serve mode.
+- Fix: `keep_warm=True` on every long-running CLI path.
+
+### 3.3 (P2, Windows) `finalize_rates_part` holds `write_lock` through `replace_with_retry`'s ~90 s loop (throughput finding 4)
+- `store.py:2370-2375` + `:245-262`: while an export or antivirus holds the
+  old part, every claim and status write blocks for up to 90 s.
+- Fix: retry outside the lock, or park the swap after ~2 s
+  (`_retry_pending_part_ops` already exists for that).
+
+### 3.4 (P3) The fingerprint head is read three times per file (throughput finding 11)
+- `_record_download_fingerprint` after the download and `_finish_ok` after
+  the ingest both fingerprint the same bytes (≈ 17 MB each; ~35 MB/file).
+  `early_dedup_mb=0` cut the main process's reads 6.2 → 5.1 GB on the
+  27-file run. Fix: carry the download's fingerprint to `_finish_ok`
+  (`DOWNLOAD_IDENTITY` already carries the sha).
+
+### 3.5 (P2) Parser workers survive a hard kill of the main process and never exit (throughput finding 7, §4 C)
+- `_parse_worker` probes the parent only inside `report_chunk`
+  (`ingest.py:605-626`): after SIGKILL of `mrfx serve`, 3 idle workers
+  stayed alive at PPID 1, ~220 MB each, 10+ min and counting. On Windows:
+  Task Manager "End task" and the supervisor's `proc.terminate()`
+  (`cli.py:1822`) leave them too; only closing the console ends them. Clean
+  shutdowns terminated workers 9/9.
+- Fix: a parent-liveness watchdog thread in the worker (`prctl
+  PR_SET_PDEATHSIG` on Linux, a Job Object with KILL_ON_JOB_CLOSE on
+  Windows, else poll `os.getppid()` every few seconds).
 
 ### 3.x (P3) A kill between `part.replace(dest)` and `_write_meta` re-downloads a complete file (seams `dest_no_sidecar.py`)
 - Complete `dest`, no sidecar → one full GET, 22,632 of 22,632 bytes. The
@@ -248,11 +334,60 @@ _(filled from the download, ingest and throughput passes — pending)_
   30-file drain → 1). Bounded by the rebuild's own duration. Optional: apply
   the floor to idle-triggered rebuilds except on drain exit / shutdown.
 
-### 4.4 Stale prose
+### 4.4 Windows read (throughput `FINDINGS.md` "Windows read", each with its confidence)
+- (a) Raw `dest.unlink` / rename after a row is already terminal:
+  `fetch.py:2428-2429, 2437-2438, 2459, 2495, 2502, 2512, 2563, 2579,
+  2602-2603, 2639-2640` — a locked file raises into the processor's
+  `except BaseException` and overwrites a correct row (see 1.1). Handled
+  correctly already: `ingest.py:632, 404/407, 556-563`, `store.py:2379-2418,
+  1916-1940, 4583-4597, 5050`, `api.py:1761/2562`, `fetch.py:2278-2279,
+  2679-2682`.
+- (b) No `fsync` anywhere: a power loss (not a process kill) can leave a
+  truncated `.parquet` part under a `done` row — P3, medium confidence.
+  Fix: `os.fsync` the part before the rename that makes it live.
+- (c) `MAX_PATH`: `filename_for` keeps 120 chars + the 9-char hash; with
+  `.part.val` that is 138 past `downloads_dir`; a real UHC name under a
+  ≥ ~120-char project path (`OneDrive\Documents\…` is 91) crosses 260 →
+  WinError 206/3 unless `LongPathsEnabled`. HOW_TO_RUN never mentions the
+  Python installer's "Disable path length limit". Fix: cap the base at
+  ~80 and document the installer option.
+- (d) Outreach CSVs get doubled line endings on Windows: `outreach.py:280-285`
+  emits `\r\n`, `cli.py:846` and `api.py:3701` write via `Path.write_text`
+  → `\r\r\n` (a blank line between rows in Excel / a mail merge). Fix:
+  `write_bytes` or `newline=""`.
+- (e) Updater while the server runs: pip over a loaded `.pyd` fails and
+  `updater.py:150-165` blames "no internet"; no port probe. Fix: probe the
+  port first and say "close MRF Explorer first".
+- (f) Ctrl-C on a busy grind prints tracebacks: `cmd_serve`'s finally
+  (`cli.py:320-328`) terminates workers while processors are in
+  `dispatch_and_wait` → BrokenProcessPool → heal → resubmit → "cannot
+  schedule new futures after interpreter shutdown" (`ingest.py:874-879,
+  447`); state recovers on restart. Fix: a shutting-down flag → return
+  `requeued`.
+- (g) Console encoding: the .bat sets PYTHONUTF8 and the supervisor passes
+  it; only `mrfx serve` with REDIRECTED output and no env var crashes on
+  the "→" banner (`cli.py:298`) — P3.
+- (h) Monotonic clocks count through sleep on Windows (low confidence): a
+  lid close > 240 s trips a benign park on wake, > 600 s the stall error
+  for that attempt; the 3600 s cap cannot fire from sleep alone.
+- Correct as read: no fcntl / /dev/shm / fork; `_pid_alive` Windows branch
+  and `getppid` handling; `multiprocessing` spawn with a guarded
+  `__main__`, cfg/strings only pickled, `terminate()` on heal; `dedup_key`
+  lower-cases the host only; `filename_for`'s hash prefix avoids NTFS
+  case collisions; `SO_EXCLUSIVEADDRUSE`; the updater's rollback; the
+  `.bat` UTF-8 env.
+
+### 4.5 Stale prose
 - `Store.url_progress` docstring: "a multi-minute rollup rebuild holds
-  write_lock the whole time" — it does not; `_rebuild_rollups_locked` holds
-  it only for `_register_views` and the swap (seams: read, confirmed by the
-  throughput pass's lock measurements — see Group 3).
+  write_lock the whole time" — it does not; rollups serialize on
+  `rollup_lock` and take `write_lock` only around view DDL
+  (`store.py:3949, 4112, 4295, 4371`); measured held 0.07–1.85 s per
+  rebuild in serve mode (throughput §5).
+- GETTING_STARTED "Making a big queue finish faster" item 1 ("cores − 1,
+  stops at 8"): `_ram_worker_cap` gives 1 worker on 8 GB and 3 on 16 GB;
+  say so. `fetch.py:870` says "1 MB chunk"; it is 64 KB (`:580`). No
+  Defender-exclusion advice for `data/` (medium confidence that it
+  matters).
 - AI_HANDOFF Step 4: replace with the graph (2.0).
 
 ## Checked and found correct — do not re-chase

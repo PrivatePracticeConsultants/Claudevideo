@@ -64,7 +64,7 @@ if __name__ == "__main__":
     if sys.argv[1:2] == ["child"]:
         child(sys.argv[2]); sys.exit(0)
     for mode in ("exit", "hang"):
-        env = dict(os.environ, PYTHONPATH=f"{SITE}:/home/user/Claudevideo", MRFX_R11_KILL=mode)
+        env = dict(os.environ, PYTHONPATH=f"{SITE}:/home/user/Claudevideo", MRFX_R11_KILL=mode, MRFX_R11_FLAG=FLAG)
         p = subprocess.Popen([sys.executable, __file__, "child", mode], env=env,
                              stdout=subprocess.PIPE, stderr=open(LOGS / f"s7_{mode}.err", "w"), text=True)
         # the child must see its own pid as MRFX_R11_PARENT: set after spawn is impossible, so the
