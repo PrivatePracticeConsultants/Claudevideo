@@ -302,13 +302,22 @@ async function initOverview() {
 async function loadOverview(stateCode = "") {
   const out = $("#ov-out");
   out.innerHTML = `<div class="loading">Loading market overview</div>`;
+  // the first overview after a start reads the whole store (10-20 s on a
+  // 100M-rate store): say so, so a slow first paint is not read as a hang
+  // (review 9 item 2.5)
+  const slow = setTimeout(() => {
+    if (out.querySelector(".loading"))
+      out.innerHTML = `<div class="loading">Loading market overview — the first screen after a start reads the whole store and can take up to a minute on a large one; later screens are fast</div>`;
+  }, 4000);
   let d;
   const isFresh = ticket("overview");
   try { d = await api(`/api/overview${stateCode ? `?state=${encodeURIComponent(stateCode)}` : ""}`); }
   catch (e) {
+    clearTimeout(slow);
     if (!isFresh()) return;
     out.innerHTML = `<div class="empty">Couldn't load the overview (${esc(e.message)}).</div>`; return;
   }
+  clearTimeout(slow);
   if (!isFresh()) return;
   if (!d.practices) {
     out.innerHTML = `<div class="empty"><h3>No rates${stateCode ? " in " + esc(stateCode) : ""} yet</h3>Ingest some payer files first, or clear the state filter.</div>`;
@@ -4108,6 +4117,11 @@ async function loadFilesNow() {
     let statusExtra = "";
     if (f.status === "pending_confirmation")
       statusExtra = ` <button class="btn" style="padding:2px 8px;font-size:12px" data-confirm="${esc(f.filename)}">ingest anyway</button>`;
+    // a different file under a loaded name, same payer and month: the user
+    // decides — never blended into every number silently (review 9 4.5)
+    if (f.status === "needs_choice")
+      statusExtra = ` <button class="btn" style="padding:2px 8px;font-size:12px" title="use only this file: the loaded one's rates are replaced by this one's" data-choose="replace" data-file="${esc(f.filename)}">replace</button>`
+        + ` <button class="btn" style="padding:2px 8px;font-size:12px" title="load this file too: both files' rates count toward every number" data-choose="keep" data-file="${esc(f.filename)}">keep both</button>`;
     if (f.status === "processing")
       statusExtra = ` <button class="btn" style="padding:2px 8px;font-size:12px" title="stop processing this file now — nothing from this run is saved; a downloaded link can be retried without downloading again" data-stop-file="${esc(f.filename)}">stop</button>`;
     const inflight = (f.status === "processing" || f.status === "queued") && f.chunks_total > 0;
@@ -4129,6 +4143,12 @@ async function loadFilesNow() {
       <td>${f.status === "processing" || f.status === "queued" ? "" : `<button class="btn forget-btn" title="erase this file's rates and free its disk space (re-add its link or file to get it back)" data-forget="${esc(f.filename)}">remove</button>`}</td>
     </tr>`;
   }).join("");
+  $$("[data-choose]", body).forEach((b) =>
+    b.addEventListener("click", async () => {
+      b.disabled = true;
+      await chooseHeld(b.dataset.file, b.dataset.choose);
+      loadFiles();
+    }));
   $$("[data-confirm]", body).forEach((b) =>
     b.addEventListener("click", async () => {
       b.disabled = true;
@@ -4496,6 +4516,19 @@ function isDollarType(t) {
   return !k || ["negotiated", "fee schedule", "derived"].includes(k);
 }
 
+async function chooseHeld(name, action) {
+  try {
+    const r = await fetch(`/api/files/${encodeURIComponent(name)}/choose`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action }) });
+    if (!r.ok) alert(refusalTextOf(await r.text()) || `could not apply the choice (HTTP ${r.status})`);
+  } catch (e) { alert("could not apply the choice: " + e.message); }
+}
+
+function refusalTextOf(raw) {
+  try { const j = JSON.parse(raw); return j.detail || j.error || raw; } catch (_) { return raw; }
+}
+
 async function uploadFiles(files) {
   const notes = [];   // "already loaded" / "loaded under a new name" (audit 8 P1-B)
   for (const f of files) {
@@ -4509,12 +4542,19 @@ async function uploadFiles(files) {
       let body = {};
       try { body = JSON.parse(raw); } catch (_) { /* not JSON */ }
       if (!r.ok) alert(`upload failed: ${body.detail || body.error || raw || r.status}`);
+      else if (body.status === "needs_choice") {
+        const replace = confirm(`${body.replaces} is already loaded, and ${f.name} is a DIFFERENT file for the same payer and month.\n\nOK = Replace: use only this new file.\nCancel = Keep both: both files count toward every number.`);
+        await chooseHeld(body.filename, replace ? "replace" : "keep");
+        notes.push(replace ? `${body.replaces} is being replaced by this file.`
+                           : `Both files are kept; both count toward every number. You can take either one out on the Files tab.`);
+      } else if (body.status === "duplicate") notes.push(body.note || `${f.name} is already loaded.`);
       else if (body.note) notes.push(body.note);
     } catch (e) { alert(`upload failed: ${e.message}`); }
   }
   // refresh in place — a full page reload dumped the user back on the
   // Explorer tab right after they dropped a file on the Files tab
-  $("#dropzone").innerHTML = `<div class="muted">Uploaded — processing begins shortly.
+  const anyNew = !notes.length || notes.some((n) => !/already (loaded|waiting)/.test(n));
+  $("#dropzone").innerHTML = `<div class="muted">${anyNew ? "Uploaded — processing begins shortly." : "Nothing new to load."}
     Drop more files here.</div>${notes.map((n) => `<div class="warn-text">${esc(n)}</div>`).join("")}`;
   loadFiles();
 }

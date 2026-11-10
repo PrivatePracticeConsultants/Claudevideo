@@ -179,16 +179,7 @@ def clean_digits(v) -> str:
     return _NON_DIGIT_RE.sub("", str(v))
 
 
-def clean_ref_id(v) -> int | None:
-    """Provider_reference id as int. Only integral values pass ("12", 12,
-    12.0): truncating "12.7" to 12 would silently attach those rates to a
-    DIFFERENT provider group, so non-integral numerics count as bad_ref_ids
-    instead."""
-    try:
-        f = float(v)
-    except (TypeError, ValueError):
-        return None
-    return int(f) if f.is_integer() else None
+from .refid import clean_ref_id  # noqa: E402,F401 — one exact rule (review 9 1.4)
 
 
 @dataclass

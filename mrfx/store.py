@@ -497,7 +497,14 @@ FINISHED_NOW = object()
 # is "fee schedule", a dollar rate — parser.normalize_negotiated_type), and
 # files that lost items as "bundled" under the old arrangement rule are
 # flagged for a re-ingest (those items are not in the part to rewrite).
-ROW_RULES_VERSION = 3
+# 4: rule 3 VERIFIED — 0.7.2 stamped a part 3 even when its scan result could
+# not be matched back to it (review 9 item 1.1), so every store it touched is
+# re-checked once; a part is stamped only after its own types were read.
+ROW_RULES_VERSION = 4
+
+# parts per query of the stored-row type check: small enough that the
+# progress line moves on a slow drive, large enough to amortise the query
+_TYPE_SCAN_BATCH = 40
 
 
 # a paused row that is NOT a copy waiting on an earlier row still in flight
@@ -1129,10 +1136,36 @@ class Store:
             parts = list(self.rates_dir.glob("*.parquet"))
         except OSError:
             return []
-        bad = []
+        # Parts verified at an earlier start and unchanged since (same size
+        # and mtime) are not opened again: 2 reads per part at EVERY start
+        # was 4,004 read calls for 2,000 parts before the first log line —
+        # tens of silent seconds on a spinning drive (review 9 item 2.2)
+        seen_p = self.rates_dir / ".verified_parts.json"
+        try:
+            verified = json.loads(seen_p.read_text())
+            if not isinstance(verified, dict):
+                verified = {}
+        except (OSError, ValueError):
+            verified = {}
+        now_ok: dict[str, list] = {}
+        to_check = []
         for p in parts:
             try:
-                size = p.stat().st_size
+                st = p.stat()
+            except OSError:
+                continue
+            if verified.get(p.name) == [st.st_size, st.st_mtime_ns]:
+                now_ok[p.name] = [st.st_size, st.st_mtime_ns]
+            else:
+                to_check.append((p, st))
+        if len(to_check) > 200:
+            logging.getLogger(__name__).info(
+                "checking %d stored rate file(s) that are new or changed since the last "
+                "start…", len(to_check))
+        bad = []
+        for p, st in to_check:
+            try:
+                size = st.st_size
                 if size < 8:
                     bad.append(p)
                     continue
@@ -1142,8 +1175,17 @@ class Store:
                     tail = fh.read(4)
                 if head != b"PAR1" or tail != b"PAR1":
                     bad.append(p)
+                else:
+                    now_ok[p.name] = [st.st_size, st.st_mtime_ns]
             except OSError:
                 continue  # can't read it now (locked/vanishing) — leave it
+        if now_ok != verified:
+            try:
+                tmp = seen_p.with_suffix(".json.tmp")
+                tmp.write_text(json.dumps(now_ok))
+                tmp.replace(seen_p)
+            except OSError:
+                pass       # cosmetic: the next start checks again
         if not bad:
             return []
         quar = self.rates_dir / "corrupt"
@@ -1430,22 +1472,25 @@ class Store:
         tick = [t0]
 
         def progress(done: int) -> None:
-            if time.monotonic() - tick[0] >= 15:
+            if time.monotonic() - tick[0] >= 15 or (done == len(todo) and done > 500):
                 tick[0] = time.monotonic()
                 log.info("  … %d of %d files checked (%.0f s)", done, len(todo),
                          tick[0] - t0)
 
         fixed = rows_fixed = done = 0
+        left: list[str] = []
         # files at rules 2: only the type-spelling rule is new for them
         recent = [n for n, r in todo if r >= 2]
         if recent:
             try:
-                f, n_rows = self._migrate_types_only(recent, progress)
+                f, n_rows, left_recent = self._migrate_types_only(recent, progress)
                 fixed += f
                 rows_fixed += n_rows
+                left += left_recent
             except Exception as e:  # noqa: BLE001 — never block the app from opening
                 log.warning("could not update the stored rows to the current rules "
                             "(%s) — they are unchanged; will retry at the next start", e)
+                left += recent
             done = len(recent)
         for name, _r in todo:
             if _r >= 2:
@@ -1456,6 +1501,7 @@ class Store:
                 log.warning("could not update the stored rows of %s to the current rules "
                             "(%s) — its rows are unchanged; will retry at the next start",
                             name, e)
+                left.append(name)
                 continue
             finally:
                 done += 1
@@ -1463,48 +1509,115 @@ class Store:
             if n:
                 fixed += 1
                 rows_fixed += n
-        log.info("stored rows are up to date: %d file(s) checked, %s row(s) in %d file(s) "
-                 "rewritten (modifier / place-of-service fields, future-dated months, "
-                 "'fee_schedule' spelling) in %.0f s — one time",
-                 len(todo), f"{rows_fixed:,}", fixed, time.monotonic() - t0)
+        if left:
+            # never "up to date" while a file is left (review 9 item 1.1b)
+            log.warning("stored rows: %d of %d file(s) checked, %s row(s) in %d file(s) "
+                        "rewritten in %.0f s; %d file(s) could not be read and keep their "
+                        "stored rows — they are checked again at the next start",
+                        len(todo) - len(left), len(todo), f"{rows_fixed:,}", fixed,
+                        time.monotonic() - t0, len(left))
+        else:
+            log.info("stored rows are up to date: %d file(s) checked, %s row(s) in %d file(s) "
+                     "rewritten (modifier / place-of-service fields, future-dated months, "
+                     "'fee_schedule' spelling) in %.0f s — one time",
+                     len(todo), f"{rows_fixed:,}", fixed, time.monotonic() - t0)
 
-    def _migrate_types_only(self, names: list[str], progress) -> tuple[int, int]:
-        """Rule 3 for files already at rules 2: ONE scan of (negotiated_type,
-        is_dollar_rate) across their parts, a rewrite only where a stored
-        spelling changes, then one batched files update. Returns (files
-        rewritten, rows rewritten)."""
-        from .config import DOLLAR_TYPES
-        from .parser import normalize_negotiated_type
+    def _migrate_types_only(self, names: list[str], progress) -> tuple[int, int, list[str]]:
+        """Rules 3-4 for files already at rules 2: read (negotiated_type,
+        is_dollar_rate) of their parts in batches of _TYPE_SCAN_BATCH (one
+        progress tick per batch), rewrite only parts whose stored spelling
+        changes, then stamp — in one transaction — ONLY the files whose part
+        was actually read (or has no part at all). Results are mapped back by
+        the part's BASENAME: 0.7.2 compared whole path strings and stamped
+        every name, so a path DuckDB spelled differently (letter case, a
+        prefix) left a part unfixed but marked done (review 9 item 1.1). A
+        batch that fails is retried part by part; a part that cannot be read
+        keeps its old rules and is named once. Returns (files rewritten, rows
+        rewritten, names left for the next start)."""
         log = logging.getLogger(__name__)
-        by_path = {}
+        by_base: dict[str, str] = {}
+        stamp: list[str] = []
         for name in names:
             path = self.rates_dir / f"{file_key(name)}.parquet"
             if path.exists():
-                by_path[str(path)] = name
+                by_base[path.name] = name
+            else:
+                stamp.append(name)          # nothing stored: nothing to fix
         types: dict[str, list] = {}
-        if by_path:
+        seen: set[str] = set()
+        bases = sorted(by_base)
+        failed: list[str] = []
+
+        def scan(chunk: list[str]) -> None:
+            paths = [str(self.rates_dir / b) for b in chunk]
             with self.connect() as con:
                 rows = con.execute(
                     "SELECT DISTINCT filename, negotiated_type, is_dollar_rate "
-                    "FROM read_parquet(?, filename = true, union_by_name = true)",
-                    [sorted(by_path)]).fetchall()
+                    "FROM read_parquet(?, filename = true)", [paths]).fetchall()
             for f, t, d in rows:
-                name = by_path.get(str(f)) or by_path.get(str(Path(f)))
-                if name is not None:
-                    types.setdefault(name, []).append((t, d))
+                base = Path(str(f).replace("\\", "/")).name
+                if base not in by_base:
+                    # same file, spelled differently: match case-insensitively
+                    low = {b.lower(): b for b in chunk}
+                    base = low.get(base.lower(), base)
+                if base in by_base:
+                    types.setdefault(by_base[base], []).append((t, d))
+                    seen.add(base)
+
+        done = 0
+        for i in range(0, len(bases), _TYPE_SCAN_BATCH):
+            chunk = bases[i:i + _TYPE_SCAN_BATCH]
+            try:
+                scan(chunk)
+            except Exception:  # noqa: BLE001 — one bad part must not block the batch
+                for b in chunk:
+                    try:
+                        scan([b])
+                    except Exception as e:  # noqa: BLE001
+                        failed.append(by_base[b])
+                        log.warning("could not read the stored rows of %s (%s) — left "
+                                    "as they are; checked again at the next start",
+                                    by_base[b], e)
+            done += len(chunk)
+            progress(done)
+        # a part that exists and was read but returned no row has no type to
+        # fix (an empty part); a part that was NOT seen and did not fail is a
+        # mapping we could not make — never stamp it on faith
+        failed_set = set(failed)
+        for b, name in by_base.items():
+            if name in failed_set:
+                continue
+            if b in seen:
+                stamp.append(name)
+                continue
+            try:
+                with self.connect() as con:
+                    n = con.execute(
+                        f"SELECT count(*) FROM read_parquet('{sql_path(self.rates_dir / b)}')"
+                    ).fetchone()[0]
+            except Exception as e:  # noqa: BLE001
+                n = None
+                log.warning("could not read the stored rows of %s (%s) — left as they "
+                            "are; checked again at the next start", name, e)
+            if n == 0:
+                stamp.append(name)
+            else:
+                failed.append(name)
+                if n is not None:
+                    log.warning("the type check of %s returned no rows for a part of %d "
+                                "rows — left as it is; checked again at the next start",
+                                name, n)
         fixed = rows_fixed = 0
         ok: list[str] = []
-        for i, name in enumerate(names, 1):
-            type_map = []
-            for old_t, old_d in types.get(name, []):
-                new_t = normalize_negotiated_type(old_t)
-                new_d = new_t in DOLLAR_TYPES
-                if old_t is not None and (new_t != old_t or bool(old_d) != new_d):
-                    type_map.append((old_t, new_t, new_d))
+        stamp_set = set(stamp)
+        for name in names:
+            if name not in stamp_set:
+                continue
+            type_map = self._type_map(types.get(name, []))
             if type_map:
                 path = self.rates_dir / f"{file_key(name)}.parquet"
                 log.info("  rewriting %s (%s)", name, ", ".join(
-                    f"{o!r} -> {n!r}" for o, n, _d in type_map))
+                    f"{o!r} -> {n!r}" for o, _od, n, _d in type_map))
                 try:
                     n = self._rewrite_part(name, f"read_parquet('{sql_path(path)}')",
                                            [], [], "", type_map, keep_qa=True)
@@ -1512,13 +1625,35 @@ class Store:
                     log.warning("could not update the stored rows of %s to the current "
                                 "rules (%s) — its rows are unchanged; will retry at the "
                                 "next start", name, e)
+                    failed.append(name)
                     continue
                 fixed += 1
                 rows_fixed += n
             ok.append(name)
-            progress(i)
         self._finish_rules(ok)
-        return fixed, rows_fixed
+        return fixed, rows_fixed, sorted(set(failed))
+
+    @staticmethod
+    def _type_map(types: list) -> list:
+        """[(old type, old is_dollar, new type, new is_dollar)] for the stored
+        (type, is_dollar) pairs whose spelling or dollar flag changes. Keyed on
+        BOTH old values, so a spelling stored with both flags maps each row
+        once (review 9 item 1.1c: the join on the type alone doubled them)."""
+        from .config import DOLLAR_TYPES
+        from .parser import normalize_negotiated_type
+        out, seen = [], set()
+        for old_t, old_d in types:
+            if old_t is None:
+                continue
+            new_t = normalize_negotiated_type(old_t)
+            new_d = new_t in DOLLAR_TYPES
+            key = (old_t, bool(old_d) if old_d is not None else None)
+            if key in seen:
+                continue
+            seen.add(key)
+            if new_t != old_t or (old_d is None or bool(old_d) != new_d):
+                out.append((old_t, key[1], new_t, new_d))
+        return out
 
     def _finish_rules(self, names: list[str]) -> None:
         """Stamp files as on the current rules, in ONE transaction, and flag
@@ -1561,12 +1696,11 @@ class Store:
         """One file's part -> the current row rules. Returns rows changed."""
         from .catalog import resolve_discipline
         from .modifiers import normalize
-        from .config import DOLLAR_TYPES
-        from .parser import file_month_for, normalize_negotiated_type, published_month_of
+        from .parser import file_month_for, published_month_of
         path = self.rates_dir / f"{file_key(name)}.parquet"
         changed_rows = 0
         months: dict = {}
-        type_map: list = []   # (old type, new type, new is_dollar)
+        type_map: list = []   # (old type, old is_dollar, new type, new is_dollar)
         if path.exists():
             src = f"read_parquet('{sql_path(path)}')"
             with self.connect() as con:
@@ -1578,11 +1712,7 @@ class Store:
                     f"substr(ingested_at, 1, 7) FROM {src}").fetchall()
                 types = con.execute(
                     f"SELECT DISTINCT negotiated_type, is_dollar_rate FROM {src}").fetchall()
-            for old_t, old_d in types:
-                new_t = normalize_negotiated_type(old_t)
-                new_d = new_t in DOLLAR_TYPES
-                if old_t is not None and (new_t != old_t or bool(old_d) != new_d):
-                    type_map.append((old_t, new_t, new_d))
+            type_map = self._type_map(types)
             mod_map = []   # (code, old mods, old pos, new mods, new pos, discipline, split, moved)
             for code, mods, pos in combos:
                 mods, pos = list(mods or []), list(pos or [])
@@ -1623,11 +1753,13 @@ class Store:
                 "AND r.last_updated_on IS NOT DISTINCT FROM m.h "
                 "AND r.source_file IS NOT DISTINCT FROM m.sf "
                 "AND substr(r.ingested_at, 1, 7) IS NOT DISTINCT FROM m.im "
-                "LEFT JOIN _typefix t ON r.negotiated_type = t.o")
+                "LEFT JOIN _typefix t ON r.negotiated_type = t.o "
+                "AND r.is_dollar_rate IS NOT DISTINCT FROM t.od")
         with self.connect() as con:
-            con.execute("CREATE OR REPLACE TEMP TABLE _typefix (o VARCHAR, n VARCHAR, d BOOLEAN)")
+            con.execute("CREATE OR REPLACE TEMP TABLE _typefix "
+                        "(o VARCHAR, od BOOLEAN, n VARCHAR, d BOOLEAN)")
             if type_map:
-                con.executemany("INSERT INTO _typefix VALUES (?, ?, ?)", type_map)
+                con.executemany("INSERT INTO _typefix VALUES (?, ?, ?, ?)", type_map)
             con.execute("CREATE OR REPLACE TEMP TABLE _modfix (c VARCHAR, m VARCHAR[], "
                         "s VARCHAR[], nm VARCHAR[], ns VARCHAR[], nd VARCHAR, "
                         "split BOOLEAN, moved BOOLEAN)")
@@ -2025,6 +2157,18 @@ class Store:
             -- copy early (audit 8 F3)
             ALTER TABLE content_fingerprints ADD COLUMN IF NOT EXISTS win_sha VARCHAR;
             ALTER TABLE content_fingerprints ADD COLUMN IF NOT EXISTS magic VARCHAR;
+            -- the IDENTITY of the bytes that were loaded under this name
+            -- (review 9 item 1.2): their full sha256 when known, and the
+            -- size + mtime the file had when it was read, so the very same
+            -- file left in place is recognised without reading it again
+            ALTER TABLE content_fingerprints ADD COLUMN IF NOT EXISTS full_sha VARCHAR;
+            ALTER TABLE content_fingerprints ADD COLUMN IF NOT EXISTS mtime_ns BIGINT;
+            -- 1 = the file's last bytes vouch for its whole content (a gzip
+            -- of ONE member: its trailer has the CRC of everything; a zip
+            -- whose whole central directory lies in the compared tail),
+            -- 0 = they do not (a multi-member gzip), NULL = not known
+            -- (review 9 item 1.5). Only 1 lets a copy be skipped early.
+            ALTER TABLE content_fingerprints ADD COLUMN IF NOT EXISTS trailer_proves INTEGER;
             -- fingerprints of downloads IN FLIGHT, one per queue row. Kept
             -- apart from the loaded ones: a re-fetch of a file under its old
             -- name must never pass for the file already loaded (audit 8 F2)
@@ -2648,12 +2792,60 @@ class Store:
         """The fingerprint of a file that has been LOADED (written by the
         ingest's success path, or backfilled from an identical copy)."""
         with self.write_lock, self.connect() as con:
+            # an upsert: the identity columns (record_identity) survive a
+            # fingerprint backfill
             con.execute(
-                "INSERT OR REPLACE INTO content_fingerprints (filename, size, head_bytes, "
+                "INSERT INTO content_fingerprints (filename, size, head_bytes, "
                 "head_sha, tail_bytes, tail_sha, recorded_at, url_id, win_sha, magic) "
-                "VALUES (?, ?, ?, ?, ?, ?, current_timestamp, NULL, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, current_timestamp, NULL, ?, ?) "
+                "ON CONFLICT (filename) DO UPDATE SET size = excluded.size, "
+                "head_bytes = excluded.head_bytes, head_sha = excluded.head_sha, "
+                "tail_bytes = excluded.tail_bytes, tail_sha = excluded.tail_sha, "
+                "recorded_at = excluded.recorded_at, win_sha = excluded.win_sha, "
+                "magic = excluded.magic",
                 [filename, fp["size"], fp["head_bytes"], fp["head_sha"], fp["tail_bytes"],
                  fp["tail_sha"], fp["win_sha"], fp["magic"]])
+
+    def record_identity(self, filename: str, size: int, mtime_ns: int | None,
+                        full_sha: str | None, trailer_proves: int | None = None) -> None:
+        """What was loaded under `filename`: its size, the mtime it had when
+        it was read, its full sha256 (None when not computed) and whether
+        its last bytes vouch for its whole content (see the column)."""
+        with self.write_lock, self.connect() as con:
+            con.execute(
+                "INSERT INTO content_fingerprints (filename, size, recorded_at, "
+                "full_sha, mtime_ns, trailer_proves) VALUES (?, ?, current_timestamp, ?, ?, ?) "
+                "ON CONFLICT (filename) DO UPDATE SET full_sha = excluded.full_sha, "
+                "mtime_ns = excluded.mtime_ns, trailer_proves = excluded.trailer_proves, "
+                "size = excluded.size",
+                [filename, size, full_sha, mtime_ns, trailer_proves])
+
+    def loaded_identity(self, filename: str) -> dict | None:
+        with self.connect() as con:
+            row = con.execute(
+                "SELECT size, mtime_ns, full_sha, trailer_proves FROM content_fingerprints "
+                "WHERE filename = ?", [filename]).fetchone()
+        if not row:
+            return None
+        return dict(zip(("size", "mtime_ns", "full_sha", "trailer_proves"), row))
+
+    def drop_file_row(self, filename: str) -> None:
+        """Remove a files row that never had rates (a held same-name
+        candidate the user resolved)."""
+        with self.write_lock, self.connect() as con:
+            con.execute("DELETE FROM files WHERE filename = ? AND coalesce(rows_emitted, 0) = 0 "
+                        "AND status IN ('needs_choice', 'queued')", [filename])
+
+    def done_file_with_sha(self, full_sha: str) -> str | None:
+        """A loaded file whose bytes have this sha256."""
+        if not full_sha:
+            return None
+        with self.connect() as con:
+            row = con.execute(
+                "SELECT c.filename FROM content_fingerprints c JOIN files f "
+                "ON f.filename = c.filename WHERE c.full_sha = ? AND f.status = 'done' "
+                "ORDER BY c.filename LIMIT 1", [full_sha]).fetchone()
+        return row[0] if row else None
 
     def loaded_fingerprint(self, filename: str) -> dict | None:
         with self.connect() as con:
@@ -2709,12 +2901,14 @@ class Store:
         with self.connect() as con:
             cur = con.execute(
                 "SELECT 'loaded' AS kind, c.filename, NULL::BIGINT AS url_id, c.head_bytes, "
-                "       c.head_sha, c.tail_bytes, c.tail_sha, c.win_sha, c.magic "
+                "       c.head_sha, c.tail_bytes, c.tail_sha, c.win_sha, c.magic, "
+                "       c.trailer_proves "
                 "FROM content_fingerprints c JOIN files f ON f.filename = c.filename "
                 "WHERE c.size = ? AND f.status = 'done' AND c.filename IS DISTINCT FROM ? "
+                "AND c.head_sha IS NOT NULL "
                 "UNION ALL "
                 "SELECT 'inflight', i.filename, i.url_id, i.head_bytes, i.head_sha, "
-                "       i.tail_bytes, i.tail_sha, i.win_sha, i.magic "
+                "       i.tail_bytes, i.tail_sha, i.win_sha, i.magic, NULL::INTEGER "
                 "FROM inflight_fingerprints i JOIN url_queue u ON u.id = i.url_id "
                 "WHERE i.size = ? AND u.status IN ('downloading', 'fetched', 'ingesting') "
                 "  AND i.url_id < ? "
@@ -4459,26 +4653,60 @@ class Store:
         with self.write_lock, self.connect() as con:
             con.execute("DELETE FROM provider_refs WHERE source_file = ?", [source_file])
 
-    def load_provider_refs(self, payer: str) -> dict[int, list[tuple[str | None, str | None, tuple[str, ...]]] | None]:
-        """Per ref_id, only the NEWEST vintage's groups are served: two
-        companion files for one payer (a re-download under a new name, or two
-        publication months) must not UNION their provider lists — rates would
-        attach to stale-vintage NPIs/TINs. Ties/NULL dates fall back to the
-        highest source_file (deterministic), and duplicate identical groups
-        are collapsed."""
+    def companion_files_for(self, payer: str, last_updated_on: str | None,
+                            month: str | None) -> list[str]:
+        """The payer's standalone provider-reference files of ONE vintage:
+        those with the rate file's exact `last_updated_on` if any carry it,
+        else those of its publication `month` (each companion's month by the
+        same header -> filename -> read-month rule as a rate file's,
+        parser.file_month_for). Reference ids are local to one publication:
+        April's list must never name May's practices (review 9 item 1.3 —
+        "the newest companion per id" put a May rate file on April's
+        practices, and re-ingesting April's moved it to May's). With neither
+        given (an old caller), the newest vintage."""
+        from .parser import file_month_for
+        with self.connect() as con:
+            files = con.execute(
+                "SELECT DISTINCT r.source_file, r.last_updated_on, "
+                "       strftime(coalesce(f.started_at, f.finished_at), '%Y-%m') "
+                "FROM provider_refs r LEFT JOIN files f ON f.filename = r.source_file "
+                "WHERE r.payer = ? ORDER BY 1", [payer]).fetchall()
+        if not files:
+            return []
+        if last_updated_on is None and month is None:
+            newest = max(str(lu or "") for _f, lu, _m in files)
+            return [f for f, lu, _m in files if str(lu or "") == newest]
+        lu = str(last_updated_on or "").strip()[:10]
+        exact = [f for f, flu, _m in files if lu and str(flu or "").strip()[:10] == lu]
+        if exact:
+            return exact
+        if not month:
+            return []
+        return [f for f, flu, read_m in files
+                if file_month_for(flu, f, read_m or str(month))[0] == str(month)[:7]]
+
+    def load_provider_refs(self, payer: str, last_updated_on: str | None = None,
+                           month: str | None = None,
+                           ) -> dict[int, list[tuple[str | None, str | None, tuple[str, ...]]] | None]:
+        """The payer's standalone provider lists of the RATE FILE'S vintage
+        (companion_files_for): never another month's (review 9 item 1.3).
+        None of that vintage -> {} -> the ids are missing and counted, and
+        requeue_skipped loads the file again when the right list lands.
+        Within the vintage, an id two lists define differently is ambiguous
+        (None); byte-for-byte twins agree. Duplicate identical groups are
+        collapsed."""
+        chosen = self.companion_files_for(payer, last_updated_on, month)
+        if not chosen:
+            return {}
         with self.connect() as con:
             rows = con.execute(
                 """
-                SELECT ref_id, source_file, tin_value, tin_type, npis FROM (
-                    SELECT *, rank() OVER (
-                        PARTITION BY ref_id
-                        ORDER BY coalesce(last_updated_on, '') DESC
-                    ) AS vintage_rank
-                    FROM provider_refs WHERE payer = ?
-                ) WHERE vintage_rank = 1
+                SELECT ref_id, source_file, tin_value, tin_type, npis
+                FROM provider_refs
+                WHERE payer = ? AND source_file IN (SELECT unnest(?::VARCHAR[]))
                 ORDER BY ref_id, source_file DESC
                 """,
-                [payer],
+                [payer, chosen],
             ).fetchall()
         # Ids are file-local: two companion files of the SAME vintage that
         # define one id differently (a PPO and an HMO table, say) cannot both

@@ -215,6 +215,13 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
     # keep_warm: serve is long-lived and fires several queries per dashboard
     # click, so pin the DuckDB settings once instead of re-SETting them on every
     # request connection (~14ms each). One-shot CLI commands stay unpinned.
+    # the freeze recorder starts BEFORE the store opens: a slow start (a
+    # one-time update on a big store) is exactly when stacks_latest.txt must
+    # be fresh, and it used to hold the PREVIOUS session's snapshot until the
+    # store was open (review 9 item 2.3)
+    stop = threading.Event()
+    _start_stack_recorder(Path(cfg.store_dir), stop=stop)
+    log.info("opening the store at %s …", cfg.store_dir)
     store = Store(cfg.store_dir, cfg.duckdb_memory_gb, keep_warm=True, temp_dir=cfg.duckdb_temp_dir, auto_spill=True)
     # BEFORE any worker starts: a crash mid-parse leaves files at
     # 'processing', which scan_inbox skips forever. Flipping them to failed
@@ -254,8 +261,6 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
 
         threading.Thread(target=_catch_up,
                          name="mrfx-rollup-catchup", daemon=True).start()
-    stop = threading.Event()
-    _start_stack_recorder(store.dir, stop=stop)
     threading.Thread(
         target=_watcher_loop, args=(cfg, store, stop), name="mrfx-watcher", daemon=True
     ).start()
@@ -297,6 +302,18 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
           f"  or paste MRF/TOC URLs on the Files tab — downloads run automatically\n"
           f"  if the app ever freezes: open {store.dir / 'diagnostics' / 'stacks_latest.txt'}\n"
           f"  in Notepad and send its contents (auto-refreshed every 30s)\n")
+    # one line once the dashboard really answers: "nothing printed" must
+    # only ever mean "nothing is happening" (review 9 item 2.1)
+    def _announce_ready() -> None:
+        import time as _t
+        for _ in range(600):
+            try:
+                with socket.create_connection(("127.0.0.1", cfg.port), timeout=1):
+                    log.info("the dashboard is ready — open http://localhost:%d", cfg.port)
+                    return
+            except OSError:
+                _t.sleep(0.5)
+    threading.Thread(target=_announce_ready, name="mrfx-ready", daemon=True).start()
     try:
         uvicorn.run(app, host="127.0.0.1", port=cfg.port, log_level="warning")
     finally:

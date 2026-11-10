@@ -34,6 +34,7 @@ import ijson
 from .config import MrfxConfig
 from .ingest import ingest_file
 from .sniff import open_stream, preflight
+from .identity import ContentHasher
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -528,12 +529,13 @@ def _segmented_download(cfg: MrfxConfig, url: str, dest: Path, part: Path, val_p
         raise _SegmentationFailed(state["err"] or "segments did not assemble a complete file")
     if progress_cb:
         progress_cb(total, total)
-    sha = hashlib.sha256()
+    sha = ContentHasher()
     with open(part, "rb") as f:            # hash the assembled file in one pass
         for blk in iter(lambda: f.read(1 << 20), b""):
             sha.update(blk)
     part.replace(dest)
     val_p.unlink(missing_ok=True)
+    _remember_identity(dest, sha)
     return sha.hexdigest(), url
 
 
@@ -702,7 +704,12 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                 raise too_big(total_sz)   # honor confirm_over_gb BEFORE fetching
             if lane_max and total_sz > lane_max:
                 raise _handoff(total_sz, lane_max)
-            if total_sz >= _SEGMENT_MIN_BYTES:
+            twin_possible = bool(early_check is not None and getattr(
+                early_check, "has_twin", lambda _t: False)(total_sz))
+            if twin_possible:
+                log.info("%s: a loaded or downloading file has exactly this size — one "
+                         "connection, so the early duplicate check can run", url)
+            if total_sz >= _SEGMENT_MIN_BYTES and not twin_possible:
                 segs = min(n_seg, max(1, total_sz // _SEGMENT_MIN_PIECE))
                 if segs > 1:
                     _reserve_disk_or_raise(my_key, dest.parent, total_sz, 0)
@@ -869,7 +876,7 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                 if resuming and sha_carry is not None and sha_carry[1] == resume_from:
                     sha = sha_carry[0]               # continue the running hash
                 else:
-                    sha = hashlib.sha256()
+                    sha = ContentHasher()
                     sha_carry = None
                 if resuming and sha_carry is None:
                     with open(part, "rb") as f:  # cold resume: hash what we already have
@@ -996,6 +1003,7 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                 final_url = str(resp.url)
             part.replace(dest)
             val_p.unlink(missing_ok=True)
+            _remember_identity(dest, sha)
             return sha.hexdigest(), final_url
         except DownloadError as e:
             last_exc = e
@@ -1777,11 +1785,66 @@ def _size_limit_for(cfg: MrfxConfig, rec: dict) -> int:
 
 def _write_meta(dest: Path, content_sha: str, final_url: str) -> None:
     """Atomic sidecar write: a crash mid-write must leave either the old
-    sidecar or the new one, never a half-JSON that fails parsing later."""
+    sidecar or the new one, never a half-JSON that fails parsing later.
+    Carries the download's identity (sha, trailer_proves) to the ingest
+    that records it (ingest._finish_ok), across a restart too."""
     meta_p = _meta_path(dest)
     tmp = Path(str(meta_p) + ".tmp")
-    tmp.write_text(json.dumps({"sha": content_sha, "final_url": final_url}))
+    ident = DOWNLOAD_IDENTITY.get(str(dest)) or {}
+    if ident.get("sha") != content_sha:
+        ident = {}
+    tmp.write_text(json.dumps({"sha": content_sha, "final_url": final_url,
+                               "trailer_proves": ident.get("trailer_proves")}))
     tmp.replace(meta_p)
+
+
+# the identity of each finished download, by local path, until its ingest
+# records it (ingest._finish_ok pops it; the .fetchmeta sidecar carries it
+# across a restart)
+DOWNLOAD_IDENTITY: dict[str, dict] = {}
+
+
+def trailer_proves_for(path: Path, gz_members: int | None) -> int | None:
+    """Do the last EARLY_DEDUP_TAIL bytes of this local file vouch for its
+    whole content? gzip: only with exactly one member. zip: only when the
+    whole central directory (a CRC per member) lies inside that tail."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4)
+            size = path.stat().st_size
+            if head[:2] == b"\x1f\x8b":
+                return None if gz_members is None else int(gz_members == 1)
+            if head[:4] == b"PK\x03\x04":
+                tail_n = min(size, EARLY_DEDUP_TAIL)
+                f.seek(size - tail_n)
+                return int(_zip_cd_in_tail(f.read(tail_n), size))
+    except OSError:
+        return None
+    return None
+
+
+def _zip_cd_in_tail(tail: bytes, size: int) -> bool:
+    """True when the zip's end-of-central-directory record and the whole
+    central directory it points at lie inside `tail` (the last bytes of a
+    file of `size` bytes). Zip64 or anything unparsable: False."""
+    import struct
+    i = tail.rfind(b"PK\x05\x06")
+    if i < 0 or len(tail) - i < 22:
+        return False
+    cd_size, cd_off = struct.unpack("<II", tail[i + 12:i + 20])
+    if cd_off == 0xFFFFFFFF or cd_size == 0xFFFFFFFF:
+        return False                       # zip64: not handled -> not provable
+    tail_start = size - len(tail)
+    return cd_off >= tail_start and cd_off + cd_size <= size
+
+
+def _remember_identity(dest: Path, hasher) -> None:
+    try:
+        gz = hasher.gz_members(dest)
+        DOWNLOAD_IDENTITY[str(dest)] = {"sha": hasher.hexdigest(),
+                                        "trailer_proves": trailer_proves_for(dest, gz)}
+    except Exception:  # noqa: BLE001 — identity is a proof aid, never a failure
+        log.debug("identity not recorded for %s", dest, exc_info=True)
 
 
 
@@ -1896,10 +1959,17 @@ def _remote_tail_and_windows(cfg: MrfxConfig, url: str, total: int, tail_n: int,
         return None
 
 
-def _proves(mine: dict, c: dict) -> bool:
+def _proves(mine: dict, c: dict, need_trailer: bool = True) -> bool:
     """A complete match of a COMPRESSED file: same tail (its CRC of the whole
-    content) and the same 8 samples, the heads having already matched."""
-    return bool(mine.get("magic") in _PROVABLE and c.get("magic") in _PROVABLE
+    content) and the same 8 samples, the heads having already matched — and
+    only when the LOADED twin's tail was verified to vouch for its whole
+    content when it was ingested (trailer_proves = 1: a single-member gzip,
+    or a zip whose central directory lies in the tail). A multi-member gzip
+    carries a CRC per member, so its last member's trailer says nothing
+    about the middle (review 9 item 1.5: a file differing by one rate in
+    the middle was skipped as "identical")."""
+    return bool((c.get("trailer_proves") == 1 or not need_trailer)
+                and mine.get("magic") in _PROVABLE and c.get("magic") in _PROVABLE
                 and mine.get("tail_sha") and c.get("tail_sha") and c.get("win_sha")
                 and int(c.get("tail_bytes") or 0) == int(mine.get("tail_bytes") or -1)
                 and c["tail_sha"] == mine["tail_sha"] and c["win_sha"] == mine.get("win_sha"))
@@ -1915,7 +1985,10 @@ def _verdict(mine: dict, hits: list[dict]):
     for c in hits:
         # an earlier copy still downloading may not know its tail yet: a
         # matching beginning is enough to WAIT (never to skip)
-        if c["kind"] == "inflight" and (not c.get("tail_sha") or _proves(mine, c)):
+        # (waiting is never a skip: the copy is checked again against the
+        # LOADED twin, whose tail proof is then required)
+        if c["kind"] == "inflight" and (not c.get("tail_sha")
+                                        or _proves(mine, c, need_trailer=False)):
             return ("wait", int(c["url_id"]), c["filename"])
     return None
 
@@ -1975,6 +2048,17 @@ def early_duplicate_check(cfg: MrfxConfig, store: Store, own_filename: str,
         except Exception:  # noqa: BLE001 — an optimisation: never fails a download
             log.debug("early duplicate check skipped", exc_info=True)
         return None
+    def has_twin(total: int) -> bool:
+        """Could a file of exactly `total` bytes be a copy of one loaded or
+        in flight? (Cheap: one indexed lookup.) A segmented download asks
+        first and, if so, downloads on one connection so the early check
+        runs — it skipped it entirely (review 9 item 1.5)."""
+        try:
+            return bool(store.fingerprint_candidates(total, own_url_id, own_filename))
+        except Exception:  # noqa: BLE001 — a cosmetic probe; segment as usual
+            return False
+
+    check.has_twin = has_twin
     return check
 
 
@@ -2330,6 +2414,12 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
                 fp = file_fingerprint(dest, cfg.early_dedup_mb)
                 if fp is not None:
                     store.record_fingerprint(twin_file, fp)
+                    # the same bytes: the same identity and trailer proof
+                    # (the downloader computed both while writing `dest`)
+                    ident = DOWNLOAD_IDENTITY.get(str(dest))
+                    if ident and ident.get("sha") == content_sha:
+                        store.record_identity(twin_file, fp["size"], None, content_sha,
+                                              ident.get("trailer_proves"))
             except Exception:  # noqa: BLE001 — cosmetic tier
                 log.debug("fingerprint backfill skipped", exc_info=True)
         store.update_url(url_id, status="skipped", kind="duplicate",

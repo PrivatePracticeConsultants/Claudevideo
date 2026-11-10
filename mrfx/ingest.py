@@ -320,17 +320,66 @@ def _now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
 
 
+# (size, mtime_ns) of each file as its ingest started, by path: _finish_ok
+# compares, so a file replaced while it was being read is neither recorded
+# as "loaded" nor moved (review 9 item 1.2 / F9)
+_INGEST_STAT: dict[str, tuple[int, int]] = {}
+
+
+def _note_ingest_start(path: Path) -> None:
+    try:
+        st = path.stat()
+        _INGEST_STAT[str(path)] = (st.st_size, st.st_mtime_ns)
+    except OSError:
+        pass
+
+
+def _download_identity(path: Path) -> dict | None:
+    """sha + trailer_proves the downloader computed while it wrote `path`."""
+    from .fetch import DOWNLOAD_IDENTITY
+    ident = DOWNLOAD_IDENTITY.pop(str(path), None)
+    if ident:
+        return ident
+    meta = Path(str(path) + ".fetchmeta")
+    try:
+        m = json.loads(meta.read_text())
+        if m.get("sha"):
+            return {"sha": m["sha"], "trailer_proves": m.get("trailer_proves")}
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 def _finish_ok(cfg: MrfxConfig, store: Store, path: Path) -> None:
     """A file ingested successfully: remember its fingerprint (so a copy of
     it under another web address is recognised before it finishes
-    downloading — fetch.early_duplicate_check), then the usual housekeeping.
-    Cosmetic tier: a fingerprint that can't be recorded costs only the early
-    skip, never the ingest."""
+    downloading — fetch.early_duplicate_check) and its IDENTITY (size + the
+    mtime it had when read, full sha256 when known, whether its tail vouches
+    for its whole content), then the usual housekeeping. A file that changed
+    while it was being read is left where it is and recorded as nothing:
+    the rows came from the bytes that were read, and the next scan offers
+    the new bytes as what they are. Cosmetic tier: an identity that can't be
+    recorded costs only an early skip / a same-name check, never the
+    ingest."""
+    from .identity import LOCAL_HASH_MAX_BYTES, hash_file
+    started = _INGEST_STAT.pop(str(path), None)
     try:
-        from .fetch import file_fingerprint
+        st = path.stat()
+        if started is not None and (st.st_size, st.st_mtime_ns) != started:
+            log.warning("%s changed while it was being read — its rows are from the "
+                        "version that was read; the new version stays where it is and "
+                        "is offered at the next scan", path.name)
+            return
+        from .fetch import file_fingerprint, trailer_proves_for
         fp = file_fingerprint(path, cfg.early_dedup_mb)
         if fp is not None:
             store.record_fingerprint(path.name, fp)
+        ident = _download_identity(path)
+        if ident is None and st.st_size <= LOCAL_HASH_MAX_BYTES:
+            sha, gz = hash_file(path)
+            ident = {"sha": sha, "trailer_proves": trailer_proves_for(path, gz)}
+        store.record_identity(path.name, st.st_size, st.st_mtime_ns,
+                              (ident or {}).get("sha"), (ident or {}).get("trailer_proves"))
     except Exception:  # noqa: BLE001
         log.debug("fingerprint not recorded for %s", path.name, exc_info=True)
     _finish_file(cfg, path, ok=True)
@@ -683,7 +732,7 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
     import concurrent.futures
 
     name = path.name
-    external_refs = store.load_provider_refs(pf.payer) if pf.payer else {}
+    external_refs = _companion_refs(store, pf, path.name)
     header_defaults = {
         "payer": pf.payer, "schema_version": pf.schema_version,
         "last_updated_on": pf.last_updated_on,
@@ -982,7 +1031,8 @@ def _forget_file_locked(cfg: MrfxConfig, store: Store, filename: str) -> dict:
     # raw copies go FIRST — deleting the inbox copy after the DB rows would
     # leave a window where the watcher re-ingests the very file being erased
     freed_raw = 0
-    for d in (cfg.inbox_dir, cfg.processed_dir, cfg.failed_dir, cfg.downloads_dir):
+    for d in (cfg.inbox_dir, cfg.processed_dir, cfg.failed_dir, cfg.downloads_dir,
+              cfg.inbox_dir / HELD_DIR, cfg.inbox_dir / REPLACING_DIR):
         p = d / filename
         try:
             if p.exists():
@@ -1076,6 +1126,7 @@ def ingest_file(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight | None 
 def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight | None,
                         progress_bar, rebuild_rollups: bool) -> dict:
     name = path.name
+    _note_ingest_start(path)
     try:
         # preflight + the initial 'processing' upsert live INSIDE the try so a
         # corrupt file (e.g. a truncated .gz that makes preflight raise) on the
@@ -1130,7 +1181,7 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
         if pool is not None:
             return _ingest_in_network_pooled(cfg, store, path, pf, pool,
                                              progress_bar, rebuild_rollups)
-        external_refs = store.load_provider_refs(pf.payer) if pf.payer else {}
+        external_refs = _companion_refs(store, pf, path.name)
         header_defaults = {
             "payer": pf.payer, "schema_version": pf.schema_version,
             "last_updated_on": pf.last_updated_on,
@@ -1303,6 +1354,18 @@ def plain_parse_error(e: BaseException) -> str:
             f"ask the payer for a corrected copy ({text[:200]})")
 
 
+def _companion_refs(store: Store, pf: Preflight, name: str) -> dict:
+    """The payer's standalone provider lists of THIS rate file's vintage —
+    its header date, else its publication month by the file_month rule
+    (review 9 item 1.3)."""
+    if not pf.payer:
+        return {}
+    from .parser import file_month_for
+    now_month = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m")
+    month = file_month_for(pf.last_updated_on, name, now_month)[0]
+    return store.load_provider_refs(pf.payer, pf.last_updated_on, month)
+
+
 def _ingest_reference_file(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight) -> dict:
     """A standalone provider-reference file: stream its table into
     provider_refs in batches (flat memory for a multi-million-id table —
@@ -1359,47 +1422,183 @@ def requeue_skipped(cfg: MrfxConfig, store: Store, payer: str) -> list[str]:
     return requeued
 
 
-_SAME_NAME_SEEN: dict = {}   # (inbox path, size, mtime) -> verdict, so a kept
-                             # done file is fingerprinted once, not every scan
+_SHA_SEEN: dict = {}   # (path, size, mtime_ns) -> sha256, so a kept file is hashed once
+
+HELD_DIR = ".held"          # inbox subfolders the scan never classifies:
+REPLACING_DIR = ".replacing"  # a candidate waiting for the user, a chosen replacement
+NEEDS_CHOICE = "needs_choice"
 
 
-def same_as_loaded(cfg: MrfxConfig, store: Store, path: Path, prior: dict,
-                   name: str | None = None) -> bool:
-    """Is the file at `path` the one already loaded under its name? Its
-    fingerprint (size, first MB, last MB, 8 samples) against the one the
-    ingest recorded; a load older than fingerprints compares size only."""
-    from .fetch import file_fingerprint
+def _sha_of(path: Path) -> str | None:
+    from .identity import LOCAL_HASH_MAX_BYTES, hash_file
     try:
         st = path.stat()
     except OSError:
-        return True
+        return None
+    if st.st_size > LOCAL_HASH_MAX_BYTES:
+        return None
     key = (str(path), st.st_size, st.st_mtime_ns)
-    if key in _SAME_NAME_SEEN:
-        return _SAME_NAME_SEEN[key]
-    loaded = store.loaded_fingerprint(name or path.name)
-    if loaded is None:
-        same = prior.get("size_bytes") in (None, st.st_size)
-    else:
-        mine = file_fingerprint(path, max(1, int(loaded.get("head_bytes") or 0) >> 20) or 1)
-        same = bool(mine) and all(mine.get(k) == loaded.get(k) for k in
-                                  ("size", "head_sha", "tail_sha", "win_sha")
-                                  if loaded.get(k) is not None)
-    _SAME_NAME_SEEN[key] = same
-    return same
+    if key not in _SHA_SEEN:
+        if st.st_size > (256 << 20):
+            log.info("%s: reading it to see whether it is the file already loaded "
+                     "(%.1f GB)", path.name, st.st_size / 1e9)
+        _SHA_SEEN[key] = hash_file(path)[0]
+    return _SHA_SEEN[key]
+
+
+def _month_of(payer_month: tuple) -> tuple:
+    payer, month = payer_month
+    return (str(payer or "").strip().casefold(), str(month or "")[:7])
+
+
+def same_name_verdict(cfg: MrfxConfig, store: Store, path: Path, name: str,
+                      prior: dict, pf: Preflight | None = None) -> tuple[str, str | None]:
+    """A file arrives under `name`, which the store already holds (`prior`).
+    Returns (verdict, sha256 or None):
+
+    'same'    — these exact bytes are already loaded (under this name or any
+                other): the size + mtime recorded when the file was read are
+                unchanged (the very file left in place), or the full sha256
+                equals a loaded file's. Never by size or samples alone: a
+                corrected file of the same size is a different file, and the
+                same file must always be recognised (review 9 item 1.2: a
+                floored MiB count reloaded a 2.3 MiB file on every scan).
+    'replace' — different bytes for the same payer and month (or for a file
+                still being loaded): a corrected re-publication. The user
+                chooses Replace or Keep both — two versions of one file are
+                never blended into every number silently (review 9 4.5).
+    'new'     — different bytes for another month / payer: loaded beside it.
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return "same", None
+    ident = store.loaded_identity(name)
+    if ident and ident.get("mtime_ns") is not None and \
+            (ident.get("size"), ident["mtime_ns"]) == (st.st_size, st.st_mtime_ns):
+        return "same", ident.get("full_sha")
+    sha = _sha_of(path)
+    if sha and store.done_file_with_sha(sha):
+        return "same", sha
+    if not (ident and ident.get("full_sha")):
+        # loaded by a build that recorded no sha: the loaded copy may still be
+        # on disk (processed/, or in place) — compare with it
+        for twin in (cfg.processed_dir / name, cfg.inbox_dir / name,
+                     cfg.inbox_dir / REPLACING_DIR / name):
+            try:
+                if twin.exists() and twin.resolve() != path.resolve():
+                    tsha = _sha_of(twin)
+                    if sha and tsha:
+                        if tsha == sha:
+                            return "same", sha
+                        break
+            except OSError:
+                continue
+        else:
+            # nothing to compare with: unchanged since that load finished
+            # (same size, not modified after it) is that file
+            fin = prior.get("finished_at")
+            try:
+                fin_ts = fin.replace(tzinfo=dt.timezone.utc).timestamp() if fin else None
+            except AttributeError:
+                fin_ts = None
+            if fin_ts and prior.get("size_bytes") == st.st_size and \
+                    st.st_mtime <= fin_ts and prior.get("status") == "done":
+                return "same", sha
+    if prior.get("status") in ("processing", "queued"):
+        return "replace", sha
+    if pf is None:
+        try:
+            pf = preflight(path, cfg, store)
+        except Exception:  # noqa: BLE001 — an unreadable newcomer is loaded and fails there
+            return "new", sha
+    from .parser import file_month_for
+    now_month = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m")
+    mine = _month_of((pf.payer, file_month_for(pf.last_updated_on, name, now_month)[0]))
+    theirs = _month_of((prior.get("payer"), prior.get("file_month") or prior.get("last_updated_on")))
+    if not theirs[0] or not theirs[1] or mine == theirs:
+        return "replace", sha
+    return "new", sha
 
 
 def unique_inbox_name(directory: Path, name: str, store: Store, tag: str) -> str:
-    """`name` with `-<tag>` before its extensions (.json.gz stays .json.gz),
-    made unique against the directory and the store's files table."""
-    suffixes = "".join(s for s in Path(name).suffixes if s.lower() in
-                       (".json", ".gz", ".zip", ".csv", ".jsonl", ".bz2", ".xz", ".zst"))
-    stem = name[: len(name) - len(suffixes)] if suffixes else name
+    """`name` with `-<tag>` before its TRAILING known extensions (.json.gz
+    stays .json.gz; a ".json" in the middle of a name is part of the name —
+    "rates.json.2026-05.json" lost its date before), made unique against the
+    directory and the store's files table."""
+    known = (".json", ".gz", ".zip", ".csv", ".jsonl", ".bz2", ".xz", ".zst")
+    sfx = ""
+    rest = name
+    while True:
+        dot = rest.rfind(".")
+        if dot <= 0 or rest[dot:].lower() not in known:
+            break
+        sfx = rest[dot:] + sfx
+        rest = rest[:dot]
     i = 0
     while True:
-        cand = f"{stem}-{tag}{'' if not i else f'-{i}'}{suffixes}"
+        cand = f"{rest}-{tag}{'' if not i else f'-{i}'}{sfx}"
         if not (directory / cand).exists() and store.file_status(cand) is None:
             return cand
         i += 1
+
+
+def hold_for_choice(cfg: MrfxConfig, store: Store, src: Path, orig: str,
+                    sha: str | None, move: bool = True) -> str:
+    """Park a different file that arrived under `orig` until the user picks
+    Replace or Keep both (Files tab). It waits in inbox/.held/, which the
+    scan never classifies, under a name tagged with its content."""
+    import hashlib
+    held = cfg.inbox_dir / HELD_DIR
+    held.mkdir(parents=True, exist_ok=True)
+    st = src.stat()
+    tag = (sha or hashlib.sha256(f"{st.st_size}:{st.st_mtime_ns}".encode()).hexdigest())[:8]
+    new = unique_inbox_name(held, orig, store, tag)
+    dest = held / new
+    if move:
+        src.replace(dest)
+    prior = store.file_status(orig) or {}
+    store.upsert_file(
+        new, status=NEEDS_CHOICE, size_bytes=st.st_size, payer=prior.get("payer"),
+        qa={"replaces": orig},
+        error=(f"A different file with the same name as {orig} (the same payer and month). "
+               f"Replace {orig} with it, or keep both — then both count toward every number."))
+    log.info("%s: a different file with the same name as a loaded file — held as %s until "
+             "you choose Replace or Keep both on the Files tab", orig, new)
+    return new
+
+
+def resolve_choice(cfg: MrfxConfig, store: Store, name: str, action: str) -> dict:
+    """The user's answer for a held file: 'replace' re-loads `replaces`
+    from it (the part is swapped atomically); 'keep' loads it under its own
+    name beside the original."""
+    st = store.file_status(name)
+    if not st or st.get("status") != NEEDS_CHOICE:
+        raise ValueError("this file is not waiting for a choice")
+    held = cfg.inbox_dir / HELD_DIR / name
+    if not held.exists():
+        raise ValueError("the held file is no longer there — drop it in again")
+    qa = st.get("qa")
+    if isinstance(qa, str):
+        try:
+            qa = json.loads(qa)
+        except ValueError:
+            qa = {}
+    orig = (qa or {}).get("replaces")
+    if action == "replace":
+        if not orig:
+            raise ValueError("this file does not say which file it replaces")
+        rdir = cfg.inbox_dir / REPLACING_DIR
+        rdir.mkdir(parents=True, exist_ok=True)
+        target = rdir / orig
+        held.replace(target)
+        store.drop_file_row(name)
+        store.upsert_file(orig, status="queued", error=None)
+        return {"action": "replace", "path": target, "filename": orig}
+    if action == "keep":
+        store.upsert_file(name, status="queued", error=None)
+        return {"action": "keep", "path": held, "filename": name}
+    raise ValueError("choose replace or keep")
 
 
 def scan_inbox(cfg: MrfxConfig, store: Store, force: bool = False, progress_bar=None) -> list[dict]:
@@ -1436,33 +1635,45 @@ def scan_inbox(cfg: MrfxConfig, store: Store, force: bool = False, progress_bar=
             except OSError:
                 continue
     flights = []
+    # a replacement the user chose that a restart interrupted: load it now
+    for p in sorted((cfg.inbox_dir / REPLACING_DIR).glob("*")) \
+            if (cfg.inbox_dir / REPLACING_DIR).is_dir() else []:
+        if p.is_file() and (store.file_status(p.name) or {}).get("status") != "processing":
+            try:
+                flights.append((p, preflight(p, cfg, store)))
+            except Exception as e:  # noqa: BLE001
+                log.warning("%s: could not read the chosen replacement (%s)", p.name, e)
     for p in paths:
         prior = store.file_status(p.name)
+        if prior and prior.get("status") == NEEDS_CHOICE:
+            continue
+        if prior and prior.get("status") == "processing" and not force:
+            continue          # being loaded right now: this IS that file
         if prior and prior.get("status") == "done" and not force:
-            # a file under an already-loaded name: the same file (its move
-            # out of the inbox failed, or move_processed is off) is left
-            # alone; a DIFFERENT one used to sit in the inbox forever, never
-            # loaded and never mentioned (audit 8 P1-B) — load it under a new
-            # name instead
-            if same_as_loaded(cfg, store, p, prior):
+            # a file under a name the store already holds (review 9 1.2 / 4.5)
+            verdict, sha = same_name_verdict(cfg, store, p, p.name, prior)
+            if verdict == "same":
                 if cfg.move_processed:
                     _finish_file(cfg, p, ok=True)
                 continue
-            import hashlib
-            tag = hashlib.sha256(f"{p.stat().st_size}:{p.stat().st_mtime_ns}".encode()
-                                 ).hexdigest()[:6]
-            new = unique_inbox_name(p.parent, p.name, store, tag)
             try:
+                if verdict == "replace":
+                    hold_for_choice(cfg, store, p, p.name, sha)
+                    results.append({"file": p.name, "status": NEEDS_CHOICE})
+                    continue
+                import hashlib
+                st = p.stat()
+                tag = (sha or hashlib.sha256(f"{st.st_size}:{st.st_mtime_ns}".encode()
+                                             ).hexdigest())[:8]
+                new = unique_inbox_name(p.parent, p.name, store, tag)
                 p = p.rename(p.with_name(new))
             except OSError as e:
                 log.warning("%s: a different file with this name was dropped in, but it "
-                            "could not be renamed (%s) — it was NOT loaded", p.name, e)
+                            "could not be set aside (%s) — it was NOT loaded", p.name, e)
                 continue
-            log.info("%s: a different file under an already-loaded name — loading it "
-                     "as %s", prior["filename"], new)
+            log.info("%s: a different file (another month or payer) under an already-loaded "
+                     "name — loading it as %s", prior["filename"], p.name)
             prior = None
-        if prior and prior.get("status") == "processing" and not force:
-            continue
         try:
             flights.append((p, preflight(p, cfg, store)))
         except Exception as e:  # noqa: BLE001 — one unreadable neighbor (e.g.

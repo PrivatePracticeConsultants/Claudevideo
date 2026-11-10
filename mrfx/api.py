@@ -1794,16 +1794,25 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     # -- files -----------------------------------------------------------------------
 
     @app.get("/api/files")
-    def files(limit: int = 500, offset: int = 0):
+    def files(limit: int = Query(500, ge=1, le=10_000_000),
+              offset: int = Query(0, ge=0, le=10_000_000)):
         # polled every 4 s while the Files tab is open: never the whole table
-        # with every preflight blob (audit 8 P1-C — a 2,000-file store sent
-        # megabytes per poll). Newest first, a page at a time, plus the total.
-        limit = max(1, min(int(limit), 5000))
-        offset = max(0, int(offset))
+        # with every preflight blob (audit 8 P1-C). Rows that need the user or
+        # are in progress (waiting for "ingest anyway", held for a choice,
+        # queued, processing, failed…) come FIRST and are never paged away —
+        # paging by date pushed them off the list on a store of > 500 files
+        # (review 9 item 2.4); then the loaded files, newest first.
+        limit = min(int(limit), 5000)
         with store.connect() as con:
             total = con.execute("SELECT count(*) FROM files").fetchone()[0]
-            rows = _dicts(con.execute(
-                "SELECT * EXCLUDE (preflight) FROM files "
+            attention = _dicts(con.execute(
+                "SELECT * EXCLUDE (preflight) FROM files WHERE status <> 'done' "
+                "ORDER BY CASE status WHEN 'needs_choice' THEN 0 "
+                "WHEN 'pending_confirmation' THEN 1 WHEN 'processing' THEN 2 "
+                "WHEN 'queued' THEN 3 WHEN 'failed' THEN 4 ELSE 5 END, "
+                "coalesce(finished_at, started_at) DESC NULLS LAST, filename LIMIT 2000"))
+            rows = attention + _dicts(con.execute(
+                "SELECT * EXCLUDE (preflight) FROM files WHERE status = 'done' "
                 "ORDER BY coalesce(finished_at, started_at) DESC NULLS LAST, filename "
                 "LIMIT ? OFFSET ?", [limit, offset]))
         for r in rows:
@@ -1815,7 +1824,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                     r["qa"] = json.loads(r["qa"])
                 except json.JSONDecodeError:
                     pass
-        return {"files": rows, "total": total, "limit": limit, "offset": offset}
+        return {"files": rows, "total": total, "limit": limit, "offset": offset,
+                "attention": len(attention)}
 
     @app.post("/api/files/scan")
     def files_scan():
@@ -2008,24 +2018,39 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                     if size > UPLOAD_LIMIT_BYTES:
                         raise HTTPException(413, "over 1 GB — drop the file into data/inbox/ instead")
                     out.write(chunk)
-            # an upload under a name the store already holds (or one still in
-            # the inbox) was replaced in place and then skipped as 'done' —
-            # never loaded, never said (audit 8 P1-B). The same file is
-            # reported as already loaded; a different one gets its own name.
+            # an upload under a name the store already holds (review 9 1.2 /
+            # 4.5): the same bytes are reported as already loaded; different
+            # bytes for the same payer and month are HELD for the user's
+            # choice (Replace / Keep both) — never blended into every number
+            # silently; anything else is loaded under a content-tagged name
+            from .ingest import (NEEDS_CHOICE, _sha_of, hold_for_choice, same_name_verdict,
+                                 unique_inbox_name)
             prior = store.file_status(safe)
             renamed_from = None
-            if prior and prior.get("status") == "done":
-                from .ingest import same_as_loaded
-                if same_as_loaded(cfg, store, tmp, prior, name=safe):
+            if prior and prior.get("status") in ("done", "processing", "queued"):
+                verdict, sha = same_name_verdict(cfg, store, tmp, safe, prior)
+                if verdict == "same":
                     return {"status": "duplicate", "filename": safe, "bytes": size,
                             "note": f"{safe} is already loaded — this upload is the same file"}
-            if (prior and prior.get("status") != "failed") or dest.exists():
-                import hashlib
-
-                from .ingest import unique_inbox_name
-                tag = hashlib.sha256(f"{size}:{_uuid.uuid4().hex}".encode()).hexdigest()[:6]
+                if verdict == "replace":
+                    held = hold_for_choice(cfg, store, tmp, safe, sha)
+                    return {"status": NEEDS_CHOICE, "filename": held, "replaces": safe,
+                            "bytes": size,
+                            "note": (f"{safe} is already loaded and this is a DIFFERENT file "
+                                     "for the same payer and month. Choose Replace (use only "
+                                     "this one) or Keep both (both count toward every number).")}
                 renamed_from = safe
-                dest = cfg.inbox_dir / unique_inbox_name(cfg.inbox_dir, safe, store, tag)
+                dest = cfg.inbox_dir / unique_inbox_name(cfg.inbox_dir, safe, store,
+                                                         (sha or _uuid.uuid4().hex)[:8])
+            elif dest.exists():
+                # an earlier drop of this name not loaded yet
+                sha = _sha_of(tmp)
+                if sha and sha == _sha_of(dest):
+                    return {"status": "duplicate", "filename": safe, "bytes": size,
+                            "note": f"{safe} is already waiting to be loaded — the same file"}
+                renamed_from = safe
+                dest = cfg.inbox_dir / unique_inbox_name(cfg.inbox_dir, safe, store,
+                                                         (sha or _uuid.uuid4().hex)[:8])
             tmp.replace(dest)
         finally:
             tmp.unlink(missing_ok=True)
@@ -2034,9 +2059,23 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         out = {"status": "queued", "filename": dest.name, "bytes": size}
         if renamed_from:
             out["renamed_from"] = renamed_from
-            out["note"] = (f"a file named {renamed_from} is already in MRF Explorer — "
-                           f"this one is loaded as {dest.name}")
+            out["note"] = (f"a file named {renamed_from} is already in MRF Explorer (another "
+                           f"month or payer) — this one is loaded beside it as {dest.name}")
         return out
+
+    @app.post("/api/files/{filename}/choose")
+    def files_choose(filename: str, body: dict = Body(...)):
+        """The user's answer for a held same-name file: {"action": "replace"}
+        or {"action": "keep"}."""
+        from .ingest import resolve_choice
+        action = str((body or {}).get("action") or "")
+        try:
+            r = resolve_choice(cfg, store, filename, action)
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+        threading.Thread(target=_bg_safe, args=(ingest_file, cfg, store, r["path"]),
+                         name="mrfx-choice-ingest", daemon=True).start()
+        return {"status": "queued", "action": r["action"], "filename": r["filename"]}
 
     # -- export (CSV + methodology sidecar, §7A.6) ---------------------------------
 

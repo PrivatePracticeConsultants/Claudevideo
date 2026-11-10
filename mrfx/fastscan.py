@@ -187,14 +187,12 @@ class _Member:
         self.peek = b""             # bytes seen so far while undecided
 
 
+from .refid import clean_ref_id  # noqa: E402
+
+
 def _ref_int(v):
-    """clean_ref_id (parser.py) — integral values only; kept here to avoid
-    an import cycle. Must stay identical."""
-    try:
-        f = float(v)
-    except (TypeError, ValueError):
-        return None
-    return int(f) if f.is_integer() else None
+    """clean_ref_id — the ONE exact rule (mrfx/refid.py)."""
+    return clean_ref_id(v)
 
 
 class RefPolicy:

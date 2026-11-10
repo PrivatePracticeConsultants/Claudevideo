@@ -40,16 +40,24 @@ def test_inbox_file_under_a_loaded_name(cfg, store, move):
         (cfg.inbox_dir / "acme_2026-05.json").write_text(json.dumps(doc(40.0)))
     assert scan_inbox(cfg, store) == []
     assert q(store, "SELECT count(*) FROM files")[0][0] == 1
-    # a DIFFERENT file under that name: loaded under a new name (it used to
-    # sit in the inbox forever, never loaded and never mentioned)
+    # a DIFFERENT file under that name, same payer and month: held for the
+    # user's choice (review 9 4.5 — it used to be loaded beside the old one
+    # and every number became the median of both)
     (cfg.inbox_dir / "acme_2026-05.json").write_text(json.dumps(doc(55.0)))
     res = scan_inbox(cfg, store)
+    assert [r["status"] for r in res] == ["needs_choice"]
+    assert q(store, "SELECT count(*) FROM files WHERE status = 'needs_choice'") == [(1,)]
+    assert sorted(r[0] for r in q(store, "SELECT negotiated_rate FROM rates")) == [40.0]
+    # another MONTH under that name: loaded beside it, under a content name
+    june = {**doc(60.0), "last_updated_on": "2026-06-01"}
+    (cfg.inbox_dir / "acme_2026-05.json").write_text(json.dumps(june))
+    res = scan_inbox(cfg, store)
     assert len(res) == 1 and res[0]["status"] == "done"
-    names = {r[0] for r in q(store, "SELECT filename FROM files")}
+    names = {r[0] for r in q(store, "SELECT filename FROM files WHERE status = 'done'")}
     assert "acme_2026-05.json" in names and len(names) == 2
     new = (names - {"acme_2026-05.json"}).pop()
     assert new.startswith("acme_2026-05-") and new.endswith(".json")
-    assert sorted(r[0] for r in q(store, "SELECT negotiated_rate FROM rates")) == [40.0, 55.0]
+    assert sorted(r[0] for r in q(store, "SELECT negotiated_rate FROM rates")) == [40.0, 60.0]
 
 
 def test_upload_under_a_loaded_name(cfg, store):
@@ -66,9 +74,20 @@ def test_upload_under_a_loaded_name(cfg, store):
     assert same["status"] == "duplicate" and "already loaded" in same["note"]
     other = c.post("/api/upload", files={"file": ("acme_2026-05.json",
                                                   json.dumps(doc(60.0)).encode())}).json()
-    assert other["status"] == "queued" and other["renamed_from"] == "acme_2026-05.json"
-    assert other["filename"] != "acme_2026-05.json" and other["filename"].endswith(".json")
-    assert (cfg.inbox_dir / other["filename"]).exists()
+    # same payer and month, different bytes: held for Replace / Keep both
+    assert other["status"] == "needs_choice" and other["replaces"] == "acme_2026-05.json"
+    assert (cfg.inbox_dir / ".held" / other["filename"]).exists()
+    r = c.post(f"/api/files/{other['filename']}/choose", json={"action": "replace"}).json()
+    assert r["action"] == "replace"
+    deadline = time.monotonic() + 20
+    while q(store, "SELECT negotiated_rate FROM rates") != [(60.0,)] or \
+            (store.file_status("acme_2026-05.json") or {}).get("status") != "done":
+        assert time.monotonic() < deadline, q(store, "SELECT negotiated_rate FROM rates")
+        time.sleep(0.1)
+    june = c.post("/api/upload", files={"file": ("acme_2026-05.json", json.dumps(
+        {**doc(65.0), "last_updated_on": "2026-06-01"}).encode())}).json()
+    assert june["status"] == "queued" and june["renamed_from"] == "acme_2026-05.json"
+    assert june["filename"] != "acme_2026-05.json" and june["filename"].endswith(".json")
 
 
 def test_files_poll_is_paged_and_light(cfg, store):
