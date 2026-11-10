@@ -45,6 +45,7 @@ from .modifiers import base_sql, normalize as normalize_modifiers
 from .sniff import open_stream
 from .states import state_code_or_none
 from .store import Store, sql_path
+from .rounding import half_up
 
 log = logging.getLogger(__name__)
 
@@ -620,15 +621,24 @@ def hospital_parity(store: Store, market: dict | None = None, *,
                count(DISTINCT tin_value) AS n_practices
         FROM practice GROUP BY payer, billing_code
     ),
-    hosp AS (
-        SELECT h.payer, h.billing_code,
-               round(median(h.rate), 2)        AS hospital_median,
-               round(min(h.rate), 2)           AS hospital_min,
-               round(max(h.rate), 2)           AS hospital_max,
-               count(DISTINCT h.hospital_name) AS n_hospitals
+    per_hosp AS (
+        -- ONE rate per hospital first (median of its plan rows), as the
+        -- practice side is per-TIN first: a hospital listing three plans at
+        -- $100 outvoted one listing a single $200 plan — median $100, 2.0x,
+        -- where per hospital it is $150, 3.0x (audit 8 P2-11)
+        SELECT h.payer, h.billing_code, h.hospital_name, median(h.rate) AS rate
         FROM hospital_rates h
         WHERE {' AND '.join(hosp_where)}
-        GROUP BY h.payer, h.billing_code
+        GROUP BY h.payer, h.billing_code, h.hospital_name
+    ),
+    hosp AS (
+        SELECT payer, billing_code,
+               round(median(rate), 2)        AS hospital_median,
+               round(min(rate), 2)           AS hospital_min,
+               round(max(rate), 2)           AS hospital_max,
+               count(DISTINCT hospital_name) AS n_hospitals
+        FROM per_hosp
+        GROUP BY payer, billing_code
     )
     SELECT p.payer, p.billing_code, p.practice_median, p.n_practices,
            hs.hospital_median, hs.hospital_min, hs.hospital_max, hs.n_hospitals
@@ -660,18 +670,18 @@ def hospital_parity(store: Store, market: dict | None = None, *,
         r["description"] = code_info(r["billing_code"])[0]
         pm, hm = r["practice_median"], r["hospital_median"]
         # a RATIO, never a subtraction presented as money owed
-        r["hospital_multiple"] = round(hm / pm, 2) if pm else None
+        r["hospital_multiple"] = half_up(hm / pm, 2) if pm else None
         if subject_tins:
             s = subj.get((r["payer"], r["billing_code"]))
             r["subject_rate"] = s
-            r["subject_multiple"] = round(hm / s, 2) if s else None
+            r["subject_multiple"] = half_up(hm / s, 2) if s else None
 
     with_mult = [r for r in rows if r.get("hospital_multiple")]
     med_mult = None
     if with_mult:
         vals = sorted(r["hospital_multiple"] for r in with_mult)
         mid = len(vals) // 2
-        med_mult = round(vals[mid] if len(vals) % 2 else
+        med_mult = half_up(vals[mid] if len(vals) % 2 else
                          (vals[mid - 1] + vals[mid]) / 2, 2)
     return {
         "loaded": True, "rows": rows, "count": len(rows),
@@ -748,7 +758,7 @@ def cash_anchors(store: Store, *, state: str | None = None,
         # the discount a payer negotiated off self-pay, which is the shape of
         # the conversation a practice is having with itself about cash pricing
         r["negotiated_pct_of_cash"] = (
-            round(100.0 * r["negotiated_median"] / r["cash_median"], 1)
+            half_up(100.0 * r["negotiated_median"] / r["cash_median"], 1)
             if r["cash_median"] and r["negotiated_median"] else None)
     return {
         "loaded": bool(rows), "rows": rows, "count": len(rows),

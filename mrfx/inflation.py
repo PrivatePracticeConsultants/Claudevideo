@@ -38,6 +38,7 @@ import math
 import logging
 
 from .store import Store
+from .rounding import half_up
 
 log = logging.getLogger(__name__)
 
@@ -90,7 +91,10 @@ def load_index(store: Store) -> dict:
     # CPI-U value (round 7 P0.5 — that read a flat payer as "+90% in real
     # terms"), and one row's name must never relabel the whole series
     names = {y: DEFAULT_INDEX for y in values}
-    source = DEFAULT_INDEX_SOURCE
+    # and its own source: one user row's source must not become every
+    # year's (audit 8 P1-8 — a saved MEI 2025 relabelled the CPI-U 2023->2024
+    # deflator "CMS Medicare Economic Index 2025; extended locally")
+    sources = {y: DEFAULT_INDEX_SOURCE for y in values}
     user: dict[int, float] = {}
     try:
         with store.connect() as con:
@@ -105,15 +109,16 @@ def load_index(store: Store) -> dict:
         except (TypeError, ValueError):
             continue
         names[int(y)] = str(nm).strip() if nm and str(nm).strip() else DEFAULT_INDEX
-        if src:
-            source = str(src)
+        sources[int(y)] = str(src).strip() if src and str(src).strip() else "entered by you"
     values.update(user)
     distinct = sorted(set(names.values()))
     name = distinct[0] if len(distinct) == 1 else " / ".join(distinct)
+    srcs = list(dict.fromkeys(sources[y] for y in sorted(sources)))
     return {
         "index_name": name,
         "names": names,
-        "source": source if not user else f"{source}; extended locally",
+        "sources": sources,
+        "source": "; ".join(srcs),
         "values": values,
         "years": sorted(values),
         "first_year": min(values) if values else None,
@@ -189,11 +194,15 @@ def deflator(index: dict, from_month: str | None, to_month: str | None,
                 f"(every year from {y0}), or the {n0} value for {y1}."),
         }
     if y0 in vals and y1 in vals and vals[y0]:
+        srcs = index.get("sources") or {}
+        s0, s1 = srcs.get(y0), srcs.get(y1)
         return {
             "factor": vals[y1] / vals[y0],
             "basis": "index",
             "index_name": n1 or index.get("index_name"),
-            "source": index.get("source"),
+            # the two endpoint years' own sources — not whatever was saved last
+            "source": (s0 if s0 == s1 else "; ".join(x for x in (s0, s1) if x))
+                      or index.get("source"),
             "from_year": y0, "to_year": y1,
             "from_value": vals[y0], "to_value": vals[y1],
             "reason": None,
@@ -232,7 +241,7 @@ def real_change_pct(nominal_pct: float | None, defl: dict) -> float | None:
     """
     if nominal_pct is None or not defl or not defl.get("factor"):
         return None
-    return round(100.0 * ((1.0 + nominal_pct / 100.0) / defl["factor"] - 1.0), 1)
+    return half_up(100.0 * ((1.0 + nominal_pct / 100.0) / defl["factor"] - 1.0), 1)
 
 
 def erosion_line(payer: str, nominal_pct: float | None, real_pct: float | None,

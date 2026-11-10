@@ -43,6 +43,7 @@ import logging
 import re
 import zipfile
 from pathlib import Path
+from .rounding import half_up
 
 log = logging.getLogger(__name__)
 
@@ -226,7 +227,7 @@ def compute_locality_rates(rvus: dict[str, dict], gpci: dict,
     return [{
         "code": code,
         "locality": gpci.get("name", ""),
-        "non_facility_rate": round(
+        "non_facility_rate": half_up(
             (v["work"] * gpci["work"] + v["pe_nonfac"] * gpci["pe"]
              + v["mp"] * gpci["mp"]) * float(conversion_factor), 2),
     } for code, v in sorted(rvus.items())]

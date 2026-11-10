@@ -41,6 +41,7 @@ reduction a payer applies, unit caps, denials and unpaid patient balances.
 from __future__ import annotations
 
 from .catalog import code_info
+from .rounding import half_up
 
 # The default basket. Shares of all physical-medicine & rehabilitation
 # procedures on all-payer claims, Jan-Sep 2023 (Definitive Healthcare, "Top
@@ -244,14 +245,14 @@ def price_visit(store, subject: str, market: dict | None, raw_lines=None,
                 missing.append(r["code"])
             else:
                 parts.append({"code": r["code"], "units": r["units"], "rate": v,
-                              "amount": round(r["units"] * v, 2)})
+                              "amount": half_up(r["units"] * v, 2)})
         if not parts:
             continue                       # this payer prices none of the visit
         complete = not missing
         rows.append({
             "payer": payer,
-            "visit_value": round(sum(p["amount"] for p in parts), 2) if complete else None,
-            "priced_value": round(sum(p["amount"] for p in parts), 2),
+            "visit_value": half_up(sum(p["amount"] for p in parts), 2) if complete else None,
+            "priced_value": half_up(sum(p["amount"] for p in parts), 2),
             "priced_units": sum(p["units"] for p in parts),
             "parts": parts, "missing_codes": missing, "complete": complete,
         })

@@ -22,6 +22,7 @@ from .benchmark import (BenchmarkError, _market_where, normalize_market,
 from .catalog import code_info
 from .inflation import (BASIS_CAVEAT, deflator, erosion_line, load_index,
                         real_change_pct)
+from .rounding import half_up
 from .store import Store, defuse_csv, generation_cached, mask_tin
 
 # a rate-change list beyond this is unusable in a browser and a memory risk to
@@ -295,7 +296,7 @@ def _diff(store: Store, market: dict, ctes: list[str], cte_params: list,
             "n": len(rs),
             "n_cuts": sum(1 for x in rs if x["direction"] == "cut"),
             "n_increases": sum(1 for x in rs if x["direction"] == "increase"),
-            "median_pct_change": round(statistics.median(x["pct_change"] for x in rs), 1),
+            "median_pct_change": half_up(statistics.median(x["pct_change"] for x in rs), 1),
         } for payer, rs in by_payer_map.items()),
         key=lambda d: d["median_pct_change"])
     return {
@@ -315,13 +316,18 @@ def _diff(store: Store, market: dict, ctes: list[str], cte_params: list,
 
 def compute_payer_trajectory(store: Store, market: dict, *, min_months: int = 2,
                              assume_inflation_pct: float | None = None) -> dict:
-    """Each payer's median therapy-rate trajectory across ALL loaded months —
-    the strategic read a two-month diff can't give: is a payer eroding rates
-    over time (sign a multi-year deal against), and how long is the cut streak?
+    """Each payer's therapy-rate trajectory across ALL loaded months — the
+    strategic read a two-month diff can't give: is a payer eroding rates over
+    time (sign a multi-year deal against), and how long is the cut streak?
 
-    The panel of practices priced can shift month to month, so this is the
-    market's median each month (directional), not a matched-line diff — that's
-    what compute_rate_changes is for. Payers ranked most-eroding first.
+    A MATCHED panel, per payer: the (code, practice) pairs the payer priced
+    in both its first and its last month. Each month, every pair's rate is
+    divided by its own first-month rate; the median ratio per code, then the
+    median across codes, is that month's index. A payer adding, dropping or
+    re-mixing codes or practices does not move it — only rates that moved do
+    (audit 8 P0: one median pooled over every code read a payer that added
+    a $30 code beside an unchanged $50 one as a 20 % cut). Payers ranked
+    most-eroding first.
     """
     months = available_months(store)
     if len(months) < min_months:
@@ -338,16 +344,57 @@ def compute_payer_trajectory(store: Store, market: dict, *, min_months: int = 2,
     where, params = _market_where(m, include_assistant, include_non_dollar)
     sql = f"""
     WITH base AS (
-        SELECT t.payer, t.file_month, t.tin_value, median(t.negotiated_rate) AS rate
+        SELECT t.payer, t.billing_code, t.file_month, t.tin_value,
+               median(t.negotiated_rate) AS rate
         FROM {spine_relation(m)} t LEFT JOIN tin_directory td USING (tin_value)
         WHERE {where}
-        GROUP BY t.payer, t.file_month, t.tin_value
+        GROUP BY t.payer, t.billing_code, t.file_month, t.tin_value
+    ),
+    ends AS (
+        SELECT payer, min(file_month) AS m0, max(file_month) AS m1,
+               count(DISTINCT file_month) AS n_months
+        FROM base GROUP BY payer
+    ),
+    first_pt AS (
+        SELECT b.payer, b.billing_code, b.tin_value, b.rate AS r0
+        FROM base b JOIN ends e ON b.payer = e.payer AND b.file_month = e.m0
+        WHERE b.rate > 0
+    ),
+    panel AS (
+        SELECT f.* FROM first_pt f
+        JOIN base b ON b.payer = f.payer AND b.billing_code = f.billing_code
+                   AND b.tin_value = f.tin_value
+        JOIN ends e ON e.payer = b.payer AND b.file_month = e.m1
+    ),
+    pairs AS (
+        SELECT b.payer, b.billing_code, b.file_month, b.tin_value, b.rate / p.r0 AS ratio
+        FROM base b JOIN panel p USING (payer, billing_code, tin_value)
+    ),
+    per_code AS (
+        SELECT payer, billing_code, file_month, median(ratio) AS ratio
+        FROM pairs GROUP BY payer, billing_code, file_month
+    ),
+    per_month AS (
+        SELECT payer, file_month, median(ratio) AS ratio, count(*) AS n_codes
+        FROM per_code GROUP BY payer, file_month
+    ),
+    practices AS (
+        SELECT payer, file_month, count(DISTINCT tin_value) AS n_practices
+        FROM pairs GROUP BY payer, file_month
+    ),
+    panel_size AS (
+        SELECT payer, count(DISTINCT billing_code) AS panel_codes,
+               count(DISTINCT tin_value) AS panel_practices
+        FROM panel GROUP BY payer
     )
-    SELECT payer, file_month,
-           round(median(rate), 2)    AS median_rate,
-           count(DISTINCT tin_value) AS n_practices
-    FROM base GROUP BY payer, file_month
-    ORDER BY payer, file_month
+    SELECT e.payer, e.n_months, e.m0, e.m1, coalesce(ps.panel_codes, 0) AS panel_codes,
+           coalesce(ps.panel_practices, 0) AS panel_practices,
+           pm.file_month, pm.ratio, pm.n_codes, pr.n_practices
+    FROM ends e
+    LEFT JOIN panel_size ps USING (payer)
+    LEFT JOIN per_month pm USING (payer)
+    LEFT JOIN practices pr ON pr.payer = pm.payer AND pr.file_month = pm.file_month
+    ORDER BY e.payer, pm.file_month
     """
     with store.connect() as con:
         cur = con.execute(sql, params)
@@ -355,48 +402,59 @@ def compute_payer_trajectory(store: Store, market: dict, *, min_months: int = 2,
         raw = [dict(zip(cols, r)) for r in cur.fetchall()]
 
     index = load_index(store)
-    series: dict[str, list] = {}
+    series: dict[str, dict] = {}
     for r in raw:
-        series.setdefault(r["payer"], []).append(r)
+        d = series.setdefault(r["payer"], {"head": r, "pts": []})
+        if r["file_month"] is not None and r["ratio"] is not None:
+            d["pts"].append(r)
     payers = []
-    for payer, pts in series.items():
-        pts.sort(key=lambda x: x["file_month"])
-        if len(pts) < min_months:
+    for payer, d in series.items():
+        head, pts = d["head"], sorted(d["pts"], key=lambda x: x["file_month"])
+        if head["n_months"] < min_months:
             continue  # need ≥2 months for THIS payer to trace a trajectory
-        first, last = pts[0], pts[-1]
-        cumulative = (round(100.0 * (last["median_rate"] - first["median_rate"])
-                            / first["median_rate"], 1)
-                      if first["median_rate"] else None)
+        first_m, last_m = head["m0"], head["m1"]
+        index_pts = [{"month": x["file_month"],
+                      "index_pct": half_up(100.0 * (x["ratio"] - 1.0), 1),
+                      "n_codes": x["n_codes"], "n_practices": x["n_practices"]}
+                     for x in pts]
+        last_pt = next((x for x in index_pts if x["month"] == last_m), None)
+        # no (code, practice) pair priced at both ends: nothing to compare —
+        # say so, never a number from two different panels
+        cumulative = last_pt["index_pct"] if last_pt and head["panel_codes"] else None
         # consecutive months of decline counting back from the newest point
         streak = 0
-        for i in range(len(pts) - 1, 0, -1):
-            if pts[i]["median_rate"] < pts[i - 1]["median_rate"]:
+        for i in range(len(index_pts) - 1, 0, -1):
+            if index_pts[i]["index_pct"] < index_pts[i - 1]["index_pct"]:
                 streak += 1
             else:
                 break
-        defl = deflator(index, first["file_month"], last["file_month"],
-                        assume_pct_per_year=assume_inflation_pct)
+        defl = deflator(index, first_m, last_m, assume_pct_per_year=assume_inflation_pct)
         real = real_change_pct(cumulative, defl)
         payers.append({
             "payer": payer,
-            "n_months": len(pts),
-            "first_month": first["file_month"], "last_month": last["file_month"],
-            "first_rate": first["median_rate"], "last_rate": last["median_rate"],
+            "n_months": head["n_months"],
+            "first_month": first_m, "last_month": last_m,
+            # the matched panel the change is measured on
+            "panel_codes": head["panel_codes"],
+            "panel_practices": head["panel_practices"],
             "cumulative_pct": cumulative,
             "cut_streak": streak,
             "direction": ("down" if cumulative is not None and cumulative < 0
                           else "up" if cumulative is not None and cumulative > 0
                           else "flat"),
-            "series": [{"month": p["file_month"], "median_rate": p["median_rate"],
-                        "n_practices": p["n_practices"]} for p in pts],
+            "series": index_pts,
             # A flat nominal rate is a pay CUT once costs rise; this is the
             # only place in the app that says so. None (with a reason) when no
             # index year covers the span — never an extrapolation.
             "real_cumulative_pct": real,
             "real_basis": defl.get("basis"),
-            "real_reason": defl.get("reason"),
-            "erosion_line": erosion_line(payer, cumulative, real,
-                                         first["file_month"], last["file_month"], defl),
+            # no matched panel is the more basic reason: say it before the index's
+            "real_reason": (defl.get("reason") if cumulative is not None else
+                            "no practice was priced on the same code in both the first "
+                            "and the last month, so there is no like-for-like change"),
+            "index_name": defl.get("index_name"),
+            "index_source": defl.get("source"),
+            "erosion_line": erosion_line(payer, cumulative, real, first_m, last_m, defl),
         })
     # most-eroding first (most negative cumulative change); flats/ups after
     payers.sort(key=lambda d: (d["cumulative_pct"] is None,
@@ -411,8 +469,12 @@ def compute_payer_trajectory(store: Store, market: dict, *, min_months: int = 2,
         "count": len(payers),
         "payers": payers,
         "inflation": {
-            "index_name": index["index_name"],
-            "source": index["source"],
+            # the index the printed real-terms figures were actually divided
+            # by (their endpoint years), not the whole table's mixed label
+            "index_name": next((p["index_name"] for p in real_ok if p.get("index_name")),
+                               index["index_name"]),
+            "source": next((p["index_source"] for p in real_ok if p.get("index_source")),
+                           index["source"]),
             "last_year": index["last_year"],
             "basis": ("assumption" if assumption else "index" if real_ok else None),
             "assumed_pct_per_year": assume_inflation_pct,
@@ -423,10 +485,11 @@ def compute_payer_trajectory(store: Store, market: dict, *, min_months: int = 2,
             "reason": next((p["real_reason"] for p in payers
                             if p["real_cumulative_pct"] is None and p["real_reason"]), None),
         },
-        "note": ("Median rate is over the practices priced EACH month; the panel "
-                 "can shift between months, so a trajectory is directional market "
-                 "movement, not a matched-contract diff (use the change monitor "
-                 "for line-level moves). Published rates, not collections."),
+        "note": ("Each payer's change is measured on a matched panel: the codes and "
+                 "practices it priced in both its first and its last month, each "
+                 "practice against its own first-month rate (median per code, then "
+                 "across codes). A payer adding or dropping codes or practices does "
+                 "not move it. Published rates, not collections."),
     }
 
 

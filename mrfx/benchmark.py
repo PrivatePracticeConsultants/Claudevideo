@@ -364,6 +364,19 @@ def _market_where(market: dict, include_assistant: bool, include_non_dollar: boo
     return " AND ".join(clauses + attr), params + attr_params
 
 
+# The market filters that describe the PEER population, not the practice
+# being benchmarked. The subject is whoever the user named: its own rate is
+# the same on every page — Benchmark, Negotiate, the rate card — whatever
+# state / city / therapists-only scope the peers are drawn from (audit 8
+# P1-2: a MO+KS practice read "your rate $40" on Benchmark, $50 on the
+# rate card; by hand, median(40, 60) = $50).
+PEER_ONLY_KEYS = ("therapy_only", "state", "city")
+
+
+def subject_market(market: dict) -> dict:
+    return {k: v for k, v in market.items() if k not in PEER_ONLY_KEYS}
+
+
 def _practice_attr_where(market: dict) -> tuple[list, list]:
     """The market clauses that select WHOLE practices or whole codes (never
     some of a practice's lines for a code): practice attributes from the
@@ -474,6 +487,37 @@ def practice_base_sql(store: Store, market: dict, *, per_payer: bool = False,
            f"WHERE {where}{' AND t.is_dollar_rate' if dollar_only else ''}{extra} "
            f"GROUP BY {', '.join(keys)}")
     return sql, [*(prefilter_params if prefilter else ()), *params, *extra_params]
+
+
+def subject_tins_for_market(store: Store, subject: str, market: dict) -> list[str]:
+    """The subject's TINs for a report scoped by `market` — ONE rule for
+    Benchmark, Negotiate and the rate card (audit 8 P1-2).
+
+    A bare organization NAME that practices in several states use is several
+    practices (the Explorer lists "NAME · MO" and "NAME · KS"): with a market
+    state, it means the one in that state, as the Explorer's entity does. A
+    mapped entity, an "NAME · ST" key, a TIN or an NPI is exactly what the
+    user named and keeps every rate it has, whatever state or therapists-only
+    scope the PEERS are drawn from (subject_market). Falls back to every TIN
+    when none of the same-named practices is in the state."""
+    tins = resolve_subject_tins(store, subject)
+    st = str(market.get("state") or "").strip().upper()
+    if not st or len(tins) < 2 or " · " in subject:
+        return tins
+    folded = subject.strip().casefold()
+    if any(str(n).strip().casefold() == folded for n in store.entity_map().values()):
+        return tins                       # a mapped entity: one practice by definition
+    with store.connect() as con:
+        rows = con.execute(
+            "SELECT tin_value, primary_state, lower(display_name) FROM tin_directory "
+            "WHERE tin_value IN (SELECT unnest(?::VARCHAR[]))", [tins]).fetchall()
+    if not rows or any(name != folded for _t, _s, name in rows):
+        return tins                       # not a by-name match (an id, a partial name)
+    states = {s for _t, s, _n in rows}
+    if len(states) < 2:
+        return tins
+    here = sorted(t for t, s, _n in rows if s == st)
+    return here or tins
 
 
 def resolve_subject_tins(store: Store, subject: str) -> list[str]:
@@ -625,11 +669,14 @@ def resolve_peer_set(store: Store, market: dict) -> tuple[str, dict]:
 def compute_benchmark(store: Store, subject: str, market: dict) -> dict:
     """Per-code subject vs market percentiles (§7B.1)."""
     market = resolve_plan_scope(store, normalize_market(market))
-    subject_tins = resolve_subject_tins(store, subject)
+    subject_tins = subject_tins_for_market(store, subject, market)
     peer_desc, market = resolve_peer_set(store, market)
     include_assistant = bool(market.get("include_assistant", False))
     include_non_dollar = bool(market.get("include_non_dollar", False))
     base_q, params = practice_base_sql(store, market)
+    subj_q, subj_params = practice_base_sql(
+        store, subject_market(market),
+        extra=" AND t.tin_value IN (SELECT tin FROM subject_tins)")
 
     curated = market.get("curated_tins")
     # peers filter runs directly on the already-grouped `base` CTE (aliased b) —
@@ -649,9 +696,9 @@ def compute_benchmark(store: Store, subject: str, market: dict) -> dict:
     WITH subject_tins AS (SELECT unnest(?::VARCHAR[]) AS tin),
     base AS ({base_q}),
     subject AS (
+        -- the subject's own TINs WITHOUT the peer-only filters (PEER_ONLY_KEYS)
         SELECT billing_code, round(median(rate), 2) AS subject_rate
-        FROM base WHERE tin_value IN (SELECT tin FROM subject_tins)
-        GROUP BY billing_code
+        FROM ({subj_q}) GROUP BY billing_code
     ),
     peers AS (
         SELECT b.billing_code, b.tin_value, b.rate
@@ -698,7 +745,7 @@ def compute_benchmark(store: Store, subject: str, market: dict) -> dict:
     ORDER BY m.billing_code
     """
     with store.connect() as con:
-        cur = con.execute(sql, [subject_tins, *params, *peer_params])
+        cur = con.execute(sql, [subject_tins, *params, *subj_params, *peer_params])
         cols = [d[0] for d in cur.description]
         rows = [dict(zip(cols, r)) for r in cur.fetchall()]
     # the Medicare anchor for the market's state, else the subject practice's
@@ -968,7 +1015,9 @@ def compute_payer_negotiation(store: Store, subject: str, market: dict,
 
 def _entity_rates(store: Store, tins: list[str], market: dict) -> dict[str, float]:
     """{code: rate} for one entity under the market basis: the entity's rate is
-    the median of its member TINs' medians — the same rule as everywhere else."""
+    the median of its member TINs' medians — the same rule as everywhere else.
+    A named entity's own rates ignore the peer-only filters (PEER_ONLY_KEYS)."""
+    market = subject_market(market)
     where, params = _market_where(market, bool(market.get("include_assistant")),
                                   bool(market.get("include_non_dollar")))
     rel = _rates_relation(market)
@@ -1006,7 +1055,7 @@ def compute_payer_comparison(store: Store, subject: str, payer: str, market: dic
         if not name or name == subject or name in seen_comps:
             continue
         seen_comps.add(name)
-        tins = resolve_subject_tins(store, name)
+        tins = subject_tins_for_market(store, name, pmarket)
         rates = _entity_rates(store, tins, pmarket)
         # a raw TIN typed WITH dashes must still be SSN-masked in the label
         digits = "".join(ch for ch in name if ch.isdigit())
@@ -1019,11 +1068,11 @@ def compute_payer_comparison(store: Store, subject: str, payer: str, market: dic
     # the market minus its payer, KEEPING the resolved plan scope: building it
     # with public_market() dropped `_plan_files`, and _market_where then
     # refused every plan-scoped Negotiate compare / payer-compare / proposal
-    other_market = {k: v for k, v in market.items() if k != "payers"}
+    other_market = {k: v for k, v in subject_market(market).items() if k != "payers"}
     o_where, o_params = _market_where(other_market, bool(market.get("include_assistant")),
                                       bool(market.get("include_non_dollar")))
     orel = _rates_relation(other_market)
-    subject_tins = resolve_subject_tins(store, subject)
+    subject_tins = subject_tins_for_market(store, subject, market)
     with store.connect() as con:
         # two-level entity rule here too (invariant 5): per-TIN median first,
         # THEN median across TINs per payer, THEN median across payers — pooling
@@ -1832,10 +1881,11 @@ def _erosion_block(store: Store, benchmark: dict, e) -> str:
     who = e(str(benchmark.get("subject") or "this practice"))
     return (
         "<h2>In real terms — the market, not this practice</h2>"
-        "<p class='note'>Each line is that payer's MEDIAN rate across every practice "
-        f"in this market scope, month by month — the market's trajectory, not "
-        f"{who}'s own contracts.</p>"
-        f"<p>Market median — {e(worst['erosion_line'])}</p>"
+        "<p class='note'>Each line is how that payer's rates moved across the practices "
+        "in this market scope that it priced on the same codes in both months (each "
+        "practice against its own earlier rate; median per code, then across codes) — "
+        f"the market's trajectory, not {who}'s own contracts.</p>"
+        f"<p>Market — {e(worst['erosion_line'])}</p>"
         "<table><thead><tr><th>Payer</th><th class='num'>Span</th>"
         "<th class='num'>Change in dollars</th>"
         "<th class='num'>Change in real terms</th></tr></thead>"
@@ -1844,8 +1894,8 @@ def _erosion_block(store: Store, benchmark: dict, e) -> str:
         + (f" Basis: an assumed {inf.get('assumed_pct_per_year')}%/yr, "
            "supplied by the analyst — not measured."
            if inf.get("basis") == "assumption" else
-           f" Basis: {e(str(inf.get('index_name') or ''))} "
-           f"({e(str(inf.get('source') or ''))}).")
+           f" Basis: {e(str(worst.get('index_name') or inf.get('index_name') or ''))} "
+           f"({e(str(worst.get('index_source') or inf.get('source') or ''))}).")
         + "</p>")
 
 
@@ -1896,7 +1946,8 @@ def render_pitch_report(cfg: MrfxConfig, store: Store, benchmark: dict,
     # deliverable (invariant 3).
     from .spark import SPARK_CSS, SPARK_NOTE, series_by_code, sparkline
     series = series_by_code(
-        store, resolve_subject_tins(store, benchmark["subject"]),
+        store, subject_tins_for_market(store, benchmark["subject"],
+                                       benchmark.get("market") or {}),
         benchmark.get("market") or {},
         codes=[r["billing_code"] for r in benchmark["rows"]])
     has_trend = any(len(v) >= 2 for v in series.values())

@@ -34,6 +34,7 @@ from .config import MrfxConfig
 from .schedule import (compute_fee_schedule, payer_scorecard,
                        render_rate_card, require_rate_card_content)
 from .store import Store
+from .rounding import half_up
 
 log = logging.getLogger(__name__)
 
@@ -445,8 +446,8 @@ def _wins_html(cfg: MrfxConfig, display: str, cmp: dict) -> str:
         cls = "up" if r["delta"] > 0 else "down" if r["delta"] < 0 else ""
         sign = "+" if r["delta"] > 0 else ""
         pct = f" ({sign}{r['delta_pct']}%)" if r.get("delta_pct") is not None else ""
-        pb = "" if r["pctile_before"] is None else f"p{round(r['pctile_before'])}"
-        pa = "" if r["pctile_after"] is None else f"p{round(r['pctile_after'])}"
+        pb = "" if r["pctile_before"] is None else f"p{half_up(r['pctile_before'])}"
+        pa = "" if r["pctile_after"] is None else f"p{half_up(r['pctile_after'])}"
         val = "" if r["annual_value"] is None else f"${r['annual_value']:,.2f}"
         return (f"<tr><td>{e(r['billing_code'])}"
                 f"<div class='sub'>{e(r.get('description') or '')}</div></td>"

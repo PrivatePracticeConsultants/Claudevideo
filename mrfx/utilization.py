@@ -37,6 +37,7 @@ from pathlib import Path
 
 from .catalog import CODE_CATALOG, code_info
 from .store import Store, sql_path
+from .rounding import half_up
 
 log = logging.getLogger(__name__)
 
@@ -332,7 +333,7 @@ def practice_utilization(store: Store, tins: list[str], year: str | None = None,
             "npis": len(npis), "matched_npis": matched,
             "total_units": sum(c["units"] for c in codes),
             "total_beneficiaries": sum(c["beneficiaries"] for c in codes),
-            "medicare_allowed": round(sum(
+            "medicare_allowed": half_up(sum(
                 (c["avg_allowed"] or 0) * c["units"] for c in codes), 2),
             "n_codes": len(codes),
             "office_only": office_only,
@@ -367,7 +368,7 @@ def suggested_volumes(store: Store, subject: str, year: str | None = None,
             + (f" in {u['year']}" if u.get("year") else
                " — import a CMS Physician & Other Practitioners file first "
                "(Data tab -> Medicare utilization)"))
-    volumes = {c["billing_code"]: (round(c["units"] * mult) if mult != 1.0
+    volumes = {c["billing_code"]: (half_up(c["units"] * mult) if mult != 1.0
                                   else c["units"]) for c in u["codes"]}
     return {"subject": subject, "year": u["year"], "volumes": volumes,
             "multiplier": mult, "summary": u["summary"], "codes": u["codes"],
@@ -463,7 +464,7 @@ def practice_growth(store: Store, subject: str, *, from_year: str | None = None,
             "billing_code": code, "description": code_info(code)[0],
             "units_from": int(o), "units_to": int(n),
             "delta": int(n - o),
-            "pct_change": round(100.0 * (n - o) / o, 1) if o else None,
+            "pct_change": half_up(100.0 * (n - o) / o, 1) if o else None,
         })
     rows.sort(key=lambda r: r["delta"])
 
@@ -471,7 +472,7 @@ def practice_growth(store: Store, subject: str, *, from_year: str | None = None,
     # suppression threshold would book a fake gain
     tot_old = sum(old_by[c] for c in both)
     tot_new = sum(new_by[c] for c in both)
-    pct = round(100.0 * (tot_new - tot_old) / tot_old, 1) if tot_old else None
+    pct = half_up(100.0 * (tot_new - tot_old) / tot_old, 1) if tot_old else None
     direction = ("grew" if pct and pct > 0 else "shrank" if pct and pct < 0
                  else "held flat")
     only_new = sorted(set(new_by) - set(old_by))

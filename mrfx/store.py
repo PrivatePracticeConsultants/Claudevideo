@@ -2526,8 +2526,14 @@ class Store:
         return out
 
     def url_queue_counts(self) -> dict:
+        """Per status — except that a paused copy WAITING on an identical-
+        looking download (waiting_on) is counted as 'waiting', not with the
+        stalled ones: it is the app saving a download, not a problem
+        (audit 8 P2-E)."""
         with self.connect() as con:
-            rows = con.execute("SELECT status, count(*) FROM url_queue GROUP BY status").fetchall()
+            rows = con.execute(
+                "SELECT CASE WHEN status = 'paused' AND waiting_on IS NOT NULL "
+                "THEN 'waiting' ELSE status END, count(*) FROM url_queue GROUP BY 1").fetchall()
         return {s: n for s, n in rows}
 
     def record_fingerprint(self, filename: str, fp: dict) -> None:
@@ -2540,6 +2546,16 @@ class Store:
                 "VALUES (?, ?, ?, ?, ?, ?, current_timestamp, NULL, ?, ?)",
                 [filename, fp["size"], fp["head_bytes"], fp["head_sha"], fp["tail_bytes"],
                  fp["tail_sha"], fp["win_sha"], fp["magic"]])
+
+    def loaded_fingerprint(self, filename: str) -> dict | None:
+        with self.connect() as con:
+            row = con.execute(
+                "SELECT size, head_bytes, head_sha, tail_bytes, tail_sha, win_sha, magic "
+                "FROM content_fingerprints WHERE filename = ?", [filename]).fetchone()
+        if not row:
+            return None
+        return dict(zip(("size", "head_bytes", "head_sha", "tail_bytes", "tail_sha",
+                         "win_sha", "magic"), row))
 
     def drop_fingerprint(self, filename: str) -> None:
         with self.write_lock, self.connect() as con:

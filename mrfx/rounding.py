@@ -6,8 +6,13 @@ in use, so one fact printed two ways: $45.00 against an MPFS $40.00 is
 112.5 %, which the SQL path and a person with a calculator call 113 % and
 round() called 112; positions 0 and 25 have a median of 12.5 — the headline
 said p12 while the per-code SQL said p13. half_up() rounds the DECIMAL a
-person reads (str(2.675) = "2.675" -> 2.68), half away from zero, with
-round()'s signature and return types: no ndigits -> int, ndigits -> float.
+DuckDB itself
+rounds: half away from zero on the DOUBLE product x * 10**d (audit 8 P2-9 —
+the decimal-string rule disagreed with SQL on 1,012 of 18,000 half-cent
+medians: 20.025 is stored as 20.02499…, SQL prints 20.02, str() said 20.03,
+so Overview's 45.12 sat beside Markets' 45.13). Checked against DuckDB's
+round() on 30,000 values at 0, 1 and 2 dp: identical. Same signature and
+return types as round(): no ndigits -> int, ndigits -> float.
 """
 
 from __future__ import annotations
@@ -22,11 +27,19 @@ def half_up(x, ndigits: int | None = None):
         return round(x, ndigits) if ndigits is not None else round(x)
     if isinstance(x, float) and (x != x or x in (float("inf"), float("-inf"))):
         return round(x, ndigits) if ndigits is not None else round(x)
+    nd = ndigits or 0
     try:
-        d = Decimal(str(x))
-        q = Decimal(1).scaleb(-(ndigits or 0))
-        r = d.quantize(q, rounding=ROUND_HALF_UP)
-    except (InvalidOperation, ValueError):
+        if isinstance(x, float):
+            # DuckDB's rule: scale in floating point, round the scaled double
+            # half away from zero (exactly — Decimal(float) is the binary
+            # value), scale back
+            scale = 10.0 ** nd
+            r = Decimal(x * scale).quantize(Decimal(1), rounding=ROUND_HALF_UP)
+            if ndigits is None:
+                return int(r)
+            return float(r) / scale
+        r = Decimal(x).quantize(Decimal(1).scaleb(-nd), rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError, OverflowError):
         return round(x, ndigits) if ndigits is not None else round(x)
     if ndigits is None:
         return int(r)

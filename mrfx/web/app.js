@@ -1834,7 +1834,7 @@ function reportPayloadOrConfirmNational() {
 // the raw JSON wrapper.
 async function refusalText(r) {
   const raw = await r.text();
-  try { return JSON.parse(raw).detail || raw; } catch (_) { return raw; }
+  try { const j = JSON.parse(raw); return j.detail || j.error || raw; } catch (_) { return raw; }
 }
 
 // A GET export (CSV/ZIP, possibly many GB): the browser still streams it
@@ -1851,7 +1851,7 @@ function downloadInFrame(url) {
     catch (_) { text = ""; }
     if (text && text.trim()) {
       let msg = text;
-      try { msg = JSON.parse(text).detail || text; } catch (_) { /* plain text */ }
+      try { const j = JSON.parse(text); msg = j.detail || j.error || text; } catch (_) { /* plain text */ }
       alert("The export was not built.\n\n" + msg);
     }
     setTimeout(() => f.remove(), 1000);
@@ -3918,7 +3918,7 @@ async function runTrajectory() {
     return `<tr>
       <td>${esc(p.payer)}</td>
       <td class="num muted">${esc(p.first_month)}→${esc(p.last_month)} (${p.n_months})</td>
-      <td class="num">${money(p.first_rate)} → <b>${money(p.last_rate)}</b></td>
+      <td class="num muted" title="the codes and practices this payer priced in both its first and last month — the change is measured on these only">${fmtInt(p.panel_codes || 0)} codes · ${fmtInt(p.panel_practices || 0)} practices</td>
       <td class="num ${cls}">${arrow[p.direction] || ""} ${pctTxt(p.cumulative_pct)}</td>
       <td class="num ${realCls}" title="${esc(p.erosion_line || p.real_reason || "")}">${pctTxt(p.real_cumulative_pct)}</td>
       <td class="num muted">${p.cut_streak || 0}</td></tr>`;
@@ -3939,7 +3939,7 @@ async function runTrajectory() {
     <div class="muted" style="margin-bottom:6px">${esc(d.note)} Most-eroding first.</div>
     ${lines}
     <div class="tablewrap"><table>
-      <thead><tr><th>Payer</th><th class="num">Span</th><th class="num">First → last median</th><th class="num">Cumulative</th><th class="num" title="the same change restated in constant dollars — a flat rate is a real cut">Real terms</th><th class="num">Cut streak</th></tr></thead>
+      <thead><tr><th>Payer</th><th class="num">Span</th><th class="num">Matched panel</th><th class="num">Cumulative</th><th class="num" title="the same change restated in constant dollars — a flat rate is a real cut">Real terms</th><th class="num">Cut streak</th></tr></thead>
       <tbody>${rows}</tbody></table></div>
     <div class="muted" style="margin-top:6px">${basis} ${esc(inf.caveat || "")}</div></div>`;
 }
@@ -4056,10 +4056,19 @@ function qaLine(qa) {
     : `<span class="qa-line muted">clean</span>`;
 }
 
+let filesInFlight = false;
 async function loadFiles() {
+  // the 4 s poll must not stack requests behind a slow store, nor run while
+  // the browser tab is hidden (audit 8 P1-C)
+  if (filesInFlight || document.hidden) return;
+  filesInFlight = true;
+  try { await loadFilesNow(); } finally { filesInFlight = false; }
+}
+
+async function loadFilesNow() {
   const body = $("#files-body"), stateEl = $("#files-state");
   let d;
-  try { d = await api("/api/files"); }
+  try { d = await api(`/api/files?limit=${state.filesLimit || 500}`); }
   catch (e) { stateEl.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
   if (!d.files.length) {
     body.innerHTML = "";
@@ -4067,7 +4076,12 @@ async function loadFiles() {
       Drop an MRF into <code class="inline">data/inbox/</code> or use the upload zone above.</div>`;
     return;
   }
-  stateEl.innerHTML = "";
+  stateEl.innerHTML = d.total > d.files.length
+    ? `<div class="muted">Showing the newest ${fmtInt(d.files.length)} of ${fmtInt(d.total)} files.
+        <button class="btn" id="files-more" style="padding:2px 8px;font-size:12px">show ${fmtInt(Math.min(d.total, (state.filesLimit || 500) * 4))}</button></div>`
+    : "";
+  const more = $("#files-more");
+  if (more) more.onclick = () => { state.filesLimit = Math.min(5000, (state.filesLimit || 500) * 4); loadFiles(); };
   body.innerHTML = d.files.map((f) => {
     let warn = "";
     if (f.ref_groups_skipped > 0) {
@@ -4077,6 +4091,9 @@ async function loadFiles() {
         : remote > 0
           ? `<span class="warn-text">⚠ ${fmtInt(f.ref_groups_skipped)} rate groups skipped — ${fmtInt(remote)} point at remote provider lists MRF Explorer doesn't download; the rest need the payer's provider reference file</span>`
           : `<span class="warn-text">⚠ ${fmtInt(f.ref_groups_skipped)} rate groups skipped — missing provider reference file</span>`;
+      const amb = (f.qa && f.qa.ambiguous_ref_ids) || 0;
+      if (amb > 0 && remote < f.ref_groups_skipped)
+        warn = `<span class="warn-text" title="This file has no provider list of its own, and two of the payer's provider reference files from the same month define the same reference ids differently (for example a PPO and an HMO list). MRF Explorer cannot tell which one this file means, so it attached neither rather than guess.">⚠ ${fmtInt(f.ref_groups_skipped)} rate groups skipped — ${fmtInt(amb)} reference id(s) defined differently by two of the payer's reference files; neither used</span>`;
     }
     // a group whose references were only PARTLY found kept the practices it
     // could name and dropped the rest — say so (round 7 P1.7)
@@ -4084,6 +4101,10 @@ async function loadFiles() {
     if (missingIds > 0 && !(f.ref_groups_skipped > 0)) {
       warn = `<span class="warn-text" title="Some rate groups listed several provider references and only some were in the file. The practices behind the missing ones are not in the store yet; dropping the payer's provider reference file in re-ingests this file automatically.">⚠ ${fmtInt(missingIds)} provider reference(s) not found — some practices missing; needs the payer's provider reference file</span>`;
     }
+    // rule-3 migration: an older version may have dropped spelled-out
+    // "fee for service" items as bundled — only a re-ingest can tell
+    if (!warn && f.qa && f.qa.reingest_suggested)
+      warn = `<span class="warn-text" title="${esc(f.qa.reingest_suggested)}">⚠ re-ingest suggested — ${fmtInt(f.qa.bundled_items || 0)} item(s) were left out as bundled by an older version</span>`;
     let statusExtra = "";
     if (f.status === "pending_confirmation")
       statusExtra = ` <button class="btn" style="padding:2px 8px;font-size:12px" data-confirm="${esc(f.filename)}">ingest anyway</button>`;
@@ -4175,13 +4196,21 @@ async function loadUrlQueue() {
     // over-size files are their OWN category, not failures — otherwise one big
     // payer's shards make the failure count look alarming and bury real errors
     oversize: (n) => `<span class="warn-text">${n} too big (needs your OK)</span>`,
+    waiting: (n) => `${n} waiting <span class="muted">(copies of a file already downloading — skipped for free if it matches)</span>`,
     paused: (n) => `<span class="warn-text">${n} paused <span class="muted">(their servers stopped sending — parked ones rejoin the line within minutes, the rest retry by themselves)</span></span>`,
     failed: (n) => `<span class="err-text">${n} failed</span>`,
   };
   const parts = ["downloading", "expanding", "ingesting", "fetched", "oversize", "paused",
-                 "failed", "done", "skipped", "queued"]
+                 "waiting", "failed", "done", "skipped", "queued"]
     .filter((k) => c[k]).map((k) => (countLabel[k] || ((n) => `${n} ${k}`))(fmtInt(c[k])));
-  countsEl.innerHTML = parts.join(" · ") +
+  const ds = d.settings || {};
+  const setLine = ds.downloads
+    ? `<div class="sub muted" style="margin-top:4px">Downloads: ${fmtInt(ds.downloads)} at a time`
+      + (ds.small_file_downloads ? ` (${fmtInt(ds.small_file_downloads)} kept for files of ${fmtInt(ds.small_file_mb)} MB or less)` : "")
+      + (ds.early_dedup_mb ? ` · copies of a loaded file are recognised after the first ${fmtInt(ds.early_dedup_mb)} MB` : " · early duplicate check off")
+      + ` · change these in ${esc(ds.config_file || "config/mrfx.yaml")} (parallel_downloads, small_file_downloads, small_file_mb, early_dedup_mb), then restart</div>`
+    : "";
+  countsEl.innerHTML = setLine + parts.join(" · ") +
     (total > d.urls.length ? ` <span class="muted">(showing ${fmtInt(d.urls.length)} of ${fmtInt(total)} links — every active, too-big, paused and failed one; the newest finished; the next queued)</span>` : "");
   if (c.failed) {
     const btn = document.createElement("button");
@@ -4195,18 +4224,26 @@ async function loadUrlQueue() {
     });
     countsEl.appendChild(btn);
   }
+  // a row that left "downloading" (parked, finished, handed back) must not
+  // carry its old stall timer into its next download (audit 8 P2-E)
+  for (const u of d.urls) if (u.status !== "downloading") _stallSeen.delete(u.id);
   body.innerHTML = d.urls.map((u) => {
     const short = u.url.split("?")[0].replace(/^https?:\/\//, "");
     const shown = short.length > 78 ? short.slice(0, 38) + "…" + short.slice(-37) : short;
     const badgeClass = u.status === "done" ? "done"
       : u.status === "failed" ? "failed"
       : u.status === "skipped" ? "skipped"
+      : u.status === "paused" && u.waiting_on != null ? "skipped"                 // neutral grey
       : u.status === "oversize" || u.status === "paused" ? "pending_confirmation"  // amber, not red
       : "processing";
     // a PARKED download (its server went quiet for a few minutes) stepped
     // aside so the next file could use the slot; it rejoins within minutes
     const parked = u.status === "paused" && (u.park_count || 0) > 0;
-    const badgeLabel = u.status === "oversize" ? "too big" : parked ? "parked" : u.status;
+    // a copy WAITING on an identical-looking download is the app saving a
+    // download, not a stall: neutral grey, its own word (audit 8 P2-E)
+    const waiting = u.status === "paused" && u.waiting_on != null;
+    const badgeLabel = u.status === "oversize" ? "too big" : waiting ? "waiting"
+      : parked ? "parked" : u.status;
     let statusCell = `<span class="badge ${esc(badgeClass)}">${esc(badgeLabel)}</span>`;
     if (u.status === "downloading" && u.bytes_total > 0) {
       statusCell += `<div class="progress"><div class="progress-fill" style="width:${Math.round(u.progress)}%"></div>
@@ -4221,6 +4258,10 @@ async function loadUrlQueue() {
         statusCell += `<div class="sub muted">no data for ${Math.round(held)}s —`
           + ` waiting on the payer's server, will reconnect and resume</div>`;
       }
+    } else if (u.status === "queued" && u.big_lane) {
+      // handed back at the headers: a big file waits for a big-file slot
+      // while the small-file slots keep moving (audit 8 P1-D)
+      statusCell += `<div class="sub muted">big file — waiting for a big-file download slot</div>`;
     } else if (u.status === "ingesting") {
       statusCell += ` <span class="muted">(see file row below for chunk progress)</span>`
         + ` <button class="btn" style="padding:1px 8px;font-size:11.5px" title="stop processing this file — the download is kept; retry processes it again without re-downloading" data-url-stop="${u.id}">stop</button>`;
@@ -4259,7 +4300,9 @@ async function loadUrlQueue() {
                 : ` Resumes about ${esc(localTime(u.retry_after))}.`) : ""}</span>`;
     return `<tr>
       <td title="${esc(u.url)}">${esc(shown)}</td>
-      <td>${esc(KIND_LABEL[u.kind] || u.kind || "…")}</td>
+      <td>${esc((!u.kind || u.kind === "unknown") && ["queued", "downloading", "fetched", "paused"].includes(u.status)
+        ? "…"   // not read yet: "?" read as "unrecognised" (audit 8 P3)
+        : KIND_LABEL[u.kind] || u.kind || "…")}</td>
       <td>${statusCell}</td>
       <td class="num">${u.rows_emitted ? fmtInt(u.rows_emitted) : ""}</td>
       <td style="max-width:420px">${notes}</td>
@@ -4454,6 +4497,7 @@ function isDollarType(t) {
 }
 
 async function uploadFiles(files) {
+  const notes = [];   // "already loaded" / "loaded under a new name" (audit 8 P1-B)
   for (const f of files) {
     if (f.size > 1 << 30) { alert(`${f.name} is over 1 GB — drop it into data/inbox/ instead.`); continue; }
     const fd = new FormData();
@@ -4461,13 +4505,17 @@ async function uploadFiles(files) {
     $("#dropzone").innerHTML = `<div class="loading">Uploading ${esc(f.name)}</div>`;
     try {
       const r = await fetch("/api/upload", { method: "POST", body: fd });
-      if (!r.ok) alert(`upload failed: ${(await r.json()).detail || r.status}`);
+      const raw = await r.text();
+      let body = {};
+      try { body = JSON.parse(raw); } catch (_) { /* not JSON */ }
+      if (!r.ok) alert(`upload failed: ${body.detail || body.error || raw || r.status}`);
+      else if (body.note) notes.push(body.note);
     } catch (e) { alert(`upload failed: ${e.message}`); }
   }
   // refresh in place — a full page reload dumped the user back on the
   // Explorer tab right after they dropped a file on the Files tab
   $("#dropzone").innerHTML = `<div class="muted">Uploaded — processing begins shortly.
-    Drop more files here.</div>`;
+    Drop more files here.</div>${notes.map((n) => `<div class="warn-text">${esc(n)}</div>`).join("")}`;
   loadFiles();
 }
 

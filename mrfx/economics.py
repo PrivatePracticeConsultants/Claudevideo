@@ -135,33 +135,41 @@ def visit_economics(store: Store, subject: str, market: dict | None = None, *,
                 "note": MIX_NOTE}
 
     payers = sorted({p for p, _c in priced})
+    covered_by = {p: {c for c in mix if (p, c) in priced} for p in payers}
+    covered_by = {p: cs for p, cs in covered_by.items() if cs}
+    # ONE basket for every payer compared: the mix codes ALL of them price.
+    # Re-normalising each payer over its own codes compared a payer pricing
+    # only an expensive code with one pricing the whole mix (audit 8 P1-4:
+    # "$150.00 from A vs $125.45 from B" when B pays MORE on the one code
+    # both price). A payer's own-codes value is still shown, never ranked.
+    common = set.intersection(*covered_by.values()) if covered_by else set()
+    common_units = sum(mix[c] for c in common)
     rows = []
-    for payer in payers:
-        # Only the codes this payer actually prices contribute, and the mix is
-        # RE-NORMALIZED over them: pricing a basket with a missing code at zero
-        # would make a payer that simply doesn't publish that code look cheap.
-        covered = {c: u for c, u in mix.items() if (payer, c) in priced}
+    for payer, codes in covered_by.items():
+        covered = {c: mix[c] for c in codes}
         cov_units = sum(covered.values())
-        if not cov_units:
-            continue
-        value_per_unit = sum(
-            priced[(payer, c)] * u for c, u in covered.items()) / cov_units
+        own_value = sum(priced[(payer, c)] * u for c, u in covered.items()) / cov_units
+        value_per_unit = (sum(priced[(payer, c)] * mix[c] for c in common) / common_units
+                          if common_units else own_value)
         rows.append({
             "payer": payer,
             "value_per_billed_unit": half_up(value_per_unit, 2),
             "value_per_visit": (half_up(value_per_unit * units_per_visit, 2)
                                 if units_per_visit else None),
+            "basket": "common" if common_units else "own codes",
+            "own_codes_value_per_billed_unit": half_up(own_value, 2),
             "codes_priced": len(covered),
             "codes_in_mix": len(mix),
             "mix_coverage_pct": half_up(100.0 * cov_units / total_units, 1),
             "annual_medicare_units": int(cov_units),
-            "annual_value_at_this_rate": half_up(value_per_unit * cov_units, 2),
+            "annual_value_at_this_rate": half_up(own_value * cov_units, 2),
         })
-    rows.sort(key=lambda r: r["value_per_billed_unit"], reverse=True)
+    rows.sort(key=lambda r: (-r["value_per_billed_unit"], r["payer"]))
 
-    best, worst = (rows[0], rows[-1]) if rows else (None, None)
+    comparable = bool(common_units) and len(rows) > 1
+    best, worst = (rows[0], rows[-1]) if comparable else (None, None)
     spread = (half_up(best["value_per_billed_unit"] - worst["value_per_billed_unit"], 2)
-              if best and worst and best is not worst else None)
+              if comparable else None)
     unit_word = "visit" if units_per_visit else "billed unit"
 
     def _fig(r):
@@ -169,12 +177,22 @@ def visit_economics(store: Store, subject: str, market: dict | None = None, *,
                 else r["value_per_billed_unit"])
 
     headline = "No payer prices enough of this practice's mix to value a visit."
-    if rows and spread:
+    basket_note = (f" Compared on the {len(common)} code(s) every payer here prices — "
+                   f"{half_up(100.0 * common_units / total_units, 1):g}% of the mix."
+                   if comparable else "")
+    if comparable and spread:
         gap = (half_up(_fig(best) - _fig(worst), 2))
         headline = (
             f"On this practice's own Medicare mix, a {unit_word} is worth "
             f"${_fig(best):,.2f} from {best['payer']} and ${_fig(worst):,.2f} "
-            f"from {worst['payer']} — ${gap:,.2f} apart for the same work.")
+            f"from {worst['payer']} — ${gap:,.2f} apart for the same work."
+            + basket_note)
+    elif comparable:
+        headline = (f"On this practice's own Medicare mix, every payer here pays "
+                    f"the same ${_fig(rows[0]):,.2f} a {unit_word}." + basket_note)
+    elif len(rows) > 1:
+        headline = ("No code in this practice's mix is priced by every payer, so "
+                    "the payers are not ranked: each is valued on its own codes below.")
     elif rows:
         headline = (f"A {unit_word} on this practice's mix is worth "
                     f"${_fig(rows[0]):,.2f} from {rows[0]['payer']}.")
@@ -196,6 +214,9 @@ def visit_economics(store: Store, subject: str, market: dict | None = None, *,
         "best_payer": best["payer"] if best else None,
         "worst_payer": worst["payer"] if worst else None,
         "spread_per_unit": spread,
+        "common_codes": sorted(common),
+        "common_coverage_pct": (half_up(100.0 * common_units / total_units, 1)
+                                if common_units else 0.0),
         "market": fs.get("market"),
         "headline": headline,
         "note": MIX_NOTE + " " + VISIT_NOTE,

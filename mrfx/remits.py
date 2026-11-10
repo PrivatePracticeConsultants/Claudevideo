@@ -36,6 +36,7 @@ from .benchmark import (BenchmarkError, _market_where, _rates_relation,
                         normalize_market, resolve_subject_tins)
 from .parser import clean_code
 from .store import Store
+from .rounding import half_up
 
 log = logging.getLogger(__name__)
 
@@ -217,13 +218,13 @@ def check_underpayments(store: Store, subject: str, text: str,
                    " (and the code is priced by more than one payer, so the "
                    "payer column is needed to pick one)"))})
             continue
-        expected = round(rate * (ln["units"] or 1.0), 2)
-        short = round(expected - ln["amount"], 2)
+        expected = half_up(rate * (ln["units"] or 1.0), 2)
+        short = half_up(expected - ln["amount"], 2)
         # report the payer's REAL name, not the lowercased match key
         row = {**ln, "matched_payer": real_name.get(matched_payer, matched_payer),
-               "published_rate": round(rate, 2),
+               "published_rate": half_up(rate, 2),
                "expected": expected, "shortfall": short,
-               "pct_short": round(100.0 * short / expected, 1) if expected else None}
+               "pct_short": half_up(100.0 * short / expected, 1) if expected else None}
         if short > tolerance:
             total_short += short
             flagged.append(row)
@@ -237,7 +238,7 @@ def check_underpayments(store: Store, subject: str, text: str,
         "summary": {
             "lines_read": len(lines), "flagged": len(flagged),
             "ok": len(matched), "unmatched": len(unmatched),
-            "total_shortfall": round(total_short, 2),
+            "total_shortfall": half_up(total_short, 2),
             "basis_note": (
                 "You told the app these amounts are the ALLOWED amount."
                 if basis == "allowed" else

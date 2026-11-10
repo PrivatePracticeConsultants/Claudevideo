@@ -42,7 +42,7 @@ from .benchmark import (
     month_label,
     practice_base_sql,
     public_market,
-    resolve_subject_tins,
+    subject_tins_for_market,
 )
 from .catalog import code_info
 from .config import MrfxConfig
@@ -70,7 +70,7 @@ def compute_fee_schedule(store: Store, subject: str, market: dict, *,
     """
     from .benchmark import resolve_plan_scope
     market = resolve_plan_scope(store, normalize_market(market))
-    subject_tins = resolve_subject_tins(store, subject)
+    subject_tins = subject_tins_for_market(store, subject, market)
     include_assistant = bool(market.get("include_assistant", False))
     include_non_dollar = bool(market.get("include_non_dollar", False))
     where, params = _market_where(market, include_assistant, include_non_dollar)
@@ -82,9 +82,9 @@ def compute_fee_schedule(store: Store, subject: str, market: dict, *,
     # while the report banner promised "your own rates above are unaffected".
     # Basis and content filters (month, dollar/modifier/class, payers, codes,
     # discipline) still apply to both sides so the comparison stays like-for-like.
+    from .benchmark import subject_market
     subject_where, subject_params = _market_where(
-        {k: v for k, v in market.items() if k not in ("therapy_only", "state", "city")},
-        include_assistant, include_non_dollar)
+        subject_market(market), include_assistant, include_non_dollar)
     # Narrow the "latest" supersession window to THIS SUBJECT before it runs.
     # tin_value is part of the window's partition key, so selecting whole
     # partitions cannot change which vintage wins — but it stops the window
@@ -444,7 +444,8 @@ def render_rate_card(cfg: MrfxConfig, store: Store, fee_schedule: dict,
     # means no column at all, never a failed card.
     from .spark import SPARK_CSS, SPARK_NOTE, series_by_code, sparkline
     series = series_by_code(
-        store, resolve_subject_tins(store, fee_schedule["subject"]),
+        store, subject_tins_for_market(store, fee_schedule["subject"],
+                                       fee_schedule.get("market") or {}),
         fee_schedule.get("market") or {},
         codes=[c["billing_code"] for c in fee_schedule["codes"]])
     has_trend = any(len(v) >= 2 for v in series.values())

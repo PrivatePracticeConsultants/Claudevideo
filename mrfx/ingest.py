@@ -1359,6 +1359,49 @@ def requeue_skipped(cfg: MrfxConfig, store: Store, payer: str) -> list[str]:
     return requeued
 
 
+_SAME_NAME_SEEN: dict = {}   # (inbox path, size, mtime) -> verdict, so a kept
+                             # done file is fingerprinted once, not every scan
+
+
+def same_as_loaded(cfg: MrfxConfig, store: Store, path: Path, prior: dict,
+                   name: str | None = None) -> bool:
+    """Is the file at `path` the one already loaded under its name? Its
+    fingerprint (size, first MB, last MB, 8 samples) against the one the
+    ingest recorded; a load older than fingerprints compares size only."""
+    from .fetch import file_fingerprint
+    try:
+        st = path.stat()
+    except OSError:
+        return True
+    key = (str(path), st.st_size, st.st_mtime_ns)
+    if key in _SAME_NAME_SEEN:
+        return _SAME_NAME_SEEN[key]
+    loaded = store.loaded_fingerprint(name or path.name)
+    if loaded is None:
+        same = prior.get("size_bytes") in (None, st.st_size)
+    else:
+        mine = file_fingerprint(path, max(1, int(loaded.get("head_bytes") or 0) >> 20) or 1)
+        same = bool(mine) and all(mine.get(k) == loaded.get(k) for k in
+                                  ("size", "head_sha", "tail_sha", "win_sha")
+                                  if loaded.get(k) is not None)
+    _SAME_NAME_SEEN[key] = same
+    return same
+
+
+def unique_inbox_name(directory: Path, name: str, store: Store, tag: str) -> str:
+    """`name` with `-<tag>` before its extensions (.json.gz stays .json.gz),
+    made unique against the directory and the store's files table."""
+    suffixes = "".join(s for s in Path(name).suffixes if s.lower() in
+                       (".json", ".gz", ".zip", ".csv", ".jsonl", ".bz2", ".xz", ".zst"))
+    stem = name[: len(name) - len(suffixes)] if suffixes else name
+    i = 0
+    while True:
+        cand = f"{stem}-{tag}{'' if not i else f'-{i}'}{suffixes}"
+        if not (directory / cand).exists() and store.file_status(cand) is None:
+            return cand
+        i += 1
+
+
 def scan_inbox(cfg: MrfxConfig, store: Store, force: bool = False, progress_bar=None) -> list[dict]:
     """One-shot pass over the inbox (used by `mrfx ingest` and the watcher).
 
@@ -1395,7 +1438,30 @@ def scan_inbox(cfg: MrfxConfig, store: Store, force: bool = False, progress_bar=
     flights = []
     for p in paths:
         prior = store.file_status(p.name)
-        if prior and prior.get("status") in ("done", "processing") and not force:
+        if prior and prior.get("status") == "done" and not force:
+            # a file under an already-loaded name: the same file (its move
+            # out of the inbox failed, or move_processed is off) is left
+            # alone; a DIFFERENT one used to sit in the inbox forever, never
+            # loaded and never mentioned (audit 8 P1-B) — load it under a new
+            # name instead
+            if same_as_loaded(cfg, store, p, prior):
+                if cfg.move_processed:
+                    _finish_file(cfg, p, ok=True)
+                continue
+            import hashlib
+            tag = hashlib.sha256(f"{p.stat().st_size}:{p.stat().st_mtime_ns}".encode()
+                                 ).hexdigest()[:6]
+            new = unique_inbox_name(p.parent, p.name, store, tag)
+            try:
+                p = p.rename(p.with_name(new))
+            except OSError as e:
+                log.warning("%s: a different file with this name was dropped in, but it "
+                            "could not be renamed (%s) — it was NOT loaded", p.name, e)
+                continue
+            log.info("%s: a different file under an already-loaded name — loading it "
+                     "as %s", prior["filename"], new)
+            prior = None
+        if prior and prior.get("status") == "processing" and not force:
             continue
         try:
             flights.append((p, preflight(p, cfg, store)))

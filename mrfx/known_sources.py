@@ -70,3 +70,31 @@ def for_states(sources: list[dict], states) -> list[dict]:
     if not want:
         return sources
     return [s for s in sources if "US" in s.get("states", []) or want & set(s.get("states", []))]
+
+
+def starter_links_text(path: Path | str) -> str:
+    """config/starter_links.txt, generated from the catalog: every queueable
+    entry, with its {FIRST_OF_MONTH} placeholder kept (resolved at queue
+    time). The file drifted from the catalog by hand (38 of 109 queueable
+    sources — audit 8 P2-H); tests/mrfx/test_audit8_ui.py pins the two."""
+    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8", errors="replace")) or {}
+    rows = [(str(s.get("name") or s["url"]).strip(), str(s["url"]).strip())
+            for s in (raw.get("sources") or [])
+            if isinstance(s, dict) and s.get("queueable") and s.get("url")]
+    seen: set = set()
+    rows = [r for r in rows if not (r[1] in seen or seen.add(r[1]))]
+    head = (
+        "# MRF Explorer — starter links: every queueable source in the tested-sources\n"
+        "# catalog (config/known_sources.yaml), generated from it — do not edit here.\n"
+        "#\n"
+        "# Load them all with:   mrfx add --known        (or --known --states MO,KS)\n"
+        "#                  or:  mrfx add --file config/starter_links.txt\n"
+        "# Or paste any subset into the dashboard's 'Paste file links' box. To keep your\n"
+        "# own list, COPY this file and edit the copy: an update replaces this one.\n"
+        "#\n"
+        "# {FIRST_OF_MONTH} resolves to the current month automatically when queued.\n"
+        "# Lines starting with # are ignored. Every link below cascades on its own:\n"
+        "# indexes expand, portals are crawled, duplicates and drug/allowed-amounts\n"
+        "# files are skipped, and files over confirm_over_gb wait for your go-ahead.\n"
+        f"\n# ---- {len(rows)} auto-queueable sources ----\n")
+    return head + "".join(f"# {n}\n{u}\n\n" for n, u in rows)

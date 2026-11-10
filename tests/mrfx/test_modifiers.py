@@ -9,6 +9,7 @@ import duckdb
 import pytest
 
 from mrfx.modifiers import base_sql, is_pos_list, normalize, split_modifiers
+from mrfx.store import ROW_RULES_VERSION
 
 
 @pytest.mark.parametrize("raw, pos, want", [
@@ -123,7 +124,7 @@ def test_old_store_is_fixed_once_at_open_exactly_like_a_reingest(cfg, tmp_path, 
     assert _rows(rates) == _rows(ref_cfg.store_dir / "rates")
     with st.connect() as con:
         rules, qa = con.execute("SELECT row_rules, qa FROM files").fetchone()
-    assert rules == 2
+    assert rules == ROW_RULES_VERSION
     qa = json.loads(qa)
     assert (qa["pos_in_modifier_rows"], qa["modifier_split_rows"], qa["rows"]) == (2, 1, 8)
     assert "Beta Health" in st.meta_get("rollup_pending_payers")
@@ -175,6 +176,6 @@ def test_failed_rewrite_leaves_rows_and_retries_next_start(cfg, monkeypatch, cap
     monkeypatch.undo()
     st = Store(cfg.store_dir)
     with st.connect() as con:
-        assert con.execute("SELECT row_rules FROM files").fetchone()[0] == 2
+        assert con.execute("SELECT row_rules FROM files").fetchone()[0] == ROW_RULES_VERSION
     assert _rows(rates) != before
     st.close()

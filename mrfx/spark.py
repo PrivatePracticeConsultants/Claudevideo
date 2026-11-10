@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import html
 import math
+from .rounding import half_up
 
 
 def _fmt(v) -> str:
@@ -72,7 +73,7 @@ def sparkline(points, *, width: int = 84, height: int = 22,
     # colour by direction, but only when there IS a direction
     stroke = "#667085" if last == first else ("#d92d20" if last < first else "#12805c")
     end_x, end_y = x(n - 1), y(last)
-    tip = (f"{label + ': ' if label else ''}"
+    tip = (f"{label + ' — ' if label else ''}median contract: "
            + " → ".join(f"{m} {_fmt(v)}" for m, v in pts))
     pct = (f" ({(last - first) / first * 100:+.1f}%)" if first else "")
     return (
@@ -98,7 +99,9 @@ SPARK_NOTE = (
     "newest month, back as far as all of them published (if that is only one "
     "month, it follows those that did publish earlier). A payer joining or "
     "leaving never moves the line; only a published rate change does. A single "
-    "month draws no line."
+    "month draws no line. The line is the median CONTRACT (one payer x one tax "
+    "ID), so its last point can differ from a rate printed beside it that pools "
+    "a practice's payers first. It ends at the document's as-of month."
 )
 
 
@@ -107,8 +110,12 @@ def _panel_series(cells: dict, months: list[str]) -> list[tuple[str, float]]:
 
     `cells` maps (payer, tin) -> {month: rate}. The panel is every contract
     present in the newest month, and the line goes back while ALL of them are
-    present — so the last point is the current median the table prints and a
-    payer's real move shows. If that leaves one month, the panel narrows
+    present — so a payer's real move shows. The last point is the median
+    CONTRACT in the newest month walked, NOT the practice rate a table prints
+    beside it (which pools a TIN's payers first): re-pooling per practice
+    would let a payer joining move the line again — so the line is labelled
+    a contract trend (SPARK_NOTE) instead of claiming to be the printed
+    number (audit 8 P1-7). If that leaves one month, the panel narrows
     month by month instead (the contracts present in every month walked).
     Either way the panel is constant along the line, so a payer entering or
     leaving can never make it move (round 7 P0.3: payer B appearing at $50
@@ -125,7 +132,7 @@ def _panel_series(cells: dict, months: list[str]) -> list[tuple[str, float]]:
             panel = keep
             window.append(m)
         window.reverse()
-        return [(m, round(statistics.median(cells[k][m] for k in sorted(panel)), 2))
+        return [(m, half_up(statistics.median(cells[k][m] for k in sorted(panel)), 2))
                 for m in window]
 
     full = walk(narrow=False)
@@ -139,7 +146,8 @@ def series_by_code(store, subject_tins: list[str], market: dict,
 
     Reads the same TIN-grain spine every other number does, with the market's
     basis filters applied, but WITHOUT pinning a month — the series is the
-    point. Each code's line is a fixed panel of (payer, TIN) contracts (see
+    point. A pinned as-of month is its LAST month: a report dated 2026-05
+    never shows a June point (audit 8 P1-7). Each code's line is a fixed panel of (payer, TIN) contracts (see
     _panel_series). Returns {} rather than raising: a sparkline is
     decoration, and decoration must never cost a deliverable (invariant 3).
     """
@@ -148,6 +156,8 @@ def series_by_code(store, subject_tins: list[str], market: dict,
     if not subject_tins:
         return {}
     try:
+        pinned = (market or {}).get("month")
+        pinned = pinned if pinned and str(pinned).lower() != "latest" else None
         m = normalize_market({**(market or {}), "month": "latest"})
         where, params = _market_where(m, bool(m.get("include_assistant")),
                                       bool(m.get("include_non_dollar")))
@@ -156,6 +166,9 @@ def series_by_code(store, subject_tins: list[str], market: dict,
         if codes:
             clause = f" AND t.billing_code IN ({', '.join('?' for _ in codes)})"
             extra = list(codes)
+        if pinned:
+            clause += " AND t.file_month <= ?"
+            extra.append(str(pinned))
         sql = f"""
             SELECT t.billing_code, t.file_month, t.payer, t.tin_value,
                    median(t.negotiated_rate) AS rate

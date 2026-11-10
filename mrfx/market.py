@@ -131,7 +131,10 @@ def negotiability(store: Store, code: str, market: dict) -> dict:
            round(max(rate), 2)                  AS max_rate
     FROM base GROUP BY payer
     HAVING count(DISTINCT tin_value) >= ?
-    ORDER BY (quantile_cont(rate, .90) - quantile_cont(rate, .10)) DESC, payer
+    -- ranked by the % spread it is labelled with (spread_pct), not dollars:
+    -- a $10 spread on a $40 code is more negotiation than $12 on $150 (audit 8 P3)
+    ORDER BY (quantile_cont(rate, .90) - quantile_cont(rate, .10))
+             / nullif(quantile_cont(rate, .50), 0) DESC NULLS LAST, payer
     """
     with store.connect() as con:
         rows = _dicts(con.execute(sql, [*params, _MIN_CELL]))
@@ -156,7 +159,8 @@ def negotiability(store: Store, code: str, market: dict) -> dict:
 
 def medicare_index(store: Store, code: str, market: dict) -> dict:
     """The market's and each payer's median rate for one code, as a percent of
-    Medicare (the median non-facility MPFS rate across loaded localities). The
+    Medicare (the non-facility MPFS rate of ONE locality: the market state's
+    anchor, store.medicare_anchor — not a median across localities). The
     domain's headline anchor. Absent an MPFS load, returns the dollar rates with
     pct_medicare = null and mpfs_loaded = null."""
     code, m, where, params, rel = _code_scope(code, market)

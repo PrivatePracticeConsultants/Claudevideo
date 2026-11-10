@@ -1173,7 +1173,7 @@ def test_the_real_terms_block_is_labelled_as_the_market(monkeypatch):
     out = _erosion_block(None, {"market": {"month": "latest"}, "subject": "A REHAB"}, html.escape)
     assert "the market, not this practice" in out
     assert "not A REHAB&#x27;s own contracts" in out or "not A REHAB's own contracts" in out
-    assert "Market median — Zed Health" in out
+    assert "Market — Zed Health" in out
 
 
 # -- P2 / P3 --------------------------------------------------------------------------
@@ -1216,4 +1216,4 @@ def test_paused_rows_block_forget_and_the_caches_and_version(cfg, store, capsys)
     assert hasattr(compute_rate_changes, "uncached") and hasattr(payer_months, "uncached")
     with pytest.raises(SystemExit):
         main(["--version"])
-    assert capsys.readouterr().out.strip() == f"mrfx {__version__}" == "mrfx 0.7.0"
+    assert capsys.readouterr().out.strip() == f"mrfx {__version__}" == "mrfx 0.7.1"

@@ -22,6 +22,7 @@ from .benchmark import (BASIS_NOTE, _market_where, _rates_relation,
                         normalize_market)
 from .catalog import code_info
 from .store import Store
+from .rounding import half_up
 
 # a payer must price at least this many distinct codes to appear in the index —
 # otherwise one lucky code makes it look like the best/worst payer in the market
@@ -133,11 +134,11 @@ def market_overview(store: Store, state: str | None = None) -> dict:
         "states": len(store.available_states()),
         "by_discipline": [
             {"discipline": d, "label": disc_label.get(d, d),
-             "median": round(m, 2) if m is not None else None, "practices": n}
+             "median": half_up(m, 2) if m is not None else None, "practices": n}
             for d, m, n in by_discipline],
         "top_codes": [
             {"billing_code": c, "description": code_info(c)[0],
-             "practices": n, "median": round(m, 2) if m is not None else None}
+             "practices": n, "median": half_up(m, 2) if m is not None else None}
             for c, n, m in top_codes],
         "payer_index": [
             {"payer": p, "index": idx, "codes": n_codes, "practices": int(n_prac)}

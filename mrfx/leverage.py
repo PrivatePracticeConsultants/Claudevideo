@@ -37,6 +37,7 @@ import logging
 
 from .sqlfn import modal_zip_of, pick_modal_zip, zip_counts_by_tin
 from .store import Store, mask_tin
+from .rounding import half_up
 
 log = logging.getLogger(__name__)
 
@@ -161,7 +162,7 @@ def network_leverage(store: Store, subject: str, payer: str,
             "tin_value": mask_tin(tin),
             "display_name": name or "(name pending)",
             "zip": zipc,
-            "miles": round(dist[zipc], 1) if zipc in dist else None,
+            "miles": half_up(dist[zipc], 1) if zipc in dist else None,
             "npi_count": n_npis,
             "therapy_npis": n_therapy,
             "is_therapy_practice": bool(is_therapy),
@@ -179,7 +180,7 @@ def network_leverage(store: Store, subject: str, payer: str,
     alts_phrase = (f"{n_alt} other therapy practice{s_alt}" if not n_non else
                    f"{n_alt} other practice{s_alt} ({n_non} of them "
                    f"{'not a therapy practice' if n_non == 1 else 'not therapy practices'})")
-    per_alt = (round(seniors / n_alt, 0)
+    per_alt = (half_up(seniors / n_alt, 0)
                if seniors and n_alt else None)
     band = ("thin" if n_alt <= THIN_ALTERNATIVES
             else "crowded" if n_alt >= CROWDED_ALTERNATIVES else "moderate")

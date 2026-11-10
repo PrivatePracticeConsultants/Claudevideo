@@ -1,28 +1,25 @@
-# MRF Explorer — starter links (everything verified in testing, ready to queue)
+# MRF Explorer — starter links: every queueable source in the tested-sources
+# catalog (config/known_sources.yaml), generated from it — do not edit here.
 #
-# Load them all with:   mrfx add --file config/starter_links.txt
-# (or paste any subset into the dashboard's 'Paste file links' box)
+# Load them all with:   mrfx add --known        (or --known --states MO,KS)
+#                  or:  mrfx add --file config/starter_links.txt
+# Or paste any subset into the dashboard's 'Paste file links' box. To keep your
+# own list, COPY this file and edit the copy: an update replaces this one.
 #
 # {FIRST_OF_MONTH} resolves to the current month automatically when queued.
 # Lines starting with # are ignored. Every link below cascades on its own:
 # indexes expand, portals are crawled, duplicates and drug/allowed-amounts
 # files are skipped, and files over confirm_over_gb wait for your go-ahead.
 
-# ---- 38 auto-queueable sources ----
+# ---- 109 auto-queueable sources ----
 # Highmark BCBS West Virginia
 https://mrfdata.hmhs.com/files/443/wv/inbound/local/{FIRST_OF_MONTH}_Highmark_Blue_Cross_Blue_Shield_of_West_Virginia_index.json
 
 # Blue Cross Blue Shield of Wyoming
 https://mrfdata.hmhs.com/files/460/wy/inbound/local/{FIRST_OF_MONTH}_Blue_Cross_Blue_Shield_of_Wyoming_index.json
 
-# Blue Cross and Blue Shield of Nebraska
-https://mrfdata.hmhs.com/files/363/pa/inbound/local/{FIRST_OF_MONTH}_Blue_Cross_and_Blue_Shield_of_Nebraska_index.json
-
 # Highmark Blue Shield of Western New York
 https://mrfdata.hmhs.com/files/301/wny/inbound/local/{FIRST_OF_MONTH}_Highmark_Blue_Shield_of_Western_New_York_index.json
-
-# Blue Cross and Blue Shield of Florida (Florida Blue)
-https://mrfdata.hmhs.com/files/363/pa/inbound/local/{FIRST_OF_MONTH}_Blue_Cross_and_Blue_Shield_of_Florida_index.json
 
 # Highmark BCBS Delaware
 https://mrfdata.hmhs.com/files/070/del/inbound/local/{FIRST_OF_MONTH}_Highmark_Blue_Cross_Blue_Shield_of_Delaware_index.json
@@ -33,29 +30,26 @@ https://mrfdata.hmhs.com/files/320/nd/inbound/local/{FIRST_OF_MONTH}_BlueCrossBl
 # Highmark BCBS Pennsylvania
 https://mrfdata.hmhs.com/files/363/pa/inbound/local/{FIRST_OF_MONTH}_Highmark_Blue_Cross_Blue_Shield_of_Pennsylvania_index.json
 
+# Blue Cross of Idaho
+https://bci.sapphiremrfhub.com/
+
+# BCBS Nebraska (own book)
+https://mrf.healthsparq.com/bcbsne-egress.nophi.kyruushsq.com/prd/mrf/BCBSNE_I/BCBSNE/latest_metadata.json
+
+# BCBS Arizona (own book)
+https://mrf.healthsparq.com/bcbsaz-egress.nophi.kyruushsq.com/prd/mrf/BCBSAZ_I/BCBSAZ/latest_metadata.json
+
 # Highmark Blue Shield of Pennsylvania
 https://mrfdata.hmhs.com/files/378/pa/inbound/local/{FIRST_OF_MONTH}_Highmark_Blue_Shield_of_Pennsylvania_index.json
 
 # Highmark Blue Shield of Northeastern New York
 https://mrfdata.hmhs.com/files/800/nny/inbound/local/{FIRST_OF_MONTH}_Highmark_Blue_Shield_of_Northeastern_New_York_index.json
 
-# Blue Cross and Blue Shield of Arizona
-https://mrfdata.hmhs.com/files/363/pa/inbound/local/{FIRST_OF_MONTH}_Blue_Cross_and_Blue_Shield_of_Arizona_index.json
-
-# Blue Cross of Idaho
-https://mrfdata.hmhs.com/files/363/pa/inbound/local/{FIRST_OF_MONTH}_Blue_Cross_of_Idaho_index.json
-
-# Blue Cross and Blue Shield of Minnesota (partnership book)
-https://mrfdata.hmhs.com/files/363/pa/inbound/local/{FIRST_OF_MONTH}_Blue_Cross_and_Blue_Shield_of_Minnesota_index.json
-
-# Blue Cross and Blue Shield of Louisiana
-https://mrfdata.hmhs.com/files/363/pa/inbound/local/{FIRST_OF_MONTH}_Blue_Cross_Blue_Shield_Louisana_index.json
-
-# Independence National Alliance (powered by Highmark)
-https://mrfdata.hmhs.com/files/363/pa/inbound/local/{FIRST_OF_MONTH}_Independence_National_Alliance_index.json
-
 # Blue Cross & Blue Shield of Mississippi
 https://tcr.bcbsms.com/Table_of_Contents/Local_TOC.json
+
+# Anthem / Elevance national master index (14 states)
+https://antm-pt-prod-dataz-nogbd-nophi-us-east1.s3.amazonaws.com/anthem/{FIRST_OF_MONTH}_anthem_index.json.gz
 
 # Blue Cross and Blue Shield of Kansas City (Blue KC)
 https://bcbskc.sapphiremrfhub.com
@@ -72,79 +66,276 @@ https://www.centene.com/price-transparency-files.html
 # UnitedHealthcare (national)
 https://transparency-in-coverage.uhc.com/
 
-# BCBS Tennessee
-https://www.bcbst.com/tcr
+# SelectHealth (Intermountain — Utah / Idaho / Nevada)
+https://ebu.intermountainhealthcare.org/selecthealth/transparencyincoverage/
 
-# Cigna (national)
+# Moda Health (Oregon / Alaska / Texas)
+https://mrf.modahealth.com/mrf/Moda/{FIRST_OF_MONTH}_moda_ModaSelect_index.json
+
+# First Health PPO via Healthgram (national rental network)
+https://mrf.healthgram.com/mrfiles/FRST/FirstHealth_index.json
+
+# Tufts Health Public Plans (Point32Health — Massachusetts)
+https://eusprdtransparencymrfp32.blob.core.windows.net/thp/{FIRST_OF_MONTH}_TuftsHealthPublicPlansInc_index.json
+
+# Security Health Plan (Wisconsin)
+https://www.securityhealth.org/insurance-resources/json
+
+# Cigna
 https://www.cigna.com/legal/compliance/machine-readable-files
 
-# BCBS South Carolina (+ InStil Health)
-https://www.southcarolinablues.com/web/public/brands/universal/transparency-in-coverage/?branding=sc
+# Aetna / CVS Health
+https://health1.aetna.com/app/public/#/one/insurerCode=AETNACVS_I&brandCode=ALICFI/machine-readable-transparency-in-coverage
 
 # CareFirst (Maryland / DC / N. Virginia)
 https://individual.carefirst.com/individuals-families/mandates-policies/machine-readable-file.page
 
+# BCBS Tennessee
+https://www.bcbst.com/tcr
+
+# Wellmark BCBS (Iowa / South Dakota)
+https://mrf.healthsparq.com/wmrk-egress.nophi.kyruushsq.com/prd/mrf/WMRK_I/WELLMARK/latest_metadata.json
+
+# Horizon BCBS New Jersey
+https://horizonblue.sapphiremrfhub.com/
+
+# Premera Blue Cross (Washington / Alaska)
+https://mrf.healthsparq.com/premera-egress.nophi.kyruushsq.com/prd/mrf/PREMERA_I/PREMERA/latest_metadata.json
+
+# Regence (Cambia — OR / WA / UT / ID)
+https://www.regence.com/transparency-in-coverage/
+
+# Kaiser Permanente (all regions)
+https://healthy.kaiserpermanente.org/southern-california/front-door/machine-readable
+
+# Oscar Health
+https://www.hioscar.com/transparency-in-coverage-files/oscar
+
+# Harvard Pilgrim / Point32Health (MA / NH / ME / CT)
+https://www.harvardpilgrim.org/public/machine-readable-files
+
 # BCBS North Carolina
 https://www.bluecrossnc.com/policies-best-practices/machine-readable-files
 
-# Molina Healthcare (all states; needs Playwright — see README's JavaScript-portals section)
-https://www.molinahealthcare.com/marketplace/wa/en-us/About/compinfo/PricingTransparency
+# BCBS South Carolina
+https://www.southcarolinablues.com/web/public/brands/universal/transparency-in-coverage/?branding=sc
 
-# Kaiser Permanente (all regions; needs Playwright)
-https://healthy.kaiserpermanente.org/southern-california/front-door/machine-readable
+# Priority Health (Michigan)
+https://priorityhealthtransparencymrfs.s3.us-east-1.amazonaws.com/CompleteList.html
 
-# Aetna / CVS Health (needs Playwright)
-https://health1.aetna.com/app/public/#/one/insurerCode=AETNACVS_I&brandCode=ALICFI/machine-readable-transparency-in-coverage
+# BCBS Vermont
+https://www.bluecrossvt.org/documents/toc-json
 
-# Harvard Pilgrim / Point32Health (needs Playwright; republished monthly)
-https://www.harvardpilgrim.org/public/machine-readable-files
+# Blue Shield of California
+https://mrf.healthsparq.com/bsca-egress.nophi.kyruushsq.com/prd/mrf/BSCA_I/BSCA/latest_metadata.json
 
-# Regence (Cambia — OR / WA / UT / ID; needs Playwright)
-https://www.regence.com/transparency-in-coverage/
+# Excellus BCBS (upstate New York)
+https://mrf.healthsparq.com/exc-egress.nophi.kyruushsq.com/prd/mrf/EXC_I/EXC/latest_metadata.json
 
-# Oscar Health (newest month only — deliberately the direct S3 index, NOT the
-# page in known_sources.yaml: the page lifts years of history and needs the
-# headless browser; this URL is bounded and browser-free)
-https://hioscar-cms-tic-us-east-1.s3.amazonaws.com/oscar/{FIRST_OF_MONTH}_oscar_index.json
+# Capital Blue Cross (central Pennsylvania)
+https://mrf.healthsparq.com/capbc-egress.nophi.kyruushsq.com/prd/mrf/CAPBC_I/CAPBC/latest_metadata.json
 
-# Anthem / Elevance national master index — 14 states (set confirm_over_gb: 12 first)
-https://antm-pt-prod-dataz-nogbd-nophi-us-east1.s3.amazonaws.com/anthem/{FIRST_OF_MONTH}_anthem_index.json.gz
+# Health New England (Massachusetts)
+https://mrf.healthsparq.com/hne-egress.nophi.kyruushsq.com/prd/mrf/HNE_I/HNE/latest_metadata.json
 
-# SelectHealth (Intermountain — UT / ID / NV; directory of ~125 per-plan indexes,
-# mid-month dates — the app lifts the current links off this listing itself)
-https://ebu.intermountainhealthcare.org/selecthealth/transparencyincoverage/
+# SummaCare (Ohio)
+https://files.myplancentral.com/TIC/TOC/
 
-# Moda Health (OR / AK / TX — ModaSelect book; Connexus/Affinity swap the plan name)
-https://mrf.modahealth.com/mrf/Moda/{FIRST_OF_MONTH}_moda_ModaSelect_index.json
+# Univera Healthcare (western New York)
+https://mrf.healthsparq.com/unvra-egress.nophi.kyruushsq.com/prd/mrf/UNVRA_I/UNVRA/latest_metadata.json
 
-# First Health PPO via Healthgram (Aetna's rental network — stable undated TOC)
-https://mrf.healthgram.com/mrfiles/FRST/FirstHealth_index.json
+# Optima Health / Sentara (Virginia)
+https://mrfproddestinationdata.blob.core.windows.net/sentara-mrf-output/Sentara-Health-Plans-INN_index.html
 
-# Tufts Health Public Plans (Point32Health — MA Medicaid/ConnectorCare book)
-https://eusprdtransparencymrfp32.blob.core.windows.net/thp/{FIRST_OF_MONTH}_TuftsHealthPublicPlansInc_index.json
+# UPMC Health Plan (Pennsylvania)
+https://content.upmchp.com/publicweb/table-of-contents/{FIRST_OF_MONTH}_UPMC-Health-Plan_index.json
 
-# Security Health Plan (Wisconsin — listing page of per-employer zip TOCs)
-https://www.securityhealth.org/insurance-resources/json
+# Healthfirst (New York)
+https://healthfirst.org/health-data
 
-# ---- portals that need a browser (open, click through, paste the file links) ----
-#   Optum Health (transparency portal):  https://transparency-in-coverage.optum.com/
-#   Humana:  https://developers.humana.com/cost-transparency
-#   HCSC (BCBS Illinois / Texas / New Mexico / Oklahoma / Montana):  https://www.bcbsil.com/provider/standards/standard-requirements/caa/caa-tic
-#   Universal Health Services (UHS — hospital system employer plan):  https://uhs.com/transparency-in-coverage-machine-readable-files/
-#   Wellmark BCBS (Iowa / South Dakota):  https://www.wellmark.com/transparency-in-coverage
-#   Horizon BCBS New Jersey:  https://www.horizonblue.com/transparency-in-coverage
-#   Premera Blue Cross (Washington / Alaska):  https://www.premera.com/visitor/transparency-in-coverage
-#   Priority Health (Michigan):  https://www.priorityhealth.com/machine-readable-files
-#   BCBS Alabama:  https://www.bcbsal.org/web/transparency-in-coverage
-#   BCBS Massachusetts:  https://www.bluecrossma.org/about-us/transparency-coverage
-#   BCBS Rhode Island:  https://www.bcbsri.com/transparency-in-coverage
-#   BCBS Vermont:  https://www.bluecrossvt.org/transparency-in-coverage
-#   BCBS Kansas:  https://www.bcbsks.com/transparency-in-coverage
-#   Arkansas BCBS:  https://www.arkansasbluecross.com/transparency-in-coverage
-#   HMSA (BCBS Hawaii):  https://hmsa.com/help-center/transparency-in-coverage-machine-readable-files/
-#   Blue Shield of California:  https://www.blueshieldca.com/en/home/get-to-know-blue-shield/machine-readable-files
-#   Excellus BCBS (upstate NY — publishes allowed-amounts only, no rates):  https://excellusbcbs.healthsparq.com/healthsparq/public/#/one/insurerCode=EXC_I&brandCode=EXC&productCode=MRF/machine-readable-transparency-in-coverage
-#   Capital Blue Cross (central Pennsylvania):  https://www.capbluecross.com/wps/portal/cap/company/legal/machine-readable-files
-#   Independence Blue Cross (Philadelphia):  https://www.ibx.com/resources/for-members/transparency-in-coverage
-#   BCBS Minnesota (own book):  https://www.bluecrossmn.com/about-us/transparency-coverage-regulations
+# Fallon Health (Massachusetts)
+https://fallon.sapphiremrfhub.com/
+
+# Neighborhood Health Plan of Rhode Island
+https://files.nhpri.org/mrf/nhp/TOC/
+
+# Mass General Brigham Health Plan (formerly AllWays)
+https://massgeneralbrighamhealthplan.org/pricetransparency/MRF/Base
+
+# CDPHP (New York)
+https://www.cdphp.com/interoperability/machine-readable-pricing-data-files
+
+# Geisinger Health Plan (Pennsylvania)
+https://mrf.thehealthplan.com/content/MRF/toc.zip
+
+# AmeriHealth New Jersey (PPO)
+https://www.amerihealthnj.com/cmstic/?brand=ahnj
+
+# AmeriHealth New Jersey (HMO)
+https://www.amerihealthnj.com/cmstic/?brand=ahnjhmo
+
+# AmeriHealth Pennsylvania
+https://www.amerihealth.com/cmstic/?brand=ahpa
+
+# Independent Health (western New York)
+https://mrf.healthsparq.com/ihny-egress.nophi.kyruushsq.com/prd/mrf/IHNY_I/IHNY/latest_metadata.json
+
+# MVP Health Care (New York / Vermont)
+https://mrf.healthsparq.com/mvp-egress.nophi.kyruushsq.com/prd/mrf/MVP_I/MVP/latest_metadata.json
+
+# AvMed (Florida)
+https://mrfproddestinationdata.blob.core.windows.net/avmed-mrf-output/AvMed-Health-Plans_INN_index.html
+
+# Health First Health Plans (Florida)
+https://apps.hf.org/applications/dn/cms_json/files/tic/index.json
+
+# Alliant Health Plans (Georgia / Tennessee)
+https://alliantplans.com/json/pt/latestpt_nlc.html
+
+# AmeriHealth Caritas Next (FL / NC / LA / DE marketplace)
+https://www.amerihealthcaritasnext.com/json
+
+# First Choice Next (South Carolina marketplace)
+https://www.firstchoicenext.com/json
+
+# The Health Plan (West Virginia / eastern Ohio)
+https://www.healthplan.org/thp_mrfs
+
+# MedCost (rental network — NC / SC / VA)
+https://mrf.mmsanalytics.com/medcost/
+
+# Health Advantage HMO (Arkansas Blue Cross family — individual)
+https://mrf.arkansasbluecross.com/mrf/hmo_ha_hii_arkbluecross_index
+
+# Health Advantage Octave (Arkansas Blue Cross family — individual)
+https://mrf.arkansasbluecross.com/mrf/hmo_octave_hii_arkbluecross_index
+
+# Health Advantage HMO (Arkansas Blue Cross family — TPA)
+https://mrf.arkansasbluecross.com/mrf/hmo_ha_tpa_arkbluecross_index
+
+# HealthPartners (MN / WI / IA / ND / SD)
+https://mrfproddestinationdata.blob.core.windows.net/mrf-output/HealthPartners_In-Network_MRF_Index.html
+
+# Medical Mutual of Ohio
+https://mrf.healthsparq.com/mmo-egress.nophi.kyruushsq.com/prd/mrf/MMO_I/MMO/latest_metadata.json
+
+# Paramount Health Care (Ohio / Michigan)
+https://mrf.healthsparq.com/paramount-egress.nophi.kyruushsq.com/prd/mrf/PARAMOUNT_I/PARAMOUNT/latest_metadata.json
+
+# Quartz Health Solutions (WI / IL / MN)
+https://mrf.healthsparq.com/quartz-egress.nophi.kyruushsq.com/prd/mrf/QUARTZ_I/QUARTZ/latest_metadata.json
+
+# Aspirus Health Plan (Wisconsin / Michigan)
+https://mrf.healthsparq.com/preferredone-egress.nophi.kyruushsq.com/prd/mrf/ASPIRUS_I/ASPIRUS/latest_metadata.json
+
+# McLaren Health Plan — HealthAdvantage (Michigan)
+https://www.mclarenhealthplan.org/Uploads/Public/Documents/HealthPlan/documents/no-surprise-bill-mhp-mrf/McLarenHealthPlan_HealthAdvantage_in-network-rates_table_of_content.json
+
+# McLaren Health Plan — Community Individual (Michigan)
+https://www.mclarenhealthplan.org/Uploads/Public/Documents/HealthPlan/documents/no-surprise-bill-mhp-mrf/McLarenHealthPlan_Community_Individual_in-network-rates_table_of_content.json
+
+# Sanford Health Plan (ND / SD / MN / IA)
+https://www.sanfordhealthplan.com/transparency-in-coverage-rule
+
+# Avera Health Plans (SD / IA / NE / MN)
+https://portaldocs.avera.org/machinereadablefiles
+
+# AultCare (Ohio)
+https://www.aultcare.com/notices/pricetransparency/aultcare-mrf-2
+
+# Ohio Health Choice / Ohio PPO Connect (AultCare network)
+https://www.aultcare.com/notices/pricetransparency/ohio-ppo-connect-ohc
+
+# Physicians Health Plan of Northern Indiana
+https://services.phpni.com/machine-readable-files/files/phpni/phpni
+
+# Group Health Cooperative of South Central Wisconsin
+https://ghcmrf.azureedge.net/public?restype=container&comp=list
+
+# WPS Health Insurance (Wisconsin)
+https://transparency.healthcare/wps/mrf/table-of-contents/
+
+# PacificSource (ID / MT / OR / WA)
+https://w2bipdmrfsa.blob.core.windows.net/$web?restype=container&comp=list&prefix=20
+
+# Mountain Health CO-OP (MT / ID / WY)
+https://mrf.mmsanalytics.com/talon-mrf-generation/tocs/spyglass/mountain-health-co-op/toclist.json
+
+# UHA Health Insurance (Hawaii)
+https://app.uhahealth.com/mrf
+
+# Sutter Health Plan (California)
+https://xmc-sutterhealt962c-sutterhealt8fce-production57cc.sitecorecloud.io/-/media/Project/SutterHealth/SutterHealthPlan/PDF/{FIRST_OF_MONTH}_sutter-health-plus_index
+
+# University of Utah Health Plans
+https://doc.uhealthplan.utah.edu/machine-readable-data/TIC_MRF/u-of-u-health-plans_index.json
+
+# Hometown Health (Nevada)
+https://www.hometownhealth.com/about-us/transparency-in-coverage/
+
+# Community Health Plan of Washington (Cascade Select)
+https://api-mkt.chpw.org/blob
+
+# Sharp Health Plan (California)
+https://www.sharphealthplan.com/api-access-for-developers
+
+# Baylor Scott & White Health Plan (Texas)
+https://www.bswhealthplan.com/transparency
+
+# HMAA (Hawaii)
+https://hmaa.com/NSA/MRF
+
+# Presbyterian Health Plan (New Mexico)
+https://onbaseext.phs.org/PEL/DisplayDocument?ContentID=OB_000000007649
+
+# Meritain Health (Aetna's TPA)
+https://mrf.healthsparq.com/aetnacvs-egress.nophi.kyruushsq.com/prd/mrf/MERITAIN_I/MERITAINOVER/latest_metadata.json
+
+# Allied Benefit Systems (TPA)
+https://alliedbenefit.sapphiremrfhub.com/
+
+# HealthComp / Personify Health (TPA)
+https://healthcomp.sapphiremrfhub.com/
+
+# ACS Benefit Services (TPA)
+https://acsbenefitservices.sapphiremrfhub.com/
+
+# Zenith American Solutions (TPA)
+https://zenith-american.sapphiremrfhub.com/
+
+# QuikTrip employee plan
+https://quiktrip.sapphiremrfhub.com/
+
+# Healthcare Highways (network)
+https://hchmrfblob.blob.core.windows.net/clearcost?restype=container&comp=list
+
+# Luminare Health (formerly Trustmark) — via Valenz Bluebook
+https://mrf.healthcarebluebook.com/luminarehealth
+
+# MultiPlan / PHCS network (via SISCO's mirror)
+https://sisconosurprise.com/ppo/phcs/index.html
+
+# Curative
+https://static.curative.com/transparency_in_coverage/table-of-contents.json
+
+# Gravie
+https://www.gravie.com/compliance/transparency-in-coverage/
+
+# Preferred Health Professionals (network — KC region)
+https://phpmrffiles.phpkc.com/
+
+# Aetna — fully insured (ALICFI) direct listing
+https://mrf.healthsparq.com/aetnacvs-egress.nophi.kyruushsq.com/prd/mrf/AETNACVS_I/ALICFI/latest_metadata.json
+
+# Aetna — self-insured employer plans (ALICSI) direct listing
+https://mrf.healthsparq.com/aetnacvs-egress.nophi.kyruushsq.com/prd/mrf/AETNACVS_I/ALICSI/latest_metadata.json
+
+# Aetna — self-insured small groups under 100 (ALICUNDER100) direct listing
+https://mrf.healthsparq.com/aetnacvs-egress.nophi.kyruushsq.com/prd/mrf/AETNACVS_I/ALICUNDER100/latest_metadata.json
+
+# Aetna Signature Administrators (ASA) direct listing
+https://mrf.healthsparq.com/aetnacvs-egress.nophi.kyruushsq.com/prd/mrf/AETNACVS_I/ASA/latest_metadata.json
+
+# Aetna Federal Employees Health Benefits (AFEHBPFI) direct listing
+https://mrf.healthsparq.com/aetnacvs-egress.nophi.kyruushsq.com/prd/mrf/AETNACVS_I/AFEHBPFI/latest_metadata.json
 

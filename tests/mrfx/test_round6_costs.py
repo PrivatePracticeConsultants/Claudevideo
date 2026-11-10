@@ -84,9 +84,11 @@ def test_the_fee_schedule_without_peers_has_the_same_rates(leads_app, store):  #
 # -- P1.4: outreach percentiles by binary search, ties included --------------------
 
 def test_outreach_percentile_counts_ties_at_or_below(cfg, store):
-    """By hand, 97110 rates 30, 32, 32, 32, 40: a $32 practice has 4 of 5 at or
-    below -> 80; $30 -> 20; $40 -> 100. The bisect must land after the ties
-    (bisect_right), exactly as the old per-practice count did."""
+    """By hand, 97110 rates 30, 32, 32, 32, 40, as the house MID-RANK among
+    the 4 other organizations (audit 8 P1-6; it was at-or-below, which put a
+    flat code at 100 while Benchmark said p50): $30 -> 0 below / 4 = 0;
+    $32 -> (1 below + 0.5 x 2 tied) / 4 = 50; $40 -> 4 / 4 = 100. Still two
+    binary searches per row, not a count per practice."""
     from mrfx.ingest import ingest_file
     from tests.mrfx.conftest import make_fixture
     from tests.mrfx.test_v4 import innetwork, item
@@ -97,7 +99,7 @@ def test_outreach_percentile_counts_ties_at_or_below(cfg, store):
     body = TestClient(create_app_for(cfg, store)).get("/api/export/outreach.csv?cpt=97110").content
     rows = list(csv.DictReader(io.StringIO(body.decode("utf-8-sig"))))
     got = sorted((float(r["C97110_RATE"]), int(r["C97110_PCTL"])) for r in rows)
-    assert got == [(30.0, 20), (32.0, 80), (32.0, 80), (32.0, 80), (40.0, 100)]
+    assert got == [(30.0, 0), (32.0, 50), (32.0, 50), (32.0, 50), (40.0, 100)]
 
 
 def create_app_for(cfg, store):

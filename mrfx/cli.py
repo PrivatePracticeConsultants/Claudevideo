@@ -349,8 +349,11 @@ def cmd_add(cfg: MrfxConfig, args) -> int:
     import httpx as _httpx
 
     try:
+        # trust_env=False: a corporate HTTP(S)_PROXY must never carry a
+        # request to our own localhost server (audit 8 P3 — it answered 502
+        # and the links were "added" nowhere)
         r = _httpx.post(f"http://localhost:{cfg.port}/api/urls",
-                        json={"urls": urls}, timeout=30)
+                        json={"urls": urls}, timeout=30, trust_env=False)
         if r.status_code == 200:
             try:
                 d = r.json()
@@ -365,7 +368,7 @@ def cmd_add(cfg: MrfxConfig, args) -> int:
             print(f"handed to the running dashboard: {d['added']} queued, "
                   f"{d['skipped']} already known, {d['invalid']} not URLs")
             if args.retry_failed:
-                rf = _httpx.post(f"http://localhost:{cfg.port}/api/urls/retry-failed", timeout=30)
+                rf = _httpx.post(f"http://localhost:{cfg.port}/api/urls/retry-failed", timeout=30, trust_env=False)
                 print(f"re-queued {rf.json().get('requeued', 0)} previously failed URL(s)"
                       if rf.status_code == 200 else
                       "could not re-queue failed URLs on the server — retry them in the Files tab")
@@ -615,12 +618,9 @@ def cmd_ingest(cfg: MrfxConfig, args) -> int:
         if r.get("rows") is not None:
             line += f" ({r['rows']} rows"
             if r.get("ref_groups_skipped"):
-                remote = r.get("remote_ref_groups") or 0
-                why = ("their provider lists are remote links MRF Explorer doesn't download"
-                       if remote >= r["ref_groups_skipped"] else
-                       f"{remote} point at remote provider lists MRF Explorer doesn't download; "
-                       "the rest need the payer's provider reference file"
-                       if remote else "missing provider reference file")
+                from .parser import skipped_groups_reason
+                why = skipped_groups_reason(r["ref_groups_skipped"], r.get("remote_ref_groups") or 0,
+                                            r.get("ambiguous_ref_ids") or 0)
                 line += f", {r['ref_groups_skipped']} rate groups skipped — {why}"
             line += ")"
         if r.get("error"):
@@ -820,11 +820,16 @@ def cmd_outreach(cfg: MrfxConfig, args) -> int:
     except ValueError as e:  # e.g. --month latest (a report-tab sentinel, not a month)
         print(f"can't build that export: {e}", file=sys.stderr)
         return 1
-    headers, rows = build_outreach_rows(store, rel_sql(grain, fs), fs.params, fs.described.get("codes"))
+    from .outreach import OUTREACH_COLUMNS_NOTE
+    market = {"month": fs.described.get("as_of_month") or "latest",
+              "payers": list(fs.described.get("payers") or [])}
+    headers, rows = build_outreach_rows(store, rel_sql(grain, fs), fs.params,
+                                        fs.described.get("codes"), market=market)
     out = Path(args.out)
     out.write_text(outreach_csv(headers, rows), encoding="utf-8")
     sidecar = out.with_name(out.stem + "_methodology.txt")
-    sidecar.write_text(methodology_text(cfg, store, grain, fs, "display_name", "asc", "outreach"))
+    sidecar.write_text(methodology_text(cfg, store, grain, fs, "display_name", "asc", "outreach")
+                       + "\n\n" + OUTREACH_COLUMNS_NOTE)
     print(f"exported {len(rows)} entities -> {out}\nmethodology -> {sidecar}")
     print("columns:", ", ".join(headers[:14]), f"... + {len(headers) - 14} per-code merge fields")
     return 0

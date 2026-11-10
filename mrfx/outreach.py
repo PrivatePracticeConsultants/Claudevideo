@@ -21,6 +21,7 @@ import io
 import logging
 
 from .store import Store, mask_tin
+from .rounding import half_up
 
 log = logging.getLogger(__name__)
 
@@ -98,10 +99,35 @@ def _tin_meta(store: Store, scope_tins: list[str]) -> dict[str, dict]:
     return {r[0]: {"entity_kind": r[1], "primary_discipline": r[2]} for r in rows}
 
 
+OUTREACH_COLUMNS_NOTE = (
+    "Per-code columns (C<code>_*), on the house basis — the as-of month (latest "
+    "by default), dollar rates, base modifiers (no CQ/CO, KX, 59...), "
+    "professional class, $0/$0.01 placeholders excluded — the same basis as "
+    "Benchmark, Leads and Markets:\n"
+    "  C<code>_RATE: the organization's rate = median across its tax IDs of each "
+    "tax ID's median rate.\n"
+    "  C<code>_MKT_MEDIAN: the median of that rate over every organization in "
+    "this export priced on the code.\n"
+    "  C<code>_PCTL: the organization's mid-rank among the OTHER organizations "
+    "in this export (those below, plus half of those paid the same) — paid the "
+    "same as everyone = 50; blank when no other organization is priced on the code.\n"
+    "  C<code>_GAP_TO_MEDIAN: MKT_MEDIAN minus RATE (positive = paid under the median).\n"
+    "Rounded half-up to the cent, like every number the app prints.")
+
+
 def build_outreach_rows(store: Store, rel_sql: str, params: list,
-                        codes: list[str] | None = None) -> tuple[list[str], list[dict]]:
+                        codes: list[str] | None = None,
+                        market: dict | None = None) -> tuple[list[str], list[dict]]:
     """`rel_sql` is a filtered grain relation (entity or tin) from the API's
-    shared filter machinery — outreach numbers therefore match the dashboard."""
+    shared filter machinery: it chooses WHICH organizations are listed (the
+    dashboard's rows). The per-code numbers are on the house basis
+    (`market`, default the latest month) through practice_base_sql — the
+    same per-practice medians Benchmark and Leads read. They used to pool
+    every month, modifier and class of the dashboard rows, and rank
+    at-or-below: one practice read $42 / p0 on Benchmark and $41 / PCTL 20
+    in its mail merge; a flat code put everyone at PCTL 100 while three tabs
+    said p50 (audit 8 P1-6)."""
+    from .benchmark import normalize_market, practice_base_sql
     with store.connect() as con:
         units = con.execute(
             f"""
@@ -117,31 +143,38 @@ def build_outreach_rows(store: Store, rel_sql: str, params: list,
             """,
             params,
         ).fetchall()
-        # > 0.01: $0/$0.01 placeholder rows must not export as a "rate" of 0.01
-        # or drag other entities' percentile columns — same basis as the
-        # benchmark and every dashboard median
-        unit_code = con.execute(
-            f"""
-            SELECT unit_id, billing_code, median(negotiated_rate) AS rate
-            FROM ({rel_sql}) WHERE is_dollar_rate AND negotiated_rate > 0.01
-            GROUP BY unit_id, billing_code
-            ORDER BY billing_code, unit_id
-            """,
-            params,
-        ).fetchall()
 
     # only the TINs actually in this export's filtered result — geo/meta used to
     # scan the WHOLE store (one Python dict entry per TIN → OOM at 300M rows).
     # units[2] is the per-unit `string_agg(DISTINCT tin_value)`.
-    scope_tins = sorted({t.strip() for u in units
-                         for t in (u[2] or "").split(";") if t.strip()})
+    tins_of = {u[0]: sorted({t.strip() for t in (u[2] or "").split(";") if t.strip()})
+               for u in units}
+    scope_tins = sorted({t for ts in tins_of.values() for t in ts})
     geo = _geo_by_tin(store, scope_tins)
     meta = _tin_meta(store, scope_tins)
 
-    # per-code entity medians -> market stats
+    # per-code entity rates on the house basis: per-TIN medians (the
+    # materialised practice medians when the basis allows), then the median
+    # across an organization's TINs
+    m = normalize_market(market or {"month": "latest"})
     by_code: dict[str, dict[str, float]] = {}
-    for unit_id, code, rate in unit_code:
-        by_code.setdefault(code, {})[unit_id] = rate
+    if scope_tins:
+        q, qp = practice_base_sql(
+            store, m, extra=" AND t.tin_value IN (SELECT unnest(?::VARCHAR[]))",
+            extra_params=[scope_tins])
+        with store.connect() as con:
+            tin_rates: dict[tuple, float] = {
+                (tv, code): rate for code, tv, rate in con.execute(
+                    f"SELECT billing_code, tin_value, rate FROM ({q}) "
+                    f"ORDER BY billing_code, tin_value", qp).fetchall()}
+        codes_seen = sorted({c for _t, c in tin_rates})
+        for unit_id, ts in tins_of.items():
+            for c in codes_seen:
+                vals = sorted(tin_rates[(t, c)] for t in ts if (t, c) in tin_rates)
+                if vals:
+                    mid = len(vals) // 2
+                    by_code.setdefault(c, {})[unit_id] = (
+                        vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2)
     if codes:
         wanted = [c for c in codes if c in by_code]
     else:
@@ -158,13 +191,15 @@ def build_outreach_rows(store: Store, rel_sql: str, params: list,
         if not vals:
             return None
         mid = len(vals) // 2
-        return round((vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2), 2)
+        return half_up((vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2), 2)
 
     medians = {c: market_median(c) for c in wanted}
-    # each code's rates sorted ONCE: "how many are at or below this rate" is a
-    # binary search. Counting them per practice per code was quadratic — one
-    # state's export (5,700 practices) spent 11.6 s in 244M generator steps.
-    sorted_vals = {c: sorted(by_code.get(c, {}).values()) for c in wanted}
+    # each code's rates (to the cent, as leads.MIDRANK_PCT compares them)
+    # sorted ONCE: the mid-rank is two binary searches. Counting per practice
+    # per code was quadratic — one state's export (5,700 practices) spent
+    # 11.6 s in 244M generator steps.
+    sorted_vals = {c: sorted(half_up(v, 2) for v in by_code.get(c, {}).values())
+                   for c in wanted}
     verified_sites = store.org_websites()
 
     headers = list(BASE_HEADERS)
@@ -204,12 +239,16 @@ def build_outreach_rows(store: Store, rel_sql: str, params: list,
             if rate is None or not vals:
                 row[f"C{c}_RATE"] = row[f"C{c}_MKT_MEDIAN"] = row[f"C{c}_PCTL"] = row[f"C{c}_GAP_TO_MEDIAN"] = ""
                 continue
-            pctl = round(100 * bisect.bisect_right(vals, rate) / len(vals))
+            r2 = half_up(rate, 2)
+            lo, hi = bisect.bisect_left(vals, r2), bisect.bisect_right(vals, r2)
+            # mid-rank among the OTHER organizations (leads.MIDRANK_PCT)
+            pctl = (half_up(100.0 * (lo + 0.5 * (hi - lo - 1)) / (len(vals) - 1))
+                    if len(vals) > 1 else "")
             med = medians[c]
-            row[f"C{c}_RATE"] = round(rate, 2)
+            row[f"C{c}_RATE"] = half_up(rate, 2)
             row[f"C{c}_MKT_MEDIAN"] = med if med is not None else ""
             row[f"C{c}_PCTL"] = pctl
-            row[f"C{c}_GAP_TO_MEDIAN"] = round(med - rate, 2) if med is not None else ""
+            row[f"C{c}_GAP_TO_MEDIAN"] = half_up(med - rate, 2) if med is not None else ""
         out_rows.append(row)
     return headers, out_rows
 

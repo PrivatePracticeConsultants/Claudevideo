@@ -32,6 +32,7 @@ from . import __version__
 from .config import MrfxConfig
 from .sqlfn import modal_zip_of
 from .store import Store
+from .rounding import half_up
 
 log = logging.getLogger(__name__)
 
@@ -215,8 +216,8 @@ def build_prospect_dossier(cfg: MrfxConfig, store: Store, subject: str,
         # the MEDIAN of the per-code positions — the one headline rule the
         # Leads list and the per-payer view use. This was a mean stored under
         # this name, so one outlier code swung the dossier but not the list.
-        facts["median_percentile"] = round(
-            statistics.median(r["subject_percentile"] for r in rows), 1)
+        facts["median_percentile"] = half_up(
+            statistics.median(r["subject_percentile"] for r in rows), 0)
         body = "".join(
             f"<tr><td>{e(r['billing_code'])}</td>"
             f"<td class='num'>${(r['subject_rate'] or 0):,.2f}</td>"
@@ -464,9 +465,27 @@ def build_market_report(cfg: MrfxConfig, store: Store, *, state: str,
             "no section of a market report could be built for "
             f"{st} — ingest payer files covering that state first")
     parts.append(_omitted_html(skipped))
+    # a document sold to a client states WHEN its numbers are from, on what
+    # basis and from which files — it printed none of that (audit 8 P2-12)
+    from .benchmark import BASIS_NOTE, month_label
+    with store.connect() as con:
+        files = con.execute(
+            "SELECT filename, payer, last_updated_on FROM files WHERE status = 'done' "
+            "AND file_type = 'in_network' ORDER BY filename").fetchall()
+        newest = con.execute(
+            "SELECT max(file_month) FROM files WHERE status = 'done' "
+            "AND file_type = 'in_network'").fetchone()[0]
+    asof = month_label(m.get("month") or "latest")
+    if newest and str(m.get("month") or "latest").lower() == "latest":
+        asof += f" (each payer's newest file; newest month loaded {newest})"
+    parts.append(
+        "<h2>Basis and sources</h2>"
+        f"<p class='note'>As of: {e(asof)}. {e(BASIS_NOTE)}</p>"
+        "<p class='note'>Rate files in the store: "
+        + e("; ".join(f"{f[0]} ({f[1]}, {f[2]})" for f in files) or "none") + ".</p>")
     footer = (
         f"Generated {dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} "
-        f"by MRF Explorer v{__version__}.\n{DOSSIER_NOTE}")
+        f"by MRF Explorer v{__version__}. As of {asof}.\n{DOSSIER_NOTE}")
     return {"state": st, "code": code,
             "html": _doc(cfg, f"Therapy market report — {st}",
                          "\n".join(parts), footer),

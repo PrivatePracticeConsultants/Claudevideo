@@ -77,7 +77,10 @@ def client_digest(store: Store, gaps_book: dict | None = None) -> dict:
 
     subjects = watchlist(store)
     mstatus = medicare_status(store)
-    key = (store.data_generation, tuple(subjects),
+    # user_edit_generation: an entity-map / peer-set edit changes which TINs
+    # a client is, so its gaps — a packet printed the stale digest beside
+    # fresh gaps (audit 8 P2-10)
+    key = (store.data_generation, getattr(store, "user_edit_generation", 0), tuple(subjects),
            json.dumps(mstatus, sort_keys=True, default=str))
     held = getattr(store, "_digest_cache", None)
     if held is not None and held[0] == key:

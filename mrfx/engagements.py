@@ -27,6 +27,7 @@ import logging
 from .benchmark import (BenchmarkError, compute_benchmark, normalize_market,
                         resolve_subject_tins)
 from .store import Store
+from .rounding import half_up
 
 log = logging.getLogger(__name__)
 
@@ -195,15 +196,15 @@ def compare_to_baseline(store: Store, subject: str, label: str = "engagement sta
             lost.append({"billing_code": code, "was": b["rate"],
                          "description": b.get("description")})
             continue
-        delta = round(n["rate"] - b["rate"], 2)
+        delta = half_up(n["rate"] - b["rate"], 2)
         units = volumes.get(code)
-        value = round(delta * units, 2) if units is not None else None
+        value = half_up(delta * units, 2) if units is not None else None
         if value:
             total_value += value
         both.append({
             "billing_code": code, "description": b.get("description") or n.get("description"),
             "before": b["rate"], "after": n["rate"], "delta": delta,
-            "delta_pct": round(100.0 * delta / b["rate"], 1) if b["rate"] else None,
+            "delta_pct": half_up(100.0 * delta / b["rate"], 1) if b["rate"] else None,
             "pctile_before": b.get("percentile"), "pctile_after": n.get("percentile"),
             # market context: if the peer median moved too, the client's gain
             # is partly the tide, and the report must be able to say so
@@ -227,7 +228,7 @@ def compare_to_baseline(store: Store, subject: str, label: str = "engagement sta
             return None
         xs = sorted(xs)
         n = len(xs)
-        return round((xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2), 1)
+        return half_up((xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2), 1)
 
     # A win measured in nominal dollars overstates itself: prices rose between
     # the baseline and now, so part of any gain is inflation, not negotiation.
@@ -243,10 +244,10 @@ def compare_to_baseline(store: Store, subject: str, label: str = "engagement sta
         # are computed once, in `summary` below.)
         real = {
             "basis": d.get("basis"), "reason": d.get("reason"),
-            "factor": round(d["factor"], 4) if d.get("factor") else None,
+            "factor": half_up(d["factor"], 4) if d.get("factor") else None,
             "caveat": BASIS_CAVEAT,
             "value_in_baseline_dollars": (
-                round(total_value / d["factor"], 2)
+                half_up(total_value / d["factor"], 2)
                 if volumes and total_value and d.get("factor") else None),
             "note": (
                 "Prices rose between the baseline and now, so a gain measured in "
@@ -270,7 +271,7 @@ def compare_to_baseline(store: Store, subject: str, label: str = "engagement sta
             "median_pctile_before": med(pb), "median_pctile_after": med(pa),
             "median_market_before": med(mb), "median_market_after": med(ma),
             "has_volumes": bool(volumes),
-            "total_annual_value": round(total_value, 2) if volumes else None,
+            "total_annual_value": half_up(total_value, 2) if volumes else None,
             "n_valued": sum(1 for r in both if r["annual_value"] is not None),
         },
         "note": ("Before/after compares a stored snapshot of what this app saw at "

@@ -31,6 +31,7 @@ from .catalog import code_info, therapy_taxonomy_sql
 from .states import state_code_or_none
 from .sqlfn import modal_zip_by_tin, modal_zip_of
 from .store import Store, generation_cached, mask_tin
+from .rounding import half_up
 
 log = logging.getLogger(__name__)
 
@@ -149,12 +150,12 @@ def local_rate_map(store: Store, code: str, market: dict, *,
 
     state_median = ref[0]
     for r in rows:
-        r["vs_state_pct"] = (round(100.0 * (r["median_rate"] - state_median)
+        r["vs_state_pct"] = (half_up(100.0 * (r["median_rate"] - state_median)
                                    / state_median, 1)
                              if state_median else None)
     spread = None
     if len(rows) >= 2:
-        spread = round(100.0 * (rows[0]["median_rate"] - rows[-1]["median_rate"])
+        spread = half_up(100.0 * (rows[0]["median_rate"] - rows[-1]["median_rate"])
                        / rows[-1]["median_rate"], 1) if rows[-1]["median_rate"] else None
     return {
         "code": code, "description": code_info(code)[0], "state": st,
@@ -224,10 +225,10 @@ def payer_concentration(store: Store, market: dict | None = None,
 
     total = sum(r["n_practices"] for r in rows)
     for r in rows:
-        r["share_pct"] = round(100.0 * r["n_practices"] / total, 1) if total else None
+        r["share_pct"] = half_up(100.0 * r["n_practices"] / total, 1) if total else None
     # from the EXACT shares: squaring the 1-dp display shares drifted the
     # index by up to a few points (round 6 P3)
-    hhi = (round(sum((100.0 * r["n_practices"] / total) ** 2 for r in rows), 0)
+    hhi = (half_up(sum((100.0 * r["n_practices"] / total) ** 2 for r in rows), 0)
            if total else None)
     top = rows[0] if rows else None
     # Fewer than ~5 payers cannot produce a meaningful index — with 3 payers the
@@ -293,7 +294,7 @@ def _add_miles(store: Store, rows: list[dict], subject_tins: list[str],
             """, [npis]).fetchall())
         for r in rows:
             d = dist.get(r.get("npi"))
-            r["miles"] = round(d, 1) if d is not None else None
+            r["miles"] = half_up(d, 1) if d is not None else None
             r["from_zip"] = home
     except Exception:  # noqa: BLE001 — ordering aid only
         log.debug("steal-share distances unavailable", exc_info=True)
@@ -418,7 +419,7 @@ def steal_share(store: Store, subject: str, *, radius_miles: float | None = None
         # the share of this physician's local therapy volume the client is NOT
         # getting — the number that ranks a call list
         tot = int(r["patients_elsewhere"]) + int(r["patients_to_me"])
-        r["share_missed_pct"] = round(100.0 * r["gap"] / tot, 1) if tot else None
+        r["share_missed_pct"] = half_up(100.0 * r["gap"] / tot, 1) if tot else None
         r["already_a_partner"] = int(r["patients_to_me"]) > 0
 
     cold = [r for r in rows if not r["already_a_partner"]]
@@ -557,7 +558,7 @@ def radius_rate_map(store: Store, code: str, market: dict, *,
         bands.append({
             "band": label, "min_miles": lo, "max_miles": hi,
             "n_practices": len(grp),
-            "median_rate": round(vals[mid] if len(vals) % 2
+            "median_rate": half_up(vals[mid] if len(vals) % 2
                                  else (vals[mid - 1] + vals[mid]) / 2, 2),
             "thin": False,
         })
@@ -566,14 +567,14 @@ def radius_rate_map(store: Store, code: str, market: dict, *,
     near = usable[0] if usable else None
     for b in usable:
         b["vs_nearest_pct"] = (
-            round(100.0 * (b["median_rate"] - near["median_rate"])
+            half_up(100.0 * (b["median_rate"] - near["median_rate"])
                   / near["median_rate"], 1)
             if near and near["median_rate"] else None)
     spread = None
     if len(usable) >= 2:
         rates = [b["median_rate"] for b in usable]
         lo_r, hi_r = min(rates), max(rates)
-        spread = round(100.0 * (hi_r - lo_r) / lo_r, 1) if lo_r else None
+        spread = half_up(100.0 * (hi_r - lo_r) / lo_r, 1) if lo_r else None
 
     # invariant: every placed practice inside the radius lands in exactly one
     # band. If that ever stops holding, say so rather than quietly under-reporting.

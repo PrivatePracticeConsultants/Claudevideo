@@ -34,6 +34,7 @@ import re
 from pathlib import Path
 
 from .store import Store
+from .rounding import half_up
 
 log = logging.getLogger(__name__)
 
@@ -272,7 +273,7 @@ def import_demographics(store: Store, path: str | Path,
         "population": pa.array([r["population"] for r in rows], type=pa.float64()),
         "pop_65_plus": pa.array([r["pop_65_plus"] for r in rows], type=pa.float64()),
         "pct_65_plus": pa.array(
-            [(round(100.0 * r["pop_65_plus"] / r["population"], 1)
+            [(half_up(100.0 * r["pop_65_plus"] / r["population"], 1)
               if r["population"] and r["pop_65_plus"] is not None else None)
              for r in rows], type=pa.float64()),
         "median_income": pa.array([r["median_income"] for r in rows], type=pa.float64()),
@@ -409,7 +410,7 @@ def market_sizing(store: Store, zip_code: str, radius_miles: float = 25,
         """, [in_radius]).fetchone()
         top = [] if not has_demo else [
             {"zip": z, "population": int(p or 0), "pop_65_plus": int(s or 0),
-             "pct_65_plus": pct, "median_income": inc, "miles": round(d, 1)}
+             "pct_65_plus": pct, "median_income": inc, "miles": half_up(d, 1)}
             for z, p, s, pct, inc, d in con.execute(f"""
             SELECT d.zip, d.population, d.pop_65_plus, d.pct_65_plus,
                    d.median_income, {miles} AS miles
@@ -425,13 +426,13 @@ def market_sizing(store: Store, zip_code: str, radius_miles: float = 25,
         "zctas_in_radius": len(in_radius), "zctas_matched": matched,
         "zctas_unmatched": len(in_radius) - matched,
         "population": int(pop or 0), "pop_65_plus": int(seniors or 0),
-        "pct_65_plus": (round(100.0 * seniors / pop, 1)
+        "pct_65_plus": (half_up(100.0 * seniors / pop, 1)
                         if pop and seniors is not None else None),
-        "median_income": round(demo[3], 0) if demo[3] is not None else None,
+        "median_income": half_up(demo[3], 0) if demo[3] is not None else None,
         "practices": practices, "clinicians": int(npis or 0),
-        "seniors_per_practice": (round(seniors / practices)
+        "seniors_per_practice": (half_up(seniors / practices)
                                  if practices and seniors else None),
-        "people_per_practice": (round(pop / practices)
+        "people_per_practice": (half_up(pop / practices)
                                 if practices and pop else None),
         "top_zips": top,
         "loaded": bool(matched),

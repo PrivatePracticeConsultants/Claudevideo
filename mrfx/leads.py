@@ -45,10 +45,16 @@ LEADS_RULE = (
 # "underpaid lead" (round 7 P0.4; BCBS Alabama publishes one 97110 rate to
 # 6,190 practices). Rates compared at the cent, as the Benchmark does.
 # Identical to percent_rank whenever no two practices tie.
-MIDRANK_PCT = (
-    "100.0 * ((rank() OVER (PARTITION BY billing_code ORDER BY round(rate, 2))) - 1"
-    " + 0.5 * ((count(*) OVER (PARTITION BY billing_code, round(rate, 2))) - 1))"
-    " / nullif((count(*) OVER (PARTITION BY billing_code)) - 1, 0)")
+def midrank_pct_sql(partition: str = "billing_code") -> str:
+    """MIDRANK_PCT over any partition (the size premium ranks within
+    (payer, billing_code) — audit 8 P1-5)."""
+    return (
+        f"100.0 * ((rank() OVER (PARTITION BY {partition} ORDER BY round(rate, 2))) - 1"
+        f" + 0.5 * ((count(*) OVER (PARTITION BY {partition}, round(rate, 2))) - 1))"
+        f" / nullif((count(*) OVER (PARTITION BY {partition})) - 1, 0)")
+
+
+MIDRANK_PCT = midrank_pct_sql("billing_code")
 
 
 @generation_cached('leads.compute_leads')
@@ -143,9 +149,14 @@ def compute_leads(store: Store, market: dict, *, threshold_percentile: int = 25,
                 GROUP BY t.tin_value, t.payer, t.billing_code
             ),
             mkt AS (
+                -- the SAME code set the position counts: ≥2 practices AND ≥2
+                -- distinct rates. An all-tied code has no "under market" —
+                -- counting its 0 gap diluted the payer that underpays on the
+                -- codes that DO rank (audit 8 P1-3: Sigma $16 named over Rho $20)
                 SELECT billing_code, median(rate) AS code_median,
                        count(*) AS n_in_code
                 FROM _lead_base GROUP BY billing_code
+                HAVING count(DISTINCT round(rate, 2)) >= 2
             ),
             gap AS (
                 -- the SAME codes the position counts: a code only this practice
@@ -237,12 +248,19 @@ def compute_leaderboard(store: Store, market: dict, *, min_codes: int = 3,
     ranked AS (
         SELECT billing_code, tin_value, rate,
                {MIDRANK_PCT} AS pct,
-               count(*) OVER (PARTITION BY billing_code) AS n_in_code
+               count(*) OVER (PARTITION BY billing_code) AS n_in_code,
+               count(DISTINCT round(rate, 2)) OVER (PARTITION BY billing_code) AS n_rates
         FROM base
     ),
     per_tin AS (
+        -- POSITION over the lead finder's code set (≥2 distinct rates): one
+        -- practice read p0 on Leads and p25 here because a code every
+        -- practice is paid the same on was averaged in (audit 8 P1-3). A
+        -- practice whose codes are ALL paid the same as everyone sits at
+        -- p50 — it stays on the board (size / footprint sorts need it).
         SELECT tin_value, count(*) AS n_codes,
-               round(median(pct), 0)  AS median_pct,
+               coalesce(round(median(pct) FILTER (WHERE n_rates >= 2), 0), 50.0)
+                                      AS median_pct,
                round(median(rate), 2) AS median_rate
         FROM ranked WHERE n_in_code >= 2 GROUP BY tin_value
     )
@@ -286,9 +304,10 @@ def compute_leaderboard(store: Store, market: dict, *, min_codes: int = 3,
         "note": ("Ranked over published negotiated rates; size is distinct NPIs "
                  "under the billing TIN (a hospital system collapses many NPIs "
                  "into one TIN). Position is the practice's mid-rank among the "
-                 "other practices on each code (paid the same as everyone = p50), "
-                 "median across its codes; it describes published rates, not "
-                 "collections."),
+                 "other practices on each code, median across the codes where the "
+                 "market's rates differ (a code every practice is paid the same on "
+                 "ranks no one — the lead finder's rule; a practice with only such "
+                 "codes is p50); it describes published rates, not collections."),
     }
 
 

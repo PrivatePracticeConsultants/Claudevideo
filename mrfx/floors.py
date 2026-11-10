@@ -40,6 +40,7 @@ from pathlib import Path
 from .catalog import CODE_CATALOG, code_info
 from .sniff import open_stream
 from .store import Store
+from .rounding import half_up
 
 log = logging.getLogger(__name__)
 
@@ -325,9 +326,9 @@ def floor_comparison(store: Store, market: dict | None = None, *,
         for kind in ("medicaid", "workers_comp", "other"):
             base = f.get(kind)
             row[f"pct_of_{kind}"] = (
-                round(100.0 * c["commercial_median"] / base, 1) if base else None)
+                half_up(100.0 * c["commercial_median"] / base, 1) if base else None)
             row[f"subject_pct_of_{kind}"] = (
-                round(100.0 * row["subject_rate"] / base, 1)
+                half_up(100.0 * row["subject_rate"] / base, 1)
                 if base and row["subject_rate"] else None)
         rows.append(row)
 
@@ -336,7 +337,7 @@ def floor_comparison(store: Store, market: dict | None = None, *,
         if not v:
             return None
         mid = len(v) // 2
-        return round(v[mid] if len(v) % 2 else (v[mid - 1] + v[mid]) / 2, 1)
+        return half_up(v[mid] if len(v) % 2 else (v[mid - 1] + v[mid]) / 2, 1)
 
     med_pct = _median(r["pct_of_medicaid"] for r in rows)
     wc_pct = _median(r["pct_of_workers_comp"] for r in rows)

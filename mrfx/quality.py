@@ -30,6 +30,7 @@ import logging
 
 from .catalog import code_info
 from .store import Store, generation_cached
+from .rounding import half_up
 
 log = logging.getLogger(__name__)
 
@@ -112,10 +113,10 @@ def rate_type_mix(store: Store, market: dict | None = None) -> dict:
                 for cur in [con.execute(sql, params)] for r in cur.fetchall()]
     total = sum(r["n_rows"] for r in rows) or 0
     for r in rows:
-        r["pct"] = round(100.0 * r["n_rows"] / total, 1) if total else None
+        r["pct"] = half_up(100.0 * r["n_rows"] / total, 1) if total else None
         r["contracted"] = r["rate_type"] in CONTRACTED_TYPES
     derived = [r for r in rows if not r["contracted"] and r["rate_type"] != "(unstated)"]
-    derived_pct = round(sum(r["pct"] or 0 for r in derived), 1)
+    derived_pct = half_up(sum(r["pct"] or 0 for r in derived), 1)
 
     # per payer, because the mix is a PAYER's publishing choice
     psql = f"""
@@ -130,7 +131,7 @@ def rate_type_mix(store: Store, market: dict | None = None) -> dict:
     """
     with store.connect() as con:
         payers = [{"payer": p, "n_rows": n,
-                   "pct_contracted": round(100.0 * c / n, 1) if n else None}
+                   "pct_contracted": half_up(100.0 * c / n, 1) if n else None}
                   for p, n, c in con.execute(psql, params).fetchall()]
     return {
         "rows": rows, "total_rows": total, "by_payer": payers,
@@ -235,18 +236,21 @@ def size_premium(store: Store, market: dict | None = None, *,
     if subject and not subject_tins:
         raise BenchmarkError(f"no practice matches {subject!r}")
 
-    # percent_rank within (payer, code): strictly-below share, so the metric is
-    # a POSITION and comparable across codes with very different dollar levels
+    # the house MID-RANK within (payer, code) (leads.MIDRANK_PCT), so the
+    # metric is a POSITION comparable across codes with very different dollar
+    # levels. percent_rank scored every tie 0: a payer's flat schedule across
+    # five practices put all five at "p0" while Benchmark said p50 (audit 8
+    # P1-5)
+    from .leads import midrank_pct_sql
     sql = f"""
         WITH per_tin AS ({base_q}),
         cells AS (
             SELECT *, count(*) OVER (PARTITION BY payer, billing_code) AS n_in_cell,
-                   percent_rank() OVER (PARTITION BY payer, billing_code
-                                        ORDER BY rate) AS pr
+                   {midrank_pct_sql("payer, billing_code")} AS pct
             FROM per_tin
         )
         SELECT c.tin_value,
-               round(100.0 * avg(c.pr), 1)  AS avg_percentile,
+               round(avg(c.pct), 1)         AS avg_percentile,
                count(*)                     AS n_cells,
                round(median(c.rate), 2)     AS median_rate,
                any_value(d.npi_count)       AS npi_count
@@ -280,16 +284,16 @@ def size_premium(store: Store, market: dict | None = None, *,
         mid = len(pct) // 2
         out.append({
             "band": label, "n_practices": len(group),
-            "avg_percentile": round(
+            "avg_percentile": half_up(
                 pct[mid] if len(pct) % 2 else (pct[mid - 1] + pct[mid]) / 2, 1),
-            "median_rate": (round(rates[len(rates) // 2], 2) if rates else None),
+            "median_rate": (half_up(rates[len(rates) // 2], 2) if rates else None),
             "thin": False,
         })
 
     usable = [b for b in out if not b["thin"]]
     spread = None
     if len(usable) >= 2:
-        spread = round(usable[-1]["avg_percentile"] - usable[0]["avg_percentile"], 1)
+        spread = half_up(usable[-1]["avg_percentile"] - usable[0]["avg_percentile"], 1)
 
     subj = None
     if subject_tins:
@@ -324,13 +328,13 @@ def size_premium(store: Store, market: dict | None = None, *,
             mid = len(pcts) // 2
             band = _band(n)
             peer = next((b for b in usable if b["band"] == band), None)
-            mypct = round(pcts[mid] if len(pcts) % 2
+            mypct = half_up(pcts[mid] if len(pcts) % 2
                           else (pcts[mid - 1] + pcts[mid]) / 2, 1)
             subj = {
                 "subject": subject, "npi_count": n, "band": band,
                 "avg_percentile": mypct,
                 "band_avg_percentile": peer["avg_percentile"] if peer else None,
-                "vs_band": (round(mypct - peer["avg_percentile"], 1)
+                "vs_band": (half_up(mypct - peer["avg_percentile"], 1)
                             if peer else None),
             }
 
@@ -390,7 +394,7 @@ def code_type_flag(store: Store, market: dict | None, subject: str) -> dict:
     for r in raw:
         r["description"] = code_info(r["billing_code"])[0]
         r["contracted"] = r["rate_type"] in CONTRACTED_TYPES
-    pct = round(100.0 * sum(r["n"] for r in not_contracted) / total, 1) if total else None
+    pct = half_up(100.0 * sum(r["n"] for r in not_contracted) / total, 1) if total else None
     return {
         "rows": [r for r in raw if not r["contracted"]][:200],
         "all_rows": len(raw), "derived_pct": pct,
@@ -486,10 +490,10 @@ def payer_posture(store: Store, market: dict | None = None,
     out = []
     for r in raw:
         n = r["n_rows"] or 0
-        pct_neg = round(100.0 * r["n_negotiated"] / n, 1) if n else None
-        pct_fee = round(100.0 * r["n_fee_schedule"] / n, 1) if n else None
+        pct_neg = half_up(100.0 * r["n_negotiated"] / n, 1) if n else None
+        pct_fee = half_up(100.0 * r["n_fee_schedule"] / n, 1) if n else None
         rankable = r["n_codes_rankable"] or 0
-        pct_var = (round(100.0 * r["n_codes_varying"] / rankable, 1)
+        pct_var = (half_up(100.0 * r["n_codes_varying"] / rankable, 1)
                    if rankable else None)
         # the payer's CLAIM
         claim = ("negotiates" if (pct_neg or 0) >= 60

@@ -225,14 +225,18 @@ clean even if you paste every state's index.
 
 **Don't want to hunt for links at all?** The app ships ready to go:
 
-- **`config/starter_links.txt`** — every payer source verified in testing,
-  one per line, ready to load in a single command:
+- **`mrfx add --known`** (or `mrfx add --known --states MO,KS` for just your
+  states) — every queueable source in the tested-sources catalog
+  (`config/known_sources.yaml`). `config/starter_links.txt` is the same list
+  as plain text, generated from the catalog (109 links), for pasting a subset
+  into the dashboard; to keep your own list, copy it and edit the copy (an
+  update replaces the original):
 
   ```
-  mrfx add --file config/starter_links.txt
+  mrfx add --known --states MO,KS
   ```
 
-  That queues about 100 automatic sources (audited live 2026-11-05 — see
+  The whole list queues 109 automatic sources (audited live 2026-11-05 — see
   docs/SOURCES_AUDIT_2026-11.md): the Highmark-hosted Blue plans, about 20
   more Blue plans (Michigan, Kansas City, Louisiana, Idaho, Arizona,
   Nebraska, Vermont, Excellus, Premera, Wellmark, Blue Shield of CA…),
@@ -770,7 +774,7 @@ prompt). They're an alternative to the dashboard buttons.
 | `mrfx add <url> [<url>…]` | Paste links from the terminal: rate files, TOC/index links, or listing pages (Step 5) |
 | `mrfx add --file links.txt` | Queue a whole text file of links (one per line) |
 | `mrfx add --known` | Queue every tested payer index from `config/known_sources.yaml` |
-| `mrfx add --file config/starter_links.txt` | Same, from the editable ready-to-go list |
+| `mrfx add --file config/starter_links.txt` | Same list as plain text (copy it to make your own; an update replaces the original) |
 | `mrfx add --retry-failed` | Re-queue every link that previously failed |
 | `mrfx preflight <path>` | Inspect a file before ingesting |
 | `mrfx ingest [path]` | Ingest a file or the whole inbox (shows a progress bar) |
@@ -1020,6 +1024,59 @@ Downloads and files:
   factor that doesn't match the file's own is refused.
 - **"fee for service" / "fee_schedule"** spelled differently by a payer no
   longer drop rates.
+
+## What changed in the November 2026 (audit 8) update — version 0.7.1
+
+Downloads:
+
+- **Copies of a file you already have are recognised early — and only when
+  that is proven.** After the first 15 MB (`early_dedup_mb`), a download whose
+  size, first 15 MB, last 1 MB and 8 samples in between match a loaded file is
+  stopped and marked a duplicate. Only compressed files (.gz / .zip) are ever
+  skipped this way: their last bytes carry a checksum of the whole content. A
+  plain .json is always downloaded in full (two plain files can match at both
+  ends and still differ in the middle).
+- **A copy of a file that is downloading right now "waits"** (grey badge,
+  counted separately) instead of downloading twice, and is checked when the
+  other finishes.
+- **Size lanes**: up to 3 download slots take files of 100 MB or less first
+  (`small_file_downloads`, `small_file_mb`); the line above the download list
+  shows the current numbers.
+
+Files:
+
+- **A rate file whose provider list is IN the file is never matched to
+  another file's provider list.** If a payer also had a separate provider
+  list, rates could attach to the wrong practices on three of the four ways a
+  file is read. Two provider lists from the same month that disagree are no
+  longer guessed between (the Files tab says so).
+- **A big standalone provider list (over 1 MB)** is stored as a provider list
+  instead of a rate file with 0 rows.
+- **A file dropped in (or uploaded) under a name that is already loaded** is
+  no longer silently ignored: the same file is reported as already loaded; a
+  different one is loaded under a new name.
+- Rows stored by older versions with "fee_schedule" spelled that way now count
+  as dollar rates (fixed once, at the first start). Files that older versions
+  may have trimmed say **re-ingest suggested** on the Files tab.
+
+Numbers:
+
+- **Payer trajectory / "In real terms"**: measured on the same practices and
+  codes in both months. A payer adding a cheaper code no longer reads as a cut.
+- **A practice with offices in two states** has one rate on every page
+  (Benchmark, Negotiate, rate card): the market's state filter picks the
+  peers, not which of the practice's own rates count.
+- **Leads' "worst payer"**, the leaderboard and the size premium use the same
+  position and the same codes as the Benchmark.
+- **Per-visit value** compares payers on the codes they all price.
+- **Outreach merge fields** (C97110_RATE, _PCTL, …) are on the same basis as
+  the Benchmark (latest month, base modifiers, professional) with the same
+  position rule; the methodology file defines each column.
+- **Rounding**: every printed number rounds exactly as the database does
+  (45.125 → 45.13 everywhere).
+- **Sparklines** stop at a report's as-of month; **hospital parity** takes one
+  rate per hospital first; the **market report** states its as-of month,
+  basis and source files; the **client digest** follows entity-map edits.
 
 ## Debug FAQ — what it says, what it means, what to do
 

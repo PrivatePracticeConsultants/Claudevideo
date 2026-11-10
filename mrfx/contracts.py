@@ -27,6 +27,7 @@ from .benchmark import (BenchmarkError, _market_where, _rates_relation,
 from .catalog import therapy_taxonomy_sql
 from .sqlfn import modal_zip_by_tin
 from .store import Store, generation_cached, mask_tin
+from .rounding import half_up
 
 log = logging.getLogger(__name__)
 
@@ -65,7 +66,7 @@ def expiration_coverage(store: Store, market: dict | None = None) -> dict:
         # pay that twice
         per_payer = [
             {"payer": p, "rows": n, "with_expiry": k,
-             "pct": round(100.0 * k / n, 1) if n else 0.0}
+             "pct": half_up(100.0 * k / n, 1) if n else 0.0}
             for p, n, k in con.execute(
                 f"SELECT t.payer, count(*), count(*) FILTER ({usable}) FROM {rel} t "
                 # _market_where emits td.-qualified state predicates, so the
@@ -76,7 +77,7 @@ def expiration_coverage(store: Store, market: dict | None = None) -> dict:
     ok = sum(r["with_expiry"] for r in per_payer)
     return {
         "rows": total, "with_expiry": ok,
-        "pct": round(100.0 * ok / total, 1) if total else 0.0,
+        "pct": half_up(100.0 * ok / total, 1) if total else 0.0,
         "by_payer": per_payer,
         "note": ("Payers publish `expiration_date` inconsistently — blank, a "
                  "9999/2099 placeholder, or a date already past. Only dates "
@@ -306,7 +307,7 @@ def new_to_network(store: Store, market: dict | None = None,
                     d = dist.get(r["zip"]) if r["zip"] else None
                     if d is None or d > float(radius_miles):
                         continue
-                    r["miles"] = round(d, 1)
+                    r["miles"] = half_up(d, 1)
                     kept.append(r)
                 out = kept
             rows = out

@@ -996,6 +996,14 @@ def _export_dir(store) -> Path:
     return d
 
 
+def _safe_view(view) -> str:
+    """`view` names the download (Content-Disposition) and the ZIP members:
+    letters, digits, - and _ only, 40 at most (audit 8 P2-G — a quote or a
+    newline in it broke the header and the archive names)."""
+    v = re.sub(r"[^A-Za-z0-9_-]+", "", str(view or ""))[:40]
+    return v or "explorer"
+
+
 def _sweep_stale_exports(store, older_than_s: float = 6 * 3600) -> None:
     """A killed server leaves its half-built export behind; one sweep at
     start-up. Only OLD files: a second app on the same store (tests, a
@@ -1264,7 +1272,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         request: Request,
         sort: str = "negotiated_rate",
         dir: str = "desc",
-        page: int = Query(1, ge=1),
+        # bounded: page=10**30 overflowed the BIGINT OFFSET into a 500 (audit 8 P3)
+        page: int = Query(1, ge=1, le=10_000_000),
         page_size: int = Query(100, ge=1, le=1000),
     ):
         qp = _qp(request)
@@ -1785,11 +1794,18 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     # -- files -----------------------------------------------------------------------
 
     @app.get("/api/files")
-    def files():
+    def files(limit: int = 500, offset: int = 0):
+        # polled every 4 s while the Files tab is open: never the whole table
+        # with every preflight blob (audit 8 P1-C — a 2,000-file store sent
+        # megabytes per poll). Newest first, a page at a time, plus the total.
+        limit = max(1, min(int(limit), 5000))
+        offset = max(0, int(offset))
         with store.connect() as con:
+            total = con.execute("SELECT count(*) FROM files").fetchone()[0]
             rows = _dicts(con.execute(
-                "SELECT * FROM files ORDER BY coalesce(finished_at, started_at) DESC NULLS LAST"
-            ))
+                "SELECT * EXCLUDE (preflight) FROM files "
+                "ORDER BY coalesce(finished_at, started_at) DESC NULLS LAST, filename "
+                "LIMIT ? OFFSET ?", [limit, offset]))
         for r in rows:
             for k in ("started_at", "finished_at"):
                 if r.get(k) is not None:
@@ -1799,7 +1815,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                     r["qa"] = json.loads(r["qa"])
                 except json.JSONDecodeError:
                     pass
-        return {"files": rows}
+        return {"files": rows, "total": total, "limit": limit, "offset": offset}
 
     @app.post("/api/files/scan")
     def files_scan():
@@ -1851,7 +1867,10 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             # one link per line — commas are legal INSIDE URLs (signed query
             # strings), so never split on them
             raw = raw.splitlines()
-        counts = add_urls(store, [str(u) for u in raw])
+        if not isinstance(raw, list):
+            # {"urls": 5} iterated an int into a 500 (audit 8 P3)
+            raise HTTPException(422, "urls must be a list of links, or text with one link per line")
+        counts = add_urls(store, [u for u in raw if isinstance(u, str)])
         return counts
 
     @app.post("/api/urls/retry-failed")
@@ -1879,7 +1898,20 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     @app.get("/api/urls")
     def urls_list():
-        return {"urls": store.list_urls(), "counts": store.url_queue_counts()}
+        return {"urls": store.list_urls(), "counts": store.url_queue_counts(),
+                "settings": _download_settings()}
+
+    def _download_settings() -> dict:
+        """What the downloader is set to, for the Files tab's one-line
+        summary (audit 8 P1-D: the duplicate check and the size lanes had
+        no visible setting). Changed in config/mrfx.yaml."""
+        from .fetch import resolve_download_count
+        n = resolve_download_count(cfg)
+        small = min(cfg.small_file_downloads, n - 1) if n > 1 else 0
+        return {"downloads": n, "small_file_downloads": small,
+                "small_file_mb": cfg.small_file_mb,
+                "early_dedup_mb": cfg.early_dedup_mb,
+                "config_file": "config/mrfx.yaml"}
 
     @app.get("/api/known-sources")
     def known_sources():
@@ -1976,19 +2008,49 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                     if size > UPLOAD_LIMIT_BYTES:
                         raise HTTPException(413, "over 1 GB — drop the file into data/inbox/ instead")
                     out.write(chunk)
+            # an upload under a name the store already holds (or one still in
+            # the inbox) was replaced in place and then skipped as 'done' —
+            # never loaded, never said (audit 8 P1-B). The same file is
+            # reported as already loaded; a different one gets its own name.
+            prior = store.file_status(safe)
+            renamed_from = None
+            if prior and prior.get("status") == "done":
+                from .ingest import same_as_loaded
+                if same_as_loaded(cfg, store, tmp, prior, name=safe):
+                    return {"status": "duplicate", "filename": safe, "bytes": size,
+                            "note": f"{safe} is already loaded — this upload is the same file"}
+            if (prior and prior.get("status") != "failed") or dest.exists():
+                import hashlib
+
+                from .ingest import unique_inbox_name
+                tag = hashlib.sha256(f"{size}:{_uuid.uuid4().hex}".encode()).hexdigest()[:6]
+                renamed_from = safe
+                dest = cfg.inbox_dir / unique_inbox_name(cfg.inbox_dir, safe, store, tag)
             tmp.replace(dest)
         finally:
             tmp.unlink(missing_ok=True)
         threading.Thread(target=_bg_safe, args=(scan_inbox, cfg, store),
                          name="mrfx-upload-scan", daemon=True).start()
-        return {"status": "queued", "filename": dest.name, "bytes": size}
+        out = {"status": "queued", "filename": dest.name, "bytes": size}
+        if renamed_from:
+            out["renamed_from"] = renamed_from
+            out["note"] = (f"a file named {renamed_from} is already in MRF Explorer — "
+                           f"this one is loaded as {dest.name}")
+        return out
 
     # -- export (CSV + methodology sidecar, §7A.6) ---------------------------------
 
 
     _sweep_stale_exports(store)
+    last_sweep = [time.monotonic()]
 
     def _mktemp(suffix: str) -> Path:
+        # an export the browser abandoned mid-stream can skip its cleanup
+        # task; sweep old ones while the server runs, not only at start-up
+        # (audit 8 P2-G) — at most every 10 minutes, a glob of one folder
+        if time.monotonic() - last_sweep[0] > 600:
+            last_sweep[0] = time.monotonic()
+            _sweep_stale_exports(store)
         fd, p = tempfile.mkstemp(suffix=suffix, prefix="mrfx-export-",
                                  dir=_export_dir(store))
         os.close(fd)  # mkstemp returns an OPEN fd — dropping it leaks one per export
@@ -2048,7 +2110,11 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             tmp.unlink(missing_ok=True)
             tmp.with_name("tmp_" + tmp.name).unlink(missing_ok=True)
             raise
-        method = methodology_text(cfg, store, grain, fs, sort, dir, view)
+        try:
+            method = methodology_text(cfg, store, grain, fs, sort, dir, view)
+        except BaseException:
+            tmp.unlink(missing_ok=True)   # never leave a built export behind
+            raise
         return stamp, tmp, method
 
     def _stream_with_bom(path: Path, filename: str, media_type: str):
@@ -2077,6 +2143,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         dir: str = "desc",
         full: bool = False,
     ):
+        view = _safe_view(view)
         stamp, out, _method = _export_payload(request, view, sort, dir, full)
         return _stream_with_bom(out, f"mrfx_{view}_{stamp}.csv", "text/csv")
 
@@ -2089,6 +2156,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         dir: str = "desc",
         full: bool = False,
     ):
+        view = _safe_view(view)
         stamp, csv_path, method = _export_payload(request, view, sort, dir, full,
                                                   zip_factor=EXPORT_ZIP_FACTOR)
         out = _mktemp(".zip")
@@ -2101,8 +2169,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                     m.write(_BOM)
                     shutil.copyfileobj(src, m, 1 << 20)
                 z.writestr(f"mrfx_{view}_{stamp}_methodology.txt", method)
-        except OSError as e:
-            if _is_disk_full(e):
+        except BaseException as e:
+            if isinstance(e, OSError) and _is_disk_full(e):
                 raise _space_refused(e, csv_path, out)
             csv_path.unlink(missing_ok=True)
             out.unlink(missing_ok=True)
@@ -3055,12 +3123,17 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         grain = grain_of(qp, cfg, store)
         if grain == "npi":
             grain = "tin"  # outreach is entity-level by definition
+        from .outreach import OUTREACH_COLUMNS_NOTE
         fs = _fs(qp)
+        # the per-code columns are on the house basis, at the dashboard's
+        # month and payer choice (outreach.build_outreach_rows)
+        market = {"month": fs.described.get("as_of_month") or "latest",
+                  "payers": list(fs.described.get("payers") or [])}
         headers, rows = build_outreach_rows(
-            store, rel_sql(grain, fs), fs.params, fs.described.get("codes")
+            store, rel_sql(grain, fs), fs.params, fs.described.get("codes"), market=market
         )
         method = methodology_text(cfg, store, grain, fs, "display_name", "asc", "outreach")
-        return outreach_csv(headers, rows), method
+        return outreach_csv(headers, rows), method + "\n\n" + OUTREACH_COLUMNS_NOTE
 
     @app.get("/api/export/outreach.csv")
     def export_outreach(request: Request, background: BackgroundTasks):

@@ -62,7 +62,9 @@ def test_per_code_merge_fields_and_percentiles(cfg, outreach_store):
     echo = next(r for r in rows if r["ORG_NAME"] == "Echo Hand Center")  # $34 = highest
     assert float(alpha["C97110_RATE"]) == 30.0
     assert float(alpha["C97110_MKT_MEDIAN"]) == 32.0
-    assert int(alpha["C97110_PCTL"]) == 20        # 1 of 5 at-or-below
+    # mid-rank among the 4 OTHER organizations (audit 8 P1-6 — was 1 of 5
+    # at-or-below = 20 while the Benchmark said p0): 0 below, no ties -> 0
+    assert int(alpha["C97110_PCTL"]) == 0
     assert float(alpha["C97110_GAP_TO_MEDIAN"]) == 2.0
     assert int(echo["C97110_PCTL"]) == 100
     # unrequested codes are absent when an explicit list is passed

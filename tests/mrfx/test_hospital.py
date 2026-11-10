@@ -213,7 +213,9 @@ def test_the_api_imports_compares_and_forgets(cfg, store, tmp_path):
     par = c.post("/api/hospital/parity",
                  json={"payer": "Aetna", "subject": "431234567",
                        "market": {"month": "2026-06", "therapy_only": False}}).json()
-    assert par["median_hospital_multiple"] == 3.02   # median(2.92, 3.13)
+    # median(2.92, 3.13) = 3.025 -> 3.03 half-up, as DuckDB and a person round
+    # (Python's round() said 3.02 off the binary double — audit 8 P2-9)
+    assert par["median_hospital_multiple"] == 3.03
 
     # a junk upload is a 422 with a reason, never a 500
     with open(tmp_path / "junk.csv", "w") as fh:

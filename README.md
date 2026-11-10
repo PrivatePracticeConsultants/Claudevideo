@@ -408,8 +408,9 @@ Three link kinds are auto-detected:
   Provider Network file ingested 88,649 rows).
 - **JavaScript-only portals** (Molina, HealthSparq-hosted Blues, and other
   pages whose file lists exist only after scripts run): with the optional
-  Playwright install (`pip install playwright && playwright install
-  chromium`) the app renders the page in headless Chromium and harvests
+  headless browser (downloaded by the app itself on first use —
+  `render_auto_install`; `playwright install chromium` by hand only if that
+  step fails offline) the app renders the page in headless Chromium and harvests
   links from the rendered DOM **and** from the JSON responses the page's
   own scripts fetch — and when nothing appears, it dismisses consent
   overlays and clicks the controls that look like they reveal the list

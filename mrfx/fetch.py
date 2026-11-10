@@ -2600,7 +2600,13 @@ def _normalize_url(u: str) -> str | None:
     if not u:
         return None
     if u.lower().startswith(("http://", "https://")):
-        return u
+        # a scheme with no host ("http://", "https:///x") is not a link: it
+        # was queued and failed later with a confusing error (audit 8 P3)
+        from urllib.parse import urlsplit
+        try:
+            return u if urlsplit(u).hostname else None
+        except ValueError:
+            return None
     if u.startswith("//"):          # protocol-relative
         return "https:" + u
     if _BARE_HOST_RE.match(u):      # bare host / host+path

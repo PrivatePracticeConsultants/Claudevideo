@@ -12,6 +12,7 @@ import json
 import pytest
 
 from mrfx.parser import file_month_for, published_month_of
+from mrfx.store import ROW_RULES_VERSION
 
 
 @pytest.mark.parametrize("hdr, name, im, want", [
@@ -97,7 +98,7 @@ def test_an_older_store_with_a_future_month_is_fixed_once(cfg, store, monkeypatc
         assert con.execute("SELECT DISTINCT file_month FROM rates").fetchall() == [("2026-05",)]
         fm, pm, rules, qa = con.execute(
             "SELECT file_month, published_month, row_rules, qa FROM files").fetchone()
-    assert (fm, pm, rules, json.loads(qa)["future_header_date"]) == ("2026-05", "2026-05", 2,
+    assert (fm, pm, rules, json.loads(qa)["future_header_date"]) == ("2026-05", "2026-05", ROW_RULES_VERSION,
                                                                       "2099-01-01")
     assert st.rollups_stale()          # its payer is queued for the analytics
     st.update_rollups_incremental()

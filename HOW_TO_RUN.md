@@ -189,11 +189,24 @@ exactly where it stopped, including half-finished downloads.
    `GETTING_STARTED.md` under "what to expect"); you can keep using the
    dashboard while they run.
 
-**A file says "paused"?** Its insurer's server stopped sending data part-way
-(the bar sat still for 10 minutes). The program set it aside so the other
-files keep going, kept what it had, and will try again by itself in 24 hours
-— up to 5 times, then it's marked failed. **Try now** retries it immediately;
-**skip** forgets it.
+**A file says "parked"?** Its insurer's server stopped sending data for about
+4 minutes. The program set it aside so the next file could use the download
+slot, kept what it had, and puts it back in line within about 10 minutes (or
+straight away when nothing else is waiting); it continues where it stopped.
+Only a server that stays silent through 6 parks in a row is **paused** — tried
+again by itself in 24 hours, up to 5 times, then marked failed. **Try now**
+retries it immediately; **skip** forgets it.
+
+**A file says "waiting"?** It looks identical (same size, same first part) to a
+file that is downloading right now. Rather than download it twice, it waits;
+when the other one finishes it is checked and skipped as a duplicate, or
+downloaded if it turns out to be different. Nothing to do.
+
+**"big file — waiting for a big-file download slot"?** Up to three of the
+download slots take files of 100 MB or less first (one of them only ever takes
+small files), so small files never queue behind a run of huge ones; a big file
+found by a small-file slot is handed to the next free big-file slot. The numbers
+are on the line above the list and can be changed in `config/mrfx.yaml`.
 
 **Too much at once?** **Clear queue** sets aside everything still waiting and
 **Stop downloads** pauses the ones downloading; **Resume stopped** puts all of

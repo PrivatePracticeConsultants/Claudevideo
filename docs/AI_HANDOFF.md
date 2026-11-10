@@ -38,7 +38,7 @@ Two codebases live in this repo:
 | `mrfx/api.py` | FastAPI JSON API + static SPA. `/api/rates` (tin/npi/entity grains, server-side paging), benchmarks, `/api/schedule/*` + `/api/report/*`, exports (+methodology sidecars), outreach CSV, `/api/urls*`, `/api/known-sources`. Round 3 rules: `FilterSet` puts every clause in a bucket (key / unit / ident / row) and `rel_sql` picks "latest" over key+unit+ident-filtered rows only, row filters after (a rate/modifier filter must never resurrect a superseded month); the latest partition carries `tin_is_really_npi`. Entity grain: each member TIN at ITS newest month, state/city/therapy filters per member, key = manual map, else organization (NPI-2) name + main state (`tin_directory.primary_state`), else the TIN itself (a TIN named after a clinician is its own entity — real store: 462 person-names shared by 1,008 TINs). `practice_basis()` = the Benchmark's basis for the payer leaderboard and by-code strip; the Explorer discipline filter includes untagged (`unspecified`) lines like the Benchmark. Round 4 (speed, no number moved): TIN/entity "latest" is the spine's stored `is_latest` (`_TIN_REL_LATEST`; only the NPI grain keeps a window); `stat_rel()` feeds the aggregate views (summary strip + by-code, Code-page histogram + payer leaderboard, trend) straight off the bare spine when no filter needs a joined column (`uses_dim_cols`); the table's page-first late join (`_tin_late_join_ok`) now covers "latest"; `_entity_rel` takes its DISTINCT counts/lists from one `list()` per column (four DISTINCT aggregates ran the whole-spine entity view out of memory); `order_sql(src="src.")` makes the export sort on the RAW columns (the masked-TIN alias made SSN-pattern rows tie). Round 5: a SELECTIVE practice-attribute filter (state, city, a name or partial-ID search — "therapy only" alone keeps most of a therapy store and stays a join filter, `FilterSet.selective_dims`) at the TIN/entity grain no longer joins the three dimension tables onto every spine row before testing them — `_tin_rows_by_unit` computes the practice columns once per (tin_value, tin_is_really_npi) from `_UNIT_COLS` (the SAME expressions the projection uses), keeps the passing practices, and SEMI JOINs their rows (`tests/mrfx/test_unit_filters.py` pins it against the old join-then-filter form; an exact 9/10-digit ID alone stays a plain spine predicate). The summary strip off the bare spine is cached for its `data_generation` (no TTL; the Medicare % is applied per request by `_with_anchor`), a joined view keeps the 30 s `SUMMARY_TTL_SECONDS`. |
 | `mrfx/sqlfn.py` | Shared SQL pieces. "The ZIP a practice sits at" (`modal_zip_by_tin`, `modal_zip_of`, `zip_counts_by_tin`): the ZIP its NPIs' rate rows most often carry, ties to the LOWEST ZIP — DuckDB's `mode()` broke ties by thread arrival (a practice split over four ZIPs got a different 15-mile market per call); counted per (TIN, ZIP) then picked, the cost of plain `mode()` (an ordered `mode(x ORDER BY x)` doubled it). Used by leverage, territory, dossier; other `mode()` calls carry `ORDER BY` (lint in `test_output_speed.py`). |
 | `mrfx/benchmark.py` | Market percentiles, opportunity model, payer-negotiation one-pager, pitch report; shared `_market_where` / `resolve_subject_tins` / `_brand_header`. Reports refuse without a pinned month + state (or explicit `allow_national`). |
-| **Percentile conventions** (read before touching any position number) | The Benchmark tab's `subject_percentile` is MID-RANK — strictly below plus HALF the ties — computed in `benchmark.py`'s `position` CTE, and both comparisons round the peer rate to 2dp first (subject_rate is already rounded; an exact `=` misses real ties like 33.325 vs a displayed 33.33). Mid-rank is the only convention consistent with the `quantile_cont` p10..p90 columns shown on the same row: a subject whose rate equals the peer median scores exactly 50. It replaced at-or-below (`<=`), which counted the subject's own ties in full and OVERSTATED position by up to ~25 points on real tie-heavy data (payers publish identical fee schedules to many practices) — always upward, i.e. making clients look better paid and shrinking the negotiating gap. `leads.py` deliberately keeps a DIFFERENT convention (`percent_rank()`, strictly-below, market-wide incl. self) because the lead finder must still surface the cheapest practice in a thin market; the divergence is intentional and documented at both sites. |
+| **Percentile conventions** (read before touching any position number) | The Benchmark tab's `subject_percentile` is MID-RANK — strictly below plus HALF the ties — computed in `benchmark.py`'s `position` CTE, and both comparisons round the peer rate to 2dp first (subject_rate is already rounded; an exact `=` misses real ties like 33.325 vs a displayed 33.33). Mid-rank is the only convention consistent with the `quantile_cont` p10..p90 columns shown on the same row: a subject whose rate equals the peer median scores exactly 50. It replaced at-or-below (`<=`), which counted the subject's own ties in full and OVERSTATED position by up to ~25 points on real tie-heavy data (payers publish identical fee schedules to many practices) — always upward, i.e. making clients look better paid and shrinking the negotiating gap. Leads, the leaderboard, the size premium (`quality.py`, partitioned by payer x code) and the outreach PCTL merge field use the SAME mid-rank among the OTHER practices (`leads.MIDRANK_PCT` / `midrank_pct_sql(partition)`): the cheapest of a thin market still sits at 0 (so the finder still surfaces it) and a flat fee schedule reads p50 everywhere. Leads and the leaderboard count only codes with ≥2 practices AND ≥2 distinct rates (an all-tied code ranks no one); the worst-payer gap uses the same code set (audit 8). `percent_rank()` is no longer used for any printed position. |
 | **Plan / network dimension** (`plan_index` + `spine_relation`) | A payer's rate FILE never names a plan; the mapping lives only in its table-of-contents, so `expand_toc_with_plans` harvests `reporting_plans[]` per structure item and `store.save_plan_index` records it keyed on the URL's `dedup_key` (many-to-many on purpose — one file commonly serves many plans). A plan scope is NOT a WHERE clause: the prebuilt spine has already aggregated ACROSS files, so a TIN priced 28 in the narrow book and 40 in the broad one is stored once at their median (34) with only a representative `source_file`, and no filter over that row can recover 28. `benchmark.spine_relation` therefore rebuilds the spine from the raw rates of the plan's files using `store.BY_TIN_QUERY` verbatim — same aggregation, smaller input — so a plan-scoped number is computed exactly like the pooled one (verified: narrow 28.00, broad 40.00, pooled 34.00 on the same seed). Every `_market_where` caller must take its relation from `spine_relation`/`_rates_relation` or the scope is silently ignored; `monitor.py`'s two literal `rates_by_tin` reads were converted for this. An unknown plan REFUSES rather than falling back to the pooled market, `public_market()` keeps the resolved file list out of every report, and a plan-scoped methodology footer lists only that plan's files. `plan_coverage()` flags payers publishing more than one plan — the blend the dimension exists to expose — and the Benchmark tab's picker appears only when the store carries plan tags. |
 | `mrfx/schedule.py` | Fee-schedule reconstruction ("your rate card") + payer scorecard ("who pays best"), reusing benchmark's market filter so numbers agree. Scorecard ranks by median % of Medicare (MPFS loaded) else median % of best payer over head-to-head codes. |
 | `mrfx/web/` | Vanilla-JS SPA (no CDN deps): Overview, Explorer, Code comparison, Markets, Benchmark, Negotiate, Rate card, Medicare (eligibility + referral structure + the ZIP/radius referral-leaders ranking, once `mrfx medicare` has imported them), Clients (watchlist digest), Leads, Payer roster, Changes, Files (paste-links card + queue), Sources. |
@@ -420,6 +420,61 @@ Two codebases live in this repo:
   modifiers go through `modifiers.normalize`. The MPFS importer finds the
   header under title rows (`_read_rows(text, key)`), prefers the non-QPP
   PPRRVU and cross-checks the file's CONV FACTOR.
+
+### Audit 8 additions (Nov 10, 2026) — rules a change must keep
+
+- **Provider references are file-local** (`parser._resolve_refs`). An id the
+  file's OWN `provider_references` table defines resolves only from it — a
+  remote `location` entry or an empty one is missing (counted
+  `remote_ref_groups`), never filled from a companion. Only an id the file
+  does not define falls back to the payer's standalone files. Groups defer
+  until the table is complete (`_refs_complete`), companion or not. Two
+  same-vintage companions that define an id differently map it to `None` in
+  `load_provider_refs` (unresolved, `qa.ambiguous_ref_ids`). All four parse
+  paths (classic, fast, two-pass, single-read big) and the pool worker are
+  pinned by `tests/mrfx/test_audit8_ingest.py`.
+- **A reference-only file the sniff misread** (`parser.reference_only`: a
+  table, no `in_network`) is stored via `ingest._ingest_reference_file`
+  (batched, `REF_BATCH`), on every path — never a 0-row rate file.
+- **A part swap supersedes earlier pending ops** (`store._swap_in_part`): it
+  discards this file's parked replacement and removes its doomed entry first.
+- **Row rules 3** (`ROW_RULES_VERSION`): `parser.normalize_negotiated_type` is
+  the one spelling rule for the parser and the stored-row migration; files
+  that lost "bundled" items under the old arrangement rule get
+  `qa.reingest_suggested`.
+- **The subject of a report** (`benchmark.subject_tins_for_market` +
+  `subject_market`): the peer-only filters (`PEER_ONLY_KEYS`: state, city,
+  therapy_only) never touch the subject's own rows; a bare NPPES name shared
+  by practices in several states means the one in the market's state (the
+  Explorer's "NAME · ST" entity), a mapped entity / TIN / NPI keeps all its
+  TINs. Benchmark, Negotiate (comparables and cross-payer context), the rate
+  card and its sparklines all go through it.
+- **Trajectory** (`monitor.compute_payer_trajectory`): a matched panel per
+  payer — (code, practice) pairs priced at both of its endpoint months, each
+  against its own first-month rate, median per code then across codes. Never
+  one median pooled over codes or over a shifting panel.
+- **Positions**: `leads.midrank_pct_sql(partition)` everywhere a position is
+  printed (Benchmark's CTE is the same rule). Leads, the leaderboard and the
+  worst-payer gap count only codes with ≥2 practices AND ≥2 distinct rates
+  (the leaderboard puts an all-flat practice at p50 rather than dropping it).
+- **Outreach merge fields** are on the house basis (`practice_base_sql` at
+  the dashboard's month and payers), mid-rank among the OTHER organizations,
+  defined in `OUTREACH_COLUMNS_NOTE` (the ZIP's methodology).
+- **Rounding**: `rounding.half_up` is DuckDB's `round()` (half away from zero
+  on the double `x * 10**d`), checked equal on 70,000 values; no Python
+  `round()` on a printed number (store/ingest/nppes keep theirs for internal
+  values).
+- **Per-visit value** compares payers on the codes every compared payer
+  prices; a payer's own-codes value is shown, never ranked.
+- **Inflation**: every index year keeps its own source (`load_index()["sources"]`);
+  a deflator reports its endpoint years' name and source.
+- **Same-name files**: `ingest.same_as_loaded` (fingerprint vs the loaded
+  one) — an identical copy is left alone / reported as a duplicate on upload,
+  a different file is loaded under `unique_inbox_name`. Never silently skipped.
+- **The Files poll** (`/api/files`) is paged (`limit`/`offset`, newest first)
+  and carries no `preflight`; the dashboard never stacks polls.
+- **`config/starter_links.txt` is generated** from the catalog
+  (`known_sources.starter_links_text`); a test pins them equal.
 
 ## Step 4 — Know the URL pipeline states
 
