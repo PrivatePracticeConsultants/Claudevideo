@@ -361,10 +361,10 @@ def test_small_slots_take_small_files_and_hand_big_ones_over(cfg, store):
             dest = cfg.downloads_dir / F.filename_for(s.base + path)
             assert not dest.with_suffix(dest.suffix + ".part").exists(), "no byte written"
         assert _row(store, s.base + "/big/rates.json.gz")["bytes_total"] == len(big)
-        # handed over: the strict small slot never takes them; a helping small
-        # slot does when nothing small waits (audit 8 F4); so does a big slot
-        assert store.next_queued_url("small_only", 1 << 20) is None
-        assert store.next_queued_url("small", 1 << 20)["url"].endswith("/big/rates.json.gz")
+        # handed over (fetch_url_record's lane_max, which the downloader no
+        # longer uses — review 9 5.1): every small slot, slot 0 included, helps
+        # with a big file when nothing small or unsized waits (audit 8 F4)
+        assert store.next_queued_url("small_only", 1 << 20)["url"].endswith("/big/rates.json.gz")
         assert store.next_queued_url("large", 1 << 20)["url"].endswith("/nolen/rates.json.gz")
         # a known size is never overwritten by "unknown" (audit 8 F9)
         rid = _row(store, s.base + "/big/rates.json.gz")["id"]

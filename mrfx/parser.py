@@ -1253,8 +1253,27 @@ def run_in_network_parse(cfg: MrfxConfig, make_parser, open_fn) -> tuple["InNetw
             log.info("%s: fast scan declined (%s) — using the classic parser",
                      parser.source_file, e)
             parser = make_parser()
-    with open_fn() as stream:
-        return parser, parser.parse(stream)
+    try:
+        with open_fn() as stream:
+            return parser, parser.parse(stream)
+    except ijson.JSONError as e:
+        raise ValueError(_classic_refusal(e)) from e
+
+
+def _classic_refusal(e: Exception) -> str:
+    """The classic (ijson) reader refuses numbers JSON does not allow — NaN,
+    Infinity, an integer of 20+ digits — even in an item it would skip; the
+    fast reader passes over them (review 9 item 5.2, settled: a file with
+    one NaN in an untargeted item failed on the classic path only). Say so
+    in words, with the way out, instead of yajl's lexer text."""
+    raw = " ".join(str(e).split())[:160]
+    if any(k in raw for k in ("invalid char", "integer overflow", "malformed number")):
+        return ("this file contains a number JSON does not allow (NaN, Infinity or a "
+                "20-plus-digit integer), which the classic reader cannot pass over. The "
+                "fast reader can: set fast_scan: true in config/mrfx.yaml (the default) "
+                "and make sure numpy is installed (pip install -r requirements.txt), then "
+                f"retry. Detail: {raw}")
+    return f"the file is not valid JSON ({raw})"
 
 
 def _cited_ref_ids(item: dict) -> set[int]:

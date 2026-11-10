@@ -886,3 +886,101 @@ def test_practice_medians_survive_a_restart_and_superseded_ones_go(cfg, store):
     compute_benchmark(again, "ACME REHAB", MO)
     now = sorted(p.name for p in store.dir.glob("practice_medians*.parquet"))
     assert now and now != files and stale.name not in now
+
+
+# -- Group 5: downloads efficiency and the suspicions --------------------------
+
+def test_a_queue_of_big_files_costs_one_request_per_file(cfg, store):
+    # 5.1 at 64a371c: a small slot that learned at the headers its unsized
+    # row was big aborted it and handed it back — 45 GETs for 24 files, and
+    # slot 0 never took a big file
+    from tests.mrfx.test_early_dedup import _gz, _Srv
+
+    from mrfx.fetch import add_urls, run_queue
+    big = _gz()
+    files = {f"/b{i}/rates.json.gz": big.replace(b"Acme", f"Ac{i:02d}".encode()[:4])
+             for i in range(6)}
+    cfg.parallel_downloads, cfg.small_file_downloads, cfg.small_file_mb = 3, 2, 1
+    with _Srv(files) as s:
+        for p in files:
+            s.nolen.add(p)                      # unsized until the headers
+        add_urls(store, [s.base + p for p in files])
+        run_queue(cfg, store, drain=True)
+        assert all(n == 1 for n in s.hits.values()), s.hits
+    assert {u["status"] for u in store.list_urls()} <= {"done", "skipped"}
+    # every small slot, slot 0 included, helps with big files when nothing
+    # small or unsized waits
+    from mrfx.fetch import dedup_key
+    u = "https://cdn.example/big.json"
+    rid = store.enqueue_url(u, dedup_key(u))
+    store.update_url(rid, bytes_total=5 << 20)
+    assert store.next_queued_url("small_only", 1 << 20)["id"] == rid
+
+
+def test_user_actions_and_parks_clear_a_stale_wait(cfg, store):
+    # 5.2 (settled: real): a row left queued with waiting_on set after a
+    # clear / retry was later stall-parked and held by _NOT_WAITING while
+    # that old twin was in flight
+    from mrfx.fetch import dedup_key
+    a = store.enqueue_url("https://x.example/a.json", dedup_key("https://x.example/a.json"))
+    b = store.enqueue_url("https://x.example/b.json", dedup_key("https://x.example/b.json"))
+    store.update_url(a, status="downloading")
+    store.park_waiting(b, a, 10, "waiting on a")
+    waiting = lambda: q(store, "SELECT waiting_on FROM url_queue WHERE id = ?", b)[0][0]  # noqa: E731
+    assert waiting() == a
+    store.clear_queued()
+    assert waiting() is None
+    store.park_waiting(b, a, 10, "waiting on a")
+    store.requeue_failed()
+    assert waiting() is None
+    store.park_waiting(b, a, 10, "waiting on a")
+    store.park_url(b, 1, 1, "parked")
+    assert waiting() is None
+
+
+def test_a_copy_skipped_against_replaced_content_is_queued_again(cfg, store):
+    # 5.2 (settled: real): a copy skipped as identical to a loaded file whose
+    # own content was then replaced is identical to nothing in the store
+    from mrfx.fetch import dedup_key
+    c = store.enqueue_url("https://y.example/copy.json", dedup_key("https://y.example/copy.json"))
+    store.record_identity("orig.json", 100, 1, "a" * 64)
+    store.update_url(c, status="skipped", kind="duplicate", duplicate_of="orig.json",
+                     error="identical to orig.json")
+    store.record_identity("orig.json", 100, 2, "a" * 64)          # same content: stays
+    assert q(store, "SELECT status FROM url_queue WHERE id = ?", c)[0][0] == "skipped"
+    store.record_identity("orig.json", 120, 3, "b" * 64)          # new content
+    st, dup = q(store, "SELECT status, duplicate_of FROM url_queue WHERE id = ?", c)[0]
+    assert (st, dup) == ("queued", None)
+
+
+def test_the_rules_update_leaves_a_parked_replacement_alone(cfg, store):
+    # 5.2 (settled: real): rewriting the old live part swapped it in
+    # through _swap_in_part, which discarded the newer PARKED rates
+    put(cfg, "p.json", _doc1(50.0))
+    scan_inbox(cfg, store)
+    _age_part(store, "p.json")
+    park = f".{S.file_key('p.json')}.parked"
+    (store.rates_dir / park).write_bytes((store.rates_dir / f"{S.file_key('p.json')}.parquet").read_bytes())
+    with store.connect() as con:
+        con.execute("INSERT OR REPLACE INTO meta VALUES ('parked_parts', ?)",
+                    [json.dumps({park: f"{S.file_key('p.json')}.parquet"})])
+    store._migrate_row_rules()
+    assert (store.rates_dir / park).exists()
+    assert q(store, "SELECT row_rules FROM files WHERE filename = 'p.json'")[0][0] < S.ROW_RULES_VERSION
+
+
+@pytest.mark.parametrize("bad", ["NaN", "Infinity", "12345678901234567890"])
+def test_the_classic_reader_says_what_it_cannot_read(cfg, store, bad):
+    # 5.2 (settled: real, bounded): the classic reader cannot pass over a
+    # number JSON does not allow, even in an untargeted item; the fast reader
+    # loads the file. The refusal is a sentence with the way out, not
+    # yajl's "lexical error: invalid char in json text"
+    raw = json.dumps({**HDR, "in_network": [item("99213", groups=[grp(1234567890, "123456789")]),
+                                            item("97110", groups=[grp(1234567890, "123456789")])]})
+    raw = raw.replace('"negotiated_rate": 50.0', f'"negotiated_rate": {bad}', 1)
+    cfg.fast_scan = False
+    r = ingest_file(cfg, store, put(cfg, "odd.json", None, raw.encode()))
+    assert r["status"] == "failed" and "fast_scan: true" in r["error"]
+    cfg.fast_scan = True
+    r = ingest_file(cfg, store, put(cfg, "odd2.json", None, raw.encode()))
+    assert (r["status"], r["rows"]) == ("done", 1)

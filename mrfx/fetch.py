@@ -2936,11 +2936,15 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                     store.wait_queue_change(epoch, QUEUE_IDLE_WAIT_SECONDS)
                     continue
                 holding[threading.current_thread().name] = rec["id"]
-                small_row = (not rec.get("big_lane")
-                             and int(rec.get("bytes_total") or 0) <= lane_bytes)
                 try:
-                    fetch_url_record(cfg, store, rec, lane_max=lane_bytes if (
-                        lane in ("small", "small_only") and small_row) else 0)
+                    # lanes decide which row a slot CLAIMS, never whether a
+                    # download it started continues: a small slot that learns
+                    # at the headers that its unsized row is big keeps the
+                    # bytes already flowing. Handing the row back cost every
+                    # big file a second GET (45 GETs for 24 files; 2,000 extra
+                    # aborted requests on a 2,000-file index of big files —
+                    # review 9 item 5.1)
+                    fetch_url_record(cfg, store, rec)
                 except KeyboardInterrupt:
                     raise
                 except BaseException:  # noqa: BLE001 — downloader must never die
@@ -2970,7 +2974,9 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
     n_downloads = resolve_download_count(cfg)
     # size lanes: the first `n_small` slots take only small files; at least
     # one big-file slot always remains
-    n_small = min(cfg.small_file_downloads, n_downloads - 1) if n_downloads > 1 else 0
+    # with 2 or fewer slots, no lanes: one slot per lane halved a queue of
+    # big files' throughput (66 s vs 34 s for 24 files, review 9 item 5.1)
+    n_small = min(cfg.small_file_downloads, n_downloads - 1) if n_downloads > 2 else 0
     # slot 0 is small-only (a small file arriving never waits); the other
     # small slots help with big files when no small file is waiting
     lanes = [("small_only" if i == 0 else "small") if i < n_small

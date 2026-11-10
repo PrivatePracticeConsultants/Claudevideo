@@ -1465,6 +1465,22 @@ class Store:
         except Exception as e:  # noqa: BLE001 — never block the app from opening
             log.warning("row-rules check skipped (%s)", e)
             return
+        # a file whose newer rates are PARKED (its old part was held open when
+        # they finished) waits: rewriting the old part swaps it in through
+        # _swap_in_part, which discards the park — the newer rates would be
+        # lost for the old ones (review 9 item 5.2). Its park is adopted when
+        # the old part is free; the next start updates that part.
+        try:
+            with self.connect() as con:
+                parked = set(json.loads(self._meta_get(con, "parked_parts") or "{}"))
+        except Exception:  # noqa: BLE001
+            parked = set()
+        if parked:
+            held = [n for n, _r in todo if f".{file_key(n)}.parked" in parked]
+            if held:
+                log.info("%d file(s) with newer rates waiting to be swapped in are "
+                         "updated at a later start", len(held))
+                todo = [(n, r) for n, r in todo if n not in set(held)]
         if not todo:
             return
         t0 = time.monotonic()
@@ -2600,12 +2616,13 @@ class Store:
         if lane in ("small", "small_only"):
             rec = self._claim_next("queued", "downloading", where=f"NOT {big}",
                                    order="(coalesce(bytes_total, 0) = 0), ")
-            if rec is not None or lane == "small_only":
+            if rec is not None:
                 return rec
             # nothing small (or unsized) is waiting: help with the big files
             # rather than leave the slot idle (with lanes on, a queue of big
-            # files ran on half the slots — audit 8 F4). One small slot always
-            # stays small-only, so a small file arriving is picked up at once.
+            # files ran on half the slots — audit 8 F4). Slot 0 too: keeping
+            # it idle for a small file that may never come cost a queue of big
+            # files a third of its throughput (review 9 item 5.1)
             return self._claim_next("queued", "downloading", order=f"{big} DESC, ")
         if lane == "large":
             return self._claim_next("queued", "downloading", order=f"{big} DESC, ")
@@ -2813,6 +2830,28 @@ class Store:
         it was read, its full sha256 (None when not computed) and whether
         its last bytes vouch for its whole content (see the column)."""
         with self.write_lock, self.connect() as con:
+            old = con.execute("SELECT size, full_sha FROM content_fingerprints "
+                              "WHERE filename = ?", [filename]).fetchone()
+            if old and (old[0] != size or (old[1] and full_sha and old[1] != full_sha)):
+                # the file under this name now holds DIFFERENT content (its
+                # link was re-fetched, or the user chose Replace): copies that
+                # were skipped as identical to the OLD content are not
+                # identical to anything loaded any more — their content would
+                # be nowhere in the store. Queue them again (review 9 5.2)
+                n = con.execute(
+                    "UPDATE url_queue SET status = 'queued', kind = 'unknown', "
+                    "duplicate_of = NULL, content_sha = NULL, retry_after = NULL, "
+                    "waiting_on = NULL, progress = 0, bytes_done = 0, "
+                    "error = 'the file this was skipped as a copy of was replaced "
+                    "by different content — downloading it again' "
+                    "WHERE status = 'skipped' AND kind = 'duplicate' AND "
+                    "(duplicate_of = ? OR (? IS NOT NULL AND content_sha = ?)) "
+                    "RETURNING id", [filename, old[1], old[1]]).fetchall()
+                if n:
+                    import logging as _logging
+                    _logging.getLogger(__name__).info(
+                        "%s was replaced by different content: %d copy link(s) skipped "
+                        "as identical to the old content are queued again", filename, len(n))
             con.execute(
                 "INSERT INTO content_fingerprints (filename, size, recorded_at, "
                 "full_sha, mtime_ns, trailer_proves) VALUES (?, ?, current_timestamp, ?, ?, ?) "
@@ -3203,7 +3242,8 @@ class Store:
                 "UPDATE url_queue SET status = ?, error = NULL, progress = 0, bytes_done = 0, "
                 # plain retry must NOT inherit a prior "download anyway" — that
                 # override is one-shot; only force_size_requeue re-sets it
-                "force_size = false, retry_after = NULL, park_count = 0 WHERE id = ?",
+                "force_size = false, retry_after = NULL, park_count = 0, waiting_on = NULL "
+                "WHERE id = ?",
                 [status, url_id])
             return True
 
@@ -3276,8 +3316,8 @@ class Store:
         with self.write_lock, self.connect() as con:
             con.execute(
                 "UPDATE url_queue SET status = 'paused', error = ?, "
-                "retry_after = ? + to_seconds(CAST(? AS DOUBLE)), park_count = ? "
-                "WHERE id = ?",
+                "retry_after = ? + to_seconds(CAST(? AS DOUBLE)), park_count = ?, "
+                "waiting_on = NULL WHERE id = ?",
                 [error, _utcnow(), float(minutes) * 60.0, int(park_count), url_id])
 
     def wake_parked_urls(self, only_if_idle: bool = False) -> int:
@@ -3336,7 +3376,7 @@ class Store:
                     "UPDATE url_queue SET status = 'queued', error = NULL, retry_after = NULL, "
                     "retries = coalesce(retries, 0) + 1, park_count = 0, "
                     # bulk retry never inherits a one-shot "download anyway"
-                    "progress = 0, bytes_done = 0, force_size = false "
+                    "progress = 0, bytes_done = 0, force_size = false, waiting_on = NULL "
                     "WHERE status IN ('failed', 'paused')"
                 )
         return n
@@ -3354,7 +3394,8 @@ class Store:
             if n:
                 con.execute(
                     "UPDATE url_queue SET status = 'skipped', kind = 'canceled', "
-                    "error = 'cleared from the queue', retry_after = NULL WHERE status IN "
+                    "error = 'cleared from the queue', retry_after = NULL, waiting_on = NULL "
+                    "WHERE status IN "
                     "('queued', 'fetched', 'expanding', 'paused')")
         return n
 
@@ -3390,7 +3431,8 @@ class Store:
                             "AND kind = 'canceled'").fetchone()[0]
             if n:
                 con.execute("UPDATE url_queue SET status = 'queued', kind = 'unknown', "
-                            "error = NULL WHERE status = 'skipped' AND kind = 'canceled'")
+                            "error = NULL, waiting_on = NULL "
+                            "WHERE status = 'skipped' AND kind = 'canceled'")
         return n
 
     def is_download_canceled(self, url_id: int) -> bool:
@@ -5456,7 +5498,7 @@ class Store:
 # would wake every other one in a loop. url_progress (byte counts during a
 # download) is deliberately absent: no worker waits on progress.
 # tests/mrfx/test_queue_signal.py fails if a url_queue writer is missing here.
-_QUEUE_WRITERS_ALWAYS = ("update_url", "pause_url", "park_url", "park_waiting",
+_QUEUE_WRITERS_ALWAYS = ("update_url", "pause_url", "park_url", "park_waiting", "record_identity",
                          "forget_file", "reset")
 _QUEUE_WRITERS_IF_DONE = ("_claim_next", "enqueue_url", "enqueue_urls", "requeue_failed",
                           "requeue_oversize_within", "requeue_urls", "wake_paused_urls",
