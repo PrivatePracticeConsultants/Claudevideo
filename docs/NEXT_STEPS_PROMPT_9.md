@@ -1,7 +1,66 @@
 # Prompt for the next session, round 9 — make 0.7.2 run right (written for Claude Opus 5.5)
 
-> **STATUS: not started.** Replace this block with what you closed, the
-> numbers, and what you left (with the reason), as rounds 7 and 8 did.
+> **STATUS (Nov 10, 2026, v0.7.3): every item of Groups 1–5 closed, each
+> with a regression test in `tests/mrfx/test_review9.py` that fails on
+> 64a371c.** Commits: 72b9955 (groups 1–2), 47818f2 (3), 7d3bf62 (4),
+> 371ac85 (5), then the release commits (0.7.3, docs, suite fixes). Full
+> suite: 1085 passed in 21 min (quick tier: 493 tests, ~3.5 min); ruff 0; `tests/slow_tests.txt` regenerated.
+>
+> **Numbers.**
+> - Start-up, quiet, cold page cache, `startup/r9_steps.py` (seconds / read
+>   calls of the slowest steps; the 0.7.2 figures are the table below):
+>
+>   | Store | Update pending (rules 3 → 4) | Nothing pending (2nd start) |
+>   |---|---|---|
+>   | 2,000 tiny parts | types scan 1.43 s / 16,220 reads; open 2.3 s | integrity check 0.02 s / **4 reads** (was 4,004); open 0.7 s |
+>   | 32M real rows, 12 parts | types scan 0.27 s / 6,594 reads; open 0.3 s | open 0.1 s, 4 + 10 reads |
+>   | 99M synthetic, 45 parts | types scan 0.53 s / 5,191 reads; open 0.6 s (×4; one first run 43 s with the same reads — a WAL left by the A/B sessions) | open 0.1 s |
+>
+>   The every-start integrity check now reads only new or changed parts
+>   (`.verified_parts.json`): 4,004 reads → 4 on the 2,000-part store. The
+>   types scan reads about what 0.7.2's did (16,220 vs 16,242 on 2,000
+>   parts; 0.8 s slower there) because it now runs in batches of 40 with a
+>   progress line between them and verifies every part before stamping it.
+> - 4.6 on the 99M store, in-process, quiet: trajectory national 556cbf4
+>   10.7 s (its unmatched median, the audit-8 bug) · 64a371c 18.9–20.0 s
+>   every call · now 25.4–26.2 s first call, 0.000 s after (generation
+>   cache); MO 2.1 → 2.4 s first, 0 after; series identical to 64a371c on all
+>   15 payers. Four other shapes measured slower (self-joins 82 s, list
+>   aggregate out of temp space, integer keys 63 s, hash CTE 63–68 s).
+>   Outreach zip, TIN grain, no filter: 69–103 s → 50–51 s, CSV byte-identical
+>   to 64a371c's (peak RSS unchanged, ~5.3–5.8 GB = DuckDB's budget).
+> - 5.1 `d4_lanes.py chunked`, 24 throttled files: 6 slots 19.4 s / 45 GETs
+>   → 12.8 s / 24; 2 slots 66.1 s → 32.5 s; 1 GET per file in every run.
+> - 3.3 `n6_mem`: 401 MB file, no own table: 2,289–2,847 MB → 298–346 MB.
+>
+> **Live Chromium pass** (533 files, served by `mrfx serve`): an uploaded
+> different same-name file asked Replace / Keep both; an inbox drop was held
+> at the top of page 1 (501 rows + "show more") with replace / keep both;
+> Replace left attention 0 and the TIN rate at median(81, 71) = $76 (old $61
+> gone); the MO trajectory rendered ("1 code · 4 practices"); a pitch report
+> pinned to 2023-06 read "+0.0% … 2022-06 to 2023-06" with the market in
+> words; with 534 files, a file over `confirm_over_gb` waited with its
+> "ingest anyway" button, and one click loaded it (2 rows, attention 0).
+>
+> **Judgement calls, left as they are (say so if you disagree).**
+> - The trajectory's FIRST national call is ~5 s slower than 64a371c (it now
+>   also computes the month-to-month steps); every later call is instant.
+> - A pinned report still carries the "Publication age" caveat measured
+>   against today (a historical report is still quoted today);
+>   `test_deliverable_gaps` pins that on purpose.
+> - When the market side is empty, a report still requires the subject
+>   inside the market scope (`_subject_has_scoped_rates`, test_v4's AK case);
+>   with peers present the subject keeps its own out-of-state rows.
+> - The classic reader still cannot pass over NaN / Infinity / 20-digit
+>   numbers; it now says so in words with the way out (fast_scan, numpy).
+> - "(+146%)" beside "(+142.1%)" in the proposal: two different measures
+>   (% of Medicare and the lift); only the rounding rule was unified.
+>
+> **Not run on Windows** (no Windows host here): the held-file folders
+> (`inbox/.held`, `.replacing`) under a locked file, the spine-keyed medians'
+> delete of a superseded file still open in another reader (it is retried at
+> the next build, as before), and start-up read counts on a spinning drive.
+> Nothing is left for a round 10 prompt.
 
 Rounds 1–8 are `docs/NEXT_STEPS_PROMPT.md`, `_2.md` … `_8.md`. This memo came
 out of a review on Nov 10, 2026 at HEAD 64a371c (version 0.7.2), asked for
