@@ -7,9 +7,8 @@ def run(variant, chunked):
                              small_file_mb=1, parallel_ingests=1, download_timeout_seconds=30)
     logs = capture_logs(logging.WARNING)
     srv = Server({})
-    big = rate_file_bytes("big", n_rows=1, pad=2_500_000)
     for i in range(50):
-        srv.routes[f"/big{i}.json.gz"] = {"body": big, "piece": 64 << 10, "pace": 0.03, "chunked": chunked}
+        srv.routes[f"/big{i}.json.gz"] = {"body": rate_file_bytes(f"big{i}", n_rows=1, pad=2_500_000), "piece": 64 << 10, "pace": 0.03, "chunked": chunked}
     for i in range(5):
         srv.routes[f"/small{i}.json.gz"] = {"body": rate_file_bytes(f"s{i}"), "chunked": chunked}
     add_urls(store, [srv.url(f"/big{i}.json.gz") for i in range(50)] + [srv.url(f"/small{i}.json.gz") for i in range(5)])
@@ -34,8 +33,8 @@ def run(variant, chunked):
     for i in range(5):
         f = first.get(ids[f"small{i}.json.gz"], {})
         print(f"   small{i}: claimed @{f.get('downloading', 0) - t0:5.1f}s fetched @{f.get('fetched', 0) - t0:5.1f}s done @{f.get('done', 0) - t0:5.1f}s")
-    bigs = [first[ids[f'big{i}.json.gz']].get('done', 0) - t0 for i in range(50)]
-    print(f"   big files done between {min(bigs):.1f}s and {max(bigs):.1f}s; statuses: {dict((s, sum(1 for r in rows(store) if r['status']==s)) for s in ('done','failed','queued','skipped'))}")
+    bigs = sorted(first[ids[f'big{i}.json.gz']].get('fetched', 0) - t0 for i in range(50))
+    print(f"   big files fetched: first @{bigs[0]:.1f}s, 10th @{bigs[9]:.1f}s, last @{bigs[-1]:.1f}s; statuses: {dict((s, sum(1 for r in rows(store) if r['status']==s)) for s in ('done','failed','queued','skipped'))}")
     print("   big_lane flags set:", sum(1 for r in rows(store) if r["big_lane"]), " bytes_total known on big rows:", sum(1 for r in rows(store) if r["url"].startswith("big") and r["bytes_total"]))
     disk = [l for l in logs if "disk" in l]
     print("   disk-guard log lines:", len(disk), disk[:2])

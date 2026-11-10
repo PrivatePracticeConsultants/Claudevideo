@@ -171,9 +171,12 @@ def main():
                     time.sleep(1.0)
                 time.sleep(2)
                 # watch the log for the rollup lines
-                for _ in range(600):
+                t_roll = None
+                for _ in range(300):
                     txt = (d / "serve.out").read_text(errors="replace")
-                    if re.search(r"rollup.*(done|built|complete|finished)|analytics (rollups|refresh).*(took|complete|done)", txt.split("supervisor")[-1]) and "updating analytics" in txt:
+                    part2 = txt[txt.rfind("opening the store"):]
+                    if re.search(r"rollup rebuild finished in|analytics update finished in", part2):
+                        t_roll = time.monotonic() - t0
                         break
                     time.sleep(1)
                 dt2, code2 = stop_and_time(p2, signal.SIGINT)
@@ -184,6 +187,7 @@ def main():
                     r"recover|resumed|catch|rollup|analytics|orphan|swept|reclaimed|left mid|ready", ln, re.I)]
                 lines.append(f"### restart after SIGKILL")
                 lines.append(f"- dashboard ready after {t_ready2:.1f}s; queue drained {drained_at and f'{drained_at:.1f}s'} after start; "
+                             f"last rollup finished {t_roll and f'{t_roll:.1f}s'} after start; "
                              f"final state {counts() or c2}; leftovers now {leftovers(d)}; SIGINT exit {dt2:.2f}s")
                 lines += ["  ```", *("  " + k[:200] for k in keys[:30]), "  ```"]
             lines.append("")

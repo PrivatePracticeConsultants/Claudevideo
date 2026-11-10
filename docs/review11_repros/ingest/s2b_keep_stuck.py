@@ -35,12 +35,12 @@ if __name__ == "__main__":
     print("  -> the user has no way out: file in .held, row 'queued' forever (forget refuses 'queued')")
 
     print("\n== confirm route ordering: thread first, upsert('queued') second")
-    cfg2 = mkcfg("s2b_confirm", confirm_over_gb=0.000001); store3 = Store(cfg2.store_dir)
+    cfg2 = mkcfg("s2b_confirm", confirm_over_gb=0.0001); store3 = Store(cfg2.store_dir)
     stuck = 0
     N = 30
     for i in range(N):
         name = f"big_{i}.json.gz"
-        put(cfg2, name, doc(n=2, seed=i), gz=True)
+        put(cfg2, name, doc(n=2, seed=i, pad_mb=0.5), gz=True)
         scan_inbox(cfg2, store3)
         assert store3.file_status(name)["status"] == "pending_confirmation", store3.file_status(name)["status"]
         c2 = app_client(cfg2, store3)

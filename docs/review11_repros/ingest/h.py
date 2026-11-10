@@ -63,7 +63,7 @@ def doc(n=3, codes=("97110", "97112", "97140"), payer="Acme Health", month="2026
                           rate=10.0 + i + seed))
     if pad_mb:
         items.append({**item("99213", groups=[grp(["1234567893"], "123456789")]),
-                      "description": "x" * int(pad_mb * 1e6)})
+                      "description": __import__("base64").b64encode(__import__("random").Random(seed).randbytes(int(pad_mb * 750_000))).decode()})
     return {"reporting_entity_name": payer, "version": "1.0.0", "last_updated_on": month,
             "in_network": items}
 

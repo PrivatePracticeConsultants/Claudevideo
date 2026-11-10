@@ -13,8 +13,8 @@ if __name__ == "__main__":
     base = srv.base
     srv.routes[f"/dated/{prev_m}_index.json"] = toc_bytes([base + "/f1.json.gz"])
     srv.routes["/f1.json.gz"] = rate_file_bytes("f1")
-    srv.routes["/static_index.json"] = toc_bytes([base + "/f1.json.gz"])
-    srv.routes["/dead/" + prev_m + "_index.json"] = toc_bytes([base + "/f1.json.gz"])
+    srv.routes["/static_index.json"] = toc_bytes([base + "/f1.json.gz"], entity="Static Payer")
+    srv.routes["/dead/" + prev_m + "_index.json"] = toc_bytes([base + "/f1.json.gz"], entity="Dead Payer")
     ks = root / "known_sources.yaml"
     ks.write_text(f"""sources:
   - name: Dated Payer
