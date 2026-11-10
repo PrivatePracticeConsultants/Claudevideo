@@ -7,8 +7,11 @@ from h import *
 from mrfx.ingest import ingest_file
 
 
-def write_fixture(path: Path, groups: int, codes=("97110", "97112", "97140", "97530", "97535")):
-    per = groups // len(codes)
+def write_fixture(path: Path, groups: int, codes=("97110", "97112", "97140", "97530", "97535"), per_item=None):
+    """per_item=None: 5 huge items; per_item=N: many items of N groups (codes cycle)."""
+    if per_item:
+        codes = tuple(codes[i % len(codes)] for i in range(groups // per_item))
+    per = per_item or groups // len(codes)
     with gzip.open(path, "wb", compresslevel=1) as f:
         f.write(json.dumps({**HDR})[:-1].encode() + b', "in_network": [')
         for ci, c in enumerate(codes):
@@ -32,6 +35,8 @@ def child(run, fname, fast):
 if __name__ == "__main__":
     if sys.argv[1:2] == ["child"]:
         child(*sys.argv[2:5]); sys.exit(0)
+    per_item = int(sys.argv[1]) if sys.argv[1:] else None
+    print("layout:", f"items of {per_item} groups" if per_item else "5 items (one per code)")
     for groups in (750_000, 1_500_000):
         for fast in ("1", "0"):
             run = f"s6g_{groups}_{fast}"
@@ -39,7 +44,7 @@ if __name__ == "__main__":
             ref = {**HDR, "provider_references": [{"provider_group_id": i, "provider_groups": [grp([str(1000000000 + i)], f"{100000000 + i}")]} for i in range(1000)]}
             ingest_file(cfg, st, put(cfg, "acme_refs_2026-05.json", ref))
             fx = cfg.inbox_dir / "acme_rates_2026-05.json.gz"
-            write_fixture(fx, groups); gz_mb = fx.stat().st_size / 1e6
+            write_fixture(fx, groups, per_item=per_item); gz_mb = fx.stat().st_size / 1e6
             raw_mb = groups * 133 / 1e6
             st.close()
             out = subprocess.run([sys.executable, __file__, "child", run, fx.name, fast], capture_output=True, text=True, timeout=1200)

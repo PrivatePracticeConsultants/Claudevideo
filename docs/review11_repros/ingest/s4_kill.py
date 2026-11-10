@@ -9,7 +9,7 @@ from mrfx.ingest import scan_inbox, ParsePoolManager, set_parse_pool
 import mrfx.ingest as I
 
 REAL = Path("/tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad")
-FILES = [REAL / "real2/nd_hmhs_2026-10-27_000005200_in-network-rates_01_of_10.json.gz",
+FILES = [REAL / "real/bcbsms_2026-10_320_33B0_in-network-rates_01_of_10.json.gz",
          REAL / "real/uhc_2026-11-01_UnitedHealthcare-Insurance-Company-of-New-York_Third-Party-Administrator_Empire_CSP-377-A351_in-network-rates.json.gz"]
 MARK = "MRFX_R11_TRIAL"
 
@@ -56,12 +56,15 @@ def run_child(run, env_tag, marker_dir=None):
     return subprocess.Popen(args, env=env, stdout=open(LOGS / f"s4_{env_tag}.log", "w"), stderr=subprocess.STDOUT)
 
 
+DUP_SQL = "SELECT count(*) FROM (SELECT source_file, billing_code, tin_value, npi, negotiated_rate, billing_code_modifier, service_code, billing_class, negotiated_type, expiration_date FROM rates GROUP BY ALL HAVING count(*) > 1)"
+
+
 def inspect(cfg, store, expected, label):
     files = q(store, "SELECT filename, status, rows_emitted, substr(error,1,70) FROM files ORDER BY 1")
     rc = rate_counts(store)
     tmps = [p for p in parts(store) if not p.endswith(".parquet")]
     ok = all(s == "done" and n == expected[f] and rc.get(f) == expected[f] for f, s, n, _ in files) and len(files) == len(expected)
-    dup = q(store, "SELECT count(*) FROM (SELECT source_file, billing_code, tin_value, npi, negotiated_rate, billing_code_modifier, service_code, billing_class FROM rates GROUP BY ALL HAVING count(*) > 1)")[0][0]
+    dup = q(store, DUP_SQL)[0][0]
     return ok, files, rc, tmps, dup
 
 
@@ -76,7 +79,8 @@ if __name__ == "__main__":
     t0 = time.time(); p = run_child(run, "clean"); p.wait(); T = time.time() - t0
     store = Store(cfg.store_dir)
     expected = {f: n for f, s, n, _ in q(store, "SELECT filename, status, rows_emitted, error FROM files")}
-    print(f"clean run: {T:.1f}s, rows {expected}, rates {rate_counts(store)}")
+    DUP0 = q(store, DUP_SQL)[0][0]
+    print(f"clean run: {T:.1f}s, rows {expected}, rates {rate_counts(store)}, within-file repeated lines in the clean store: {DUP0}")
     store.close(); shutil.rmtree(BASE / run)
     results = []
     plan = [("random", rng.uniform(1.0, T * 0.95)) for _ in range(trials)] + \
@@ -93,11 +97,14 @@ if __name__ == "__main__":
             t0 = time.time()
             while not (md / kind).exists() and time.time() - t0 < T * 3 and p.poll() is None: time.sleep(0.002)
         p.kill(); p.wait()
-        time.sleep(1.0)
-        orph_after_kill = orphans(tag)
-        time.sleep(3.0)
-        orph_later = orphans(tag)
-        for o in orph_later:
+        life = {}
+        for wait_s in (1, 5, 20, 45):
+            time.sleep(wait_s - sum(life.keys()) if not life else wait_s - max(life.keys()))
+            alive = orphans(tag)
+            life[wait_s] = [(o, float(subprocess.run(["ps", "-o", "%cpu=", "-p", str(o)], capture_output=True, text=True).stdout or 0)) for o in alive]
+            if not alive: break
+        orph_after_kill = life.get(1, []); orph_later = life.get(45, life[max(life)])
+        for o, _ in orph_later:
             try: os.kill(o, 9)
             except OSError: pass
         store = Store(cfg.store_dir)
@@ -115,15 +122,15 @@ if __name__ == "__main__":
             store.rebuild_rollups(); stale = store.rollups_stale()
         inbox_left = sorted(x.name for x in cfg.inbox_dir.iterdir())
         res = dict(trial=i, kind=kind, at=round(at, 1) if at else None, ok=ok, files=files, rates=rc, tmps_after_kill=pre_tmps,
-                   tmps_after_restart=tmps, dup_rows=dup, orphans_1s=len(orph_after_kill), orphans_4s=len(orph_later),
+                   tmps_after_restart=tmps, dup_rows=dup, orphans_1s=len(orph_after_kill), orphans_4s=len(orph_later), orphan_life=life,
                    recovered=rec, pre=pre, stale_pre=stale_pre, stale_after=stale, inbox_left=inbox_left, restart_exit=rc2)
         results.append(res)
-        flag = "OK " if ok and not tmps and not dup and not orph_later and not stale else "BAD"
+        flag = "OK " if ok and not tmps and dup == DUP0 and not orph_later and not stale else "BAD"
         print(f"{flag} trial {i:2} {kind:16} at={res['at']} pre={[(f[:8], s, n) for f, s, n in pre]} tmps_after_kill={len(pre_tmps)} "
-              f"orphans(1s/4s)={len(orph_after_kill)}/{len(orph_later)} recovered={rec} -> files={[(f[:8], s, n) for f, s, n, _ in files]} "
+              f"orphans(1s/45s)={len(orph_after_kill)}/{len(orph_later)} life={ {k: [c for _, c in v] for k, v in life.items()} } recovered={rec} -> files={[(f[:8], s, n) for f, s, n, _ in files]} "
               f"tmps={tmps} dup={dup} stale={stale}", flush=True)
         store.close(); shutil.rmtree(BASE / run, ignore_errors=True)
-    bad = [r for r in results if not (r["ok"] and not r["tmps_after_restart"] and not r["dup_rows"] and not r["orphans_4s"] and not r["stale_after"])]
+    bad = [r for r in results if not (r["ok"] and not r["tmps_after_restart"] and r["dup_rows"] == DUP0 and not r["orphans_4s"] and not r["stale_after"])]
     print(f"\n{len(results) - len(bad)}/{len(results)} trials correct; seed {seed}")
     for r in bad:
         print("  BAD:", json.dumps(r, default=str)[:600])

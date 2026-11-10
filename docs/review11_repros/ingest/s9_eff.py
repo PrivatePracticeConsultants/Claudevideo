@@ -5,6 +5,7 @@ without a companion. Plus rebuild_rollups vs ingest time on the resulting store.
 usage: s9_eff.py child <mode> <run>"""
 import subprocess, sys, os
 from dl import *
+LOGS = HERE / "logs"
 import mrfx.fetch as F
 import mrfx.ingest as I
 from mrfx.ingest import scan_inbox, ingest_file, ParsePoolManager, set_parse_pool
