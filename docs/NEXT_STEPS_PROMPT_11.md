@@ -41,12 +41,14 @@ Severity: **P0** bytes wrong, double-loaded or lost, or a row stuck forever
 **P2** measured waste or a rule the docs promise and the code does not keep
 · **P3** cosmetic / counter hygiene / stale prose.
 
-**No P0 was found.** Invariant 6 holds under every kill the reviewers
-threw at it (queue: 19/19 valid trials — no row left in flight, every file
-exactly its expected rows, parts == done rows, kept downloads reused;
-twins: exactly one ingest in every ordering). What follows is the next
-layer: states a user cannot get out of, files that silently never load,
-and work the pipeline does twice.
+**One P0** (1.0: a resume can splice a republished file's bytes into
+the kept `.part` and mark the row done — wrong rates for a plain `.json`,
+a wasted download for a `.gz`). Invariant 6 otherwise holds under every
+kill the reviewers threw at it (queue: 19/19 valid trials; download: 20/20
+— resume from the exact offset or reuse of the kept download, one ingest,
+correct sha; twins: exactly one ingest in every ordering). After 1.0 the
+layer is: states a user cannot get out of, files that silently never load,
+responses the client accepts without checking, and work done twice.
 
 ## How to work
 
@@ -73,9 +75,70 @@ and work the pipeline does twice.
 
 ## Group 1 — silently wrong or missing data (P1)
 
-_(download and ingest passes — pending)_
+_(ingest pass — pending)_
 
-### 1.1 (P1, Windows) The download's final rename has no lock tolerance, and its failure path discards the complete `.part` (throughput `FINDINGS.md` finding 2 — code read, confidence high on the path, medium on how often AV holds the handle)
+### 1.0 (P0) A resume splices CHANGED content into the kept `.part`, and the row ends `done` with mixed rates (`download/c02b_json_splice.py`, `c02_range_odd.py`)
+- `fetch.py:812-815` (a 206 is accepted after parsing only the TOTAL out
+  of `Content-Range`), `:903` (`.val` is written only when the first
+  response carried a strong ETag / Last-Modified; nothing else about the
+  first response is remembered), `:999` (the only completeness check is
+  `done < total`). The 206's own ETag / Last-Modified is never compared
+  with the validator we sent.
+- c02b (plain `.json`, through the queue): v1 (97110 = 40.0, 97140 = 40.0)
+  cut at 300 KB; the resume `bytes=262144-` answered from v2 (both 55.0,
+  same size, no validator) → row `done`, 20 rows, `content_sha` equal to
+  NEITHER version; the store holds `97110 → 40.0 ×10` and `97140 → 55.0
+  ×10`. One file, two vintages, no warning.
+- c02 (strong ETag): the resume sends `If-Range: "v1"` and the server
+  answers 206 with `ETag: "v2"` (ignores If-Range, as CDNs do) — appended
+  anyway, sha matches neither. For `.json.gz` the CRC catches it at ingest:
+  row `failed` with `'CRC check failed 0x… != 0x…'`, download deleted, a
+  retry succeeds — a P1 state and a wasted download.
+- Fix: persist `{validator, total}` from the first response in `.val`; on
+  a 206 require `Content-Range` START == `resume_from`, TOTAL == the
+  remembered total, and (when the 206 carries a validator) equality with
+  the stored one — else unlink the `.part` and restart. The RFC-correct
+  path (200 on mismatch → restart, `c02 ifrange_rfc`) already does the
+  right thing. Honest residual: a server with NO validator that republishes
+  a SAME-size file is undetectable by any client — say so in the
+  methodology rather than pretend otherwise.
+
+### 1.1 (P1) A 206 whose body starts at byte 0 under a plausible `Content-Range` is accepted — the file comes out 29 % bigger than truth (`download/c01_truncate_resume.py cr_start_wrong`)
+- `fetch.py:812-815` (the START of `Content-Range` is ignored), `:999`
+  (`done > total` is not an error). Truth 911,726 B; resume answered
+  `206 Content-Range: bytes 262144-911725/911726` with the WHOLE file as
+  body → `download()` returns OK, dest 1,173,870 B (prefix duplicated).
+  A gz fails at ingest with a raw CRC message, a `.json` fails to parse —
+  a full download wasted and a riddle for the user.
+- Fix: refuse a 206 whose start ≠ `resume_from`; treat `done != total` (not
+  only `<`) as wrong bytes and restart from 0.
+
+### 1.2 (P1) A 206 with no `Content-Range` and a short consistent body is accepted as complete (`download/c01_truncate_resume.py cr_absent_short`)
+- `fetch.py:812-813` (`total = None` when the header is missing), `:999`.
+  Truth 911,726 B; the resume answered 206, no `Content-Range`,
+  `Content-Length: 102400` → OK with a 364,544 B file. The first response's
+  `Content-Length: 911726` was known and dropped.
+- Fix: same `.val` as 1.0 — remember the total and require `done == total`
+  on every path; `total` must never become None once known.
+
+### 1.3 (P1) A stale `.fetchmeta` sidecar is trusted blindly: a wrong sha is recorded and a true copy of the file ingests twice (`download/c08b_wrong_sidecar_json.py`, `c08_cancel_sidecar.py wrong_sidecar`, `c04_corrupt_gzip.py`)
+- `fetch.py:2150-2165` (reuse: `dest.exists() and keep_p.exists()` → row
+  `fetched` with the sidecar's sha, no size or hash check). What makes a
+  stale sidecar likely: every failed ingest leaves `<file>.fetchmeta`
+  behind (`:2661` and the other failure paths unlink `dest` only; ingest's
+  `_finish_file` moves the file to `failed_dir`) — seen in c04 (all 4
+  corrupt variants), c05 (html_200, zero_byte, redirect_to_html), c08.
+- c08b: dest = correct bytes, sidecar `{"sha": "000…0"}` → A `done`, 0
+  GETs, `content_sha = 000…`, `content_fingerprints.full_sha = 000…`; B
+  (the same bytes under another URL) → `done`, 300 more rows: **600 rows
+  for one file's content**. (For a gz the EARLY fingerprint check, not the
+  sha, happens to catch the twin.)
+- Fix: unlink the sidecar wherever `dest` is unlinked or moved on failure
+  (`:2380, 2428, 2437, 2616, 2661`, `_finish_file(ok=False)`); write `size`
+  into the sidecar and refuse one whose size ≠ `dest.stat().st_size` or
+  whose mtime predates dest's. (Same root as 2.10 and 1.4.)
+
+### 1.4 (P1, Windows) The download's final rename has no lock tolerance, and its failure path discards the complete `.part` (throughput `FINDINGS.md` finding 2 — code read, confidence high on the path, medium on how often AV holds the handle)
 - `fetch.py:1004-1005` (`part.replace(dest)`), `:1798` (`_write_meta`'s
   rename). A `PermissionError` (antivirus / indexer holding the file
   without FILE_SHARE_DELETE — the code itself calls this "routine" at
@@ -228,7 +291,49 @@ FINDINGS (it is the one place the whole machine is written down).
 - Fix: bump `retries` (the fair tier) or set `retry_after = now + 30 s` on
   set-aside.
 
-### 2.10 (P2) Every TOC / page / allowed-amounts / unknown row leaves its `.fetchmeta` sidecar in `downloads/` forever (queue s0, s1, s3, s8 D, s5: every one of 19 trials)
+### 2.11 (P1) Non-transport `httpx` errors escape `download()` as "unexpected download error" with a traceback (`download/c05_http_errors.py redirect_loop`, `c05b_bad_encoding.py`)
+- `fetch.py:1027` catches only `httpx.TransportError` / `TimeoutException`;
+  `httpx.TooManyRedirects` and `DecodingError` are `RequestError`s (httpx
+  0.28.1 MRO checked). A 302 to itself: 21 requests, then the downloader's
+  `except BaseException` logs a traceback and the row reads `failed /
+  'unexpected download error'`; `Content-Encoding: deflate` with a garbage
+  body: the same. The reservation is released (nothing stuck), but the
+  message is the one reserved for bugs.
+- Fix: catch `httpx.HTTPError` there; make the two terminal with plain
+  text ("this link redirects in a loop" / "the server sent an unreadable
+  compressed body").
+
+### 2.12 (P2) "Stop downloads" is not honoured during the retry back-off sleep (`download/c08_cancel_sidecar.py cancel_during_backoff*`, `c06_slow_drip.py`)
+- `fetch.py:1084-1088` (`time.sleep(pause)`, up to 90 s + jitter). Cancel
+  at 0.5 s during a zero-progress retry → slot released at 4.5–4.9 s; at
+  production values a stop pressed during the 90 s tier holds the slot
+  ~93 s while the row already reads "stopped".
+- Fix: sleep in ≤ 1 s slices and poll `cancel_check` between them.
+
+### 2.13 (P2) `Retry-After` is ignored, and the 503/429 give-up message blames "closing the connection early" (`download/c05_http_errors.py r429_retry_after`, `r503_forever`)
+- `fetch.py:783` (retryable status → the generic back-off), `:1099-1106`
+  (the stall text hard-codes the early-close diagnosis; `last_exc` is not
+  shown). 429 + `Retry-After: 2` ×3 → requests at +2, +4, +8 s (a
+  `Retry-After: 60` would be hit 4 times inside it). 503 on every request:
+  5 requests in 42.8 s, then `failed` with "this server keeps closing the
+  connection early and won't resume" — every answer was HTTP 503; at
+  production values the row pauses 24 h on the wrong text.
+- Fix: honour `Retry-After` (cap 10 min, one attempt); append the last
+  answer to the stall message ("last answer: HTTP 503").
+
+### 2.14 (P2) A Range-ignoring server + a `.part` ≥ 64 MB + `download_retries ≤ 2` can never finish (`download/c07_segments.py holey_restart_200`)
+- `fetch.py:377` (`_KEEP_200_MAX_REFUSALS = 3`) vs the consecutive
+  no-progress budget (`attempt`, `:1070`): each refused 200 counts as a
+  no-progress attempt, so with ≤ 3 attempts the "accept the 200 and
+  restart" branch (`:838`) is unreachable. retries=1: three
+  `(200, 'bytes=220200960-')` → retryable failure, 220 MB `.part` kept —
+  and the next `download()` starts with `kept_200_refusals = 0`, so every
+  24 h pause repeats the same three refusals until `download_auto_resumes`
+  is spent. retries=4: the 4th 200 is accepted, sha correct.
+- Fix: a refused 200 is our choice, not the server's failure — don't count
+  it against `attempt`; or clamp the refusals to `min(3, download_retries)`.
+
+### 2.10 (P2) Every TOC / page / allowed-amounts / unknown row leaves its `.fetchmeta` sidecar in `downloads/` forever (queue s0, s1, s3, s8 D, s5: every one of 19 trials; download c04/c05/c08 for failed rows)
 - `fetch.py:2495, 2500-2503, 2512, 2565, 2579` (`dest.unlink` only); the
   start-up sweep (`store.py:2599` `done_download_filenames`) keys on
   `filename`, which these rows never get.
@@ -295,6 +400,39 @@ overlaps ingest. Invariants 1 and 2 hold.
   `early_dedup_mb=0` cut the main process's reads 6.2 → 5.1 GB on the
   27-file run. Fix: carry the download's fingerprint to `_finish_ok`
   (`DOWNLOAD_IDENTITY` already carries the sha).
+
+### 3.6 (P2) A segmented download throws away every finished segment when one segment fails; a "start-only" range server doubles the bytes (`download/c07_segments.py seg_fails`, `seg_200`, `start_only`)
+- `fetch.py:529` (`_SegmentationFailed` → holey `.part` deleted →
+  sequential restart from 0), `:477` (a segment reads its body to EOF, no
+  cap at `seg_len`). 220.2 MB, 4 segments: segment 3 answers 500 ×4 →
+  **367.0 MB sent** (146.8 MB of good segments discarded), 15.1 s instead
+  of 1.2 s; a segment answered 200 → the same. A server honouring only the
+  start of `bytes=a-b`: sha correct but 440.4 MB sent for 220.2 MB. Also:
+  a holey `.part` left by a kill restarts on ONE connection (the segmented
+  branch is evaluated once, before the loop, with `not part.exists()`).
+- Fix: stop reading a segment at `seg_len`; on a segment failure fetch the
+  MISSING ranges sequentially (a small segment map beside the `.part`)
+  instead of unlinking; allow segments on a restart.
+
+### 3.7 (P2) Unknown-length (chunked) copies skip the early duplicate check and download in full (`download/c03_chunked.py early_dedup chunked twin`)
+- `fetch.py:918` (`next_early and total and …`): no `Content-Length` → no
+  check. A loaded; B = the same bytes served chunked → 2,275,193 of
+  2,275,193 B downloaded, then skipped by the full sha. A 1 GB chunked twin
+  costs 1 GB.
+- Fix: with no `Content-Length`, learn the size with one `Range: bytes=0-0`
+  probe (`_probe_ranges` exists).
+
+### 3.8 (P2, by construction) The early skip is 32 bits of proof: a constructed CRC-32 collision passes as "identical" (`download/c09_early_dedup.py` A)
+- `fetch.py:1960-1972` (`_proves`: size + head + tail + 8 windows + a
+  single-member gzip trailer). Two level-0 gzips, 4,106,459 B each, first
+  differing byte at 1.60 MB, identical ends, windows and trailer (CRC-32
+  forced equal by solving a 32-bit GF(2) system over 40 bytes in a
+  non-target string; built in < 1 s): A done (20 rows); B (97140 = 47.0
+  instead of 40.0) `skipped/duplicate "identical to …"`; B's rates never
+  load. An ACCIDENTAL collision is ~2⁻³² — negligible; a deliberate one
+  needs control of a payer's published bytes.
+- Fix if wanted: say "checksum-equal" rather than "identical" in the skip
+  text, or spend one more range on a sparse 1 % sample.
 
 ### 3.5 (P2) Parser workers survive a hard kill of the main process and never exit (throughput finding 7, §4 C)
 - `_parse_worker` probes the parent only inside `report_chunk`
@@ -377,7 +515,34 @@ overlaps ingest. Invariants 1 and 2 hold.
   case collisions; `SO_EXCLUSIVEADDRUSE`; the updater's rollback; the
   `.bat` UTF-8 env.
 
-### 4.5 Stale prose
+### 4.5 Download-layer small items (download `FINDINGS.md` P3, each with its script)
+- Orphaned `.fetchmeta` after every failed row (c04, c05, c08) — the
+  enabler for 1.3; `DOWNLOAD_IDENTITY` entries leak for rows whose ingest
+  fails (`fetch.py:1844`).
+- Raw exception text is the user-facing error for a damaged download:
+  `'CRC check failed 0x36bafc05 != 0xc94503fa'`, `'Compressed file ended
+  before the end-of-stream marker was reached'`, `'unreadable: BadZipFile:
+  File is not a zip file'` (c04); the download was deleted so "press retry"
+  is the right action — say so. A 0-byte 200 reads `'no in_network /
+  provider_references / reporting_structure key found'` (c05) — "the
+  server returned an empty file" is the truth.
+- The size-limit message on an unknown-length body reports bytes-so-far as
+  the size: "file is 5.0 GB — larger than … (5.0 GB)" (c03).
+- Stall deadline overshoot: budget 12 s fired at 17.3–19.8 s (c06) because
+  the loop-top check runs only after the read timeout + back-off; at
+  production values a silent server can hold a slot 600 + 120 + 90 s. Park
+  (6 → 7.0 s) and the max cap (20 → 21.0 s) are tight.
+- Steady-but-slow is reported as "stopped sending data (under 1 MB in 6 s;
+  1 MB kept)" with the count rounded up (720,896 B on disk) (c06).
+- Up to one 64 KB chunk is re-downloaded per reconnect (`iter_raw` drops
+  the partial chunk when h11 raises) — trivial. Dashboard progress lags
+  the `.part` by up to 8 MB / 10 s (first callback rule, `fetch.py:987`):
+  "64 KB" for the first 10 s of every file on a 1 MB/s link.
+- The early check hashes its own 15 MiB head before asking whether a
+  same-size candidate exists (`fetch.py:2017`): ~30 ms and 15.7 MB of
+  reads per download for nothing (c11).
+
+### 4.6 Stale prose
 - `Store.url_progress` docstring: "a multi-minute rollup rebuild holds
   write_lock the whole time" — it does not; rollups serialize on
   `rollup_lock` and take `write_lock` only around view DDL
@@ -390,9 +555,58 @@ overlaps ingest. Invariants 1 and 2 hold.
   matters).
 - AI_HANDOFF Step 4: replace with the graph (2.0).
 
+## Measured reference (download `FINDINGS.md`)
+
+Slot time per scenario (`c06_slow_drip.py`; timeout 3 s, park 6 s, stall
+12 s, max 20 s, retries 2): silence then a working resume 4.1 s (sha ok,
+one 206); steady 256 KB/s 11.8 s, no clock fired; steady 100 KB/s 6.4 s →
+parked (720 KB kept); silent after 200 KB on a Range-ignoring server 7.0 s
+→ parked (17.3–19.8 s with park off → stall); 256 KB/s on 8 MB with max
+20 s → 21.0 s set aside, 5.3 MB kept; a server cutting every 512 KB → OK
+in 5.1 s over 6 connections; headers then nothing 6.1 s → parked; cancel at
+0.5 s during back-off 4.5 s (2.12); accepted with no headers 8.3 s → parked.
+
+Per download on a real 118.7 MB gz from localhost (`c11_efficiency.py`):
+1 request, 1.00× bytes, the full-file hash exactly once (streamed), 32.5 MB
+of `_sha_range` reads (early-check head + fingerprint head + tail), 2
+progress UPDATEs of ~25 ms; the ingest re-reads 16.8 MB for `_finish_ok`'s
+fingerprint and hashes nothing (identity reused). Early check on a true
+copy: 9 range requests (1 MiB + 8 × 64 KiB), 0.56 s, then the stream is
+abandoned.
+
+Kill tests (`c10_kill.py`, 20 trials, two seeds): 12 kills mid-download →
+resume from the exact `.part` size with `If-Range`, 0.13 MB re-downloaded
+in total; 8 kills mid-ingest → kept download + sidecar reused with 0
+requests; every trial `content_sha == truth`, each file once, `rates`
+exactly 600.
+
 ## Checked and found correct — do not re-chase
 
-_(the union of the four passes' lists — pending)_
+_(ingest pass — pending)_
+
+- Download (`download/FINDINGS.md`): truncated body with a correct
+  Content-Length resumes from the `.part` size and matches truth (an absent
+  `Accept-Ranges` changes nothing); Range ignored on a small `.part` →
+  clean restart, on a ≥ 64 MB `.part` → 3 refusals then restart (143 MB
+  sent for 70 MB, bounded as designed); 416 → `.part` discarded, new
+  content fetched; an RFC-correct If-Range server → restart, sha == v2;
+  chunked bodies resume, trip `confirm_over_gb` on bytes-so-far, hand off
+  to a big slot, park then fail cleanly when silent; a chunked body ended
+  cleanly early is accepted (no client can know; the trailer / parse
+  catches it); corrupt gzip / truncated zip → 0 rows, `failed`, no
+  fingerprint or identity recorded, download removed so a retry refetches;
+  HTML 200 and redirect-to-login → `failed/page` with PAGE_HELP; a redirect
+  that changes the extension is sniffed by magic and ingests; 403 on a
+  resume → terminal signed-URL text, `.part` kept; segments are contiguous
+  and exact (1 probe + 4 GETs, 220.2 MB for 220.2 MB); a Range-compressing
+  or 200-answering server falls back to one connection and finishes;
+  `_reserve_disk_or_raise` is atomic (200 trials × 2 simultaneous 2 GB
+  reservations on a faked 5 GB disk → exactly one accepted); cancel
+  before the first byte / mid-stream / `cancel_all_downloading` →
+  `skipped/canceled`, `.part` kept, `resume_canceled` resumes with a 206;
+  any byte of progress resets the retry count; a same-size candidate whose
+  head differs costs no range request; `url_progress` never blocks the
+  socket.
 
 - Queue (`queue/FINDINGS.md` §3): crash-resume over 20 random kills; twin
   kills at the claim instant; twins in both lanes, in sequence, a third
