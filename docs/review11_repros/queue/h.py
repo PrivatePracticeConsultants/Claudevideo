@@ -80,24 +80,31 @@ def _h(s: str) -> int:
     return zlib.crc32(s.encode())
 
 
-def rate_file_obj(tag: str, n_rows: int = 2, entity: str = "Testco Health", month: str = "2026-05-01"):
+def rate_file_obj(tag: str, n_rows: int = 2, entity: str = "Testco Health", month: str = "2026-05-01",
+                  pad: int = 0):
+    """A valid in-network file: n_rows provider groups on CPT 97110 (in the
+    default target set), distinct content per tag. `pad` bytes of incompressible
+    hex at the END make a 'big' file that still parses."""
     base = json.loads((FIXTURES / "innetwork_mixed.json").read_text())
     base["reporting_entity_name"] = entity
     base["last_updated_on"] = month
-    items = [it for it in base["in_network"]
-             if all(nr.get("provider_groups") for nr in it["negotiated_rates"])]
-    out = []
+    item = json.loads(json.dumps(base["in_network"][0]))
+    proto = item["negotiated_rates"][0]
+    groups = []
     for i in range(n_rows):
-        it = json.loads(json.dumps(items[i % len(items)]))
-        # distinct content per tag/row: unique TIN digits and rate
-        for nr in it["negotiated_rates"]:
-            for pg in nr.get("provider_groups") or []:
-                pg["tin"]["value"] = f"{(_h(tag) % 90 + 10):02d}-{(i * 7919) % 10_000_000:07d}"
-            for np_ in nr["negotiated_prices"]:
-                np_["negotiated_rate"] = round(20 + (_h(tag + str(i)) % 1000) / 10, 2)
-        out.append(it)
-    base["in_network"] = out
+        g = json.loads(json.dumps(proto))
+        g["provider_groups"][0]["npi"] = [1000000000 + (_h(tag) % 899_999_999) + i]
+        g["provider_groups"][0]["tin"]["value"] = f"{(_h(tag) % 90 + 10):02d}-{(i * 7919 + _h(tag)) % 10_000_000:07d}"
+        for np_ in g["negotiated_prices"]:
+            np_["negotiated_rate"] = round(20 + (_h(tag + str(i)) % 1000) / 10, 2)
+        groups.append(g)
+    item["negotiated_rates"] = groups
+    base["in_network"] = [item]
+    base.pop("provider_references", None)
     base["_tag"] = tag
+    if pad:
+        import os
+        base["_pad"] = os.urandom(pad // 2).hex()
     return base
 
 

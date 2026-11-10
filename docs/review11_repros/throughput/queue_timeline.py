@@ -84,10 +84,20 @@ def proc_io(pid: int) -> dict:
 def main() -> int:
     variant = sys.argv[1]
     overrides = {k: _coerce(v) for k, v in (a.split("=", 1) for a in sys.argv[2:])}
+    # harness-only knobs (not MrfxConfig fields)
+    keep_warm = bool(overrides.pop("keep_warm", True))        # serve opens the store keep_warm=True
+    reuse_store = overrides.pop("reuse_store", None)          # start from another variant's finished store
+    http_root = SCRATCH / str(overrides.pop("http_root", "http_root"))
+    stale_s = overrides.pop("rollup_max_stale_seconds", None)  # cadence experiment only
+    only = overrides.pop("only", None)                        # serve only files whose name contains this
     run_dir = SCRATCH / "runs" / variant
     shutil.rmtree(run_dir, ignore_errors=True)
     run_dir.mkdir(parents=True)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+    if reuse_store:
+        shutil.copytree(SCRATCH / "runs" / str(reuse_store) / "store", run_dir / "store")
+    if stale_s is not None:
+        F.ROLLUP_MAX_STALE_SECONDS = float(stale_s)
 
     cfg = MrfxConfig(
         inbox_dir=run_dir / "inbox", processed_dir=run_dir / "processed",
@@ -95,17 +105,22 @@ def main() -> int:
         downloads_dir=run_dir / "downloads", entity_map_path=run_dir / "entity_map.yaml",
         enrichment={"mode": "off"}, **overrides)
     cfg.ensure_dirs()
-    store = Store(cfg.store_dir)
+    store = Store(cfg.store_dir, cfg.duckdb_memory_gb, keep_warm=keep_warm, temp_dir=cfg.duckdb_temp_dir)
     import logging
     logging.basicConfig(level=logging.INFO, filename=str(run_dir / "mrfx.log"),
                         format="%(asctime)s %(levelname)s %(threadName)s %(name)s: %(message)s")
 
     srv = subprocess.Popen([sys.executable, "-m", "http.server", str(PORT), "--bind", "127.0.0.1",
-                            "--directory", str(HTTP_ROOT)],
+                            "--directory", str(http_root)],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(0.8)
-    names = sorted(p.name for p in HTTP_ROOT.iterdir() if p.suffix in (".gz", ".zip", ".json"))
-    sizes = {n: (HTTP_ROOT / n).stat().st_size for n in names}
+    names = sorted(p.name for p in http_root.iterdir() if p.suffix in (".gz", ".zip", ".json")
+                   and (not only or str(only) in p.name))
+    sizes = {n: (http_root / n).stat().st_size for n in names}
+    # filename_for() truncates the basename to 120 chars: map a local name back to the served one
+    def served(local: str) -> str:
+        base = local.split("_", 1)[1]
+        return next((n for n in names if n == base or n.startswith(base[:60])), base)
     urls = [f"http://127.0.0.1:{PORT}/{n}" for n in names]
 
     T0 = time.monotonic()
@@ -162,7 +177,7 @@ def main() -> int:
     real_download = F.download
 
     def download_hook(cfg_, url, dest, *a, **k):
-        n = dest.name.split("_", 1)[1]
+        n = served(dest.name)
         mark("dl_start", n)
         try:
             return real_download(cfg_, url, dest, *a, **k)
@@ -173,7 +188,7 @@ def main() -> int:
     real_ingest = I.ingest_file
 
     def ingest_hook(cfg_, store_, path, *a, **k):
-        n = path.name.split("_", 1)[1]
+        n = served(path.name)
         mark("ing_start", n)
         try:
             r = real_ingest(cfg_, store_, path, *a, **k)
@@ -193,9 +208,8 @@ def main() -> int:
             try:
                 return real(*a, **k)
             finally:
-                mark(label, getattr(a[0], "name", "") if a and isinstance(a[0], Path) else
-                     (a[2].name if len(a) > 2 and isinstance(a[2], Path) else ""),
-                     dur=round(time.monotonic() - t, 3))
+                p_ = a[0] if a and isinstance(a[0], Path) else (a[2] if len(a) > 2 and isinstance(a[2], Path) else None)
+                mark(label, served(p_.name) if p_ is not None else "", dur=round(time.monotonic() - t, 3))
         setattr(mod, attr, w)
     timed(SN, "preflight", "preflight")
     F.preflight = SN.preflight
@@ -217,7 +231,7 @@ def main() -> int:
     def fin_hook(name, tmp, rows):
         t = time.monotonic()
         real_fin(name, tmp, rows)
-        mark("finalize", name.split("_", 1)[1], dur=round(time.monotonic() - t, 3), rows=rows)
+        mark("finalize", served(name), dur=round(time.monotonic() - t, 3), rows=rows)
     store.finalize_rates_part = fin_hook
 
     for attr in ("update_rollups_incremental", "rebuild_rollups"):
@@ -241,6 +255,9 @@ def main() -> int:
     stop = threading.Event()
     seen_pids: set[int] = set()
     hwm: dict[int, float] = {}
+    last_io: dict[int, dict] = {}      # last /proc/<pid>/io snapshot per process (workers die at pool shutdown)
+    wal_max = [0]
+    wal_p = cfg.store_dir / "mrfx.duckdb.wal"
 
     def sampler():
         last_cpu = {}
@@ -267,6 +284,13 @@ def main() -> int:
                     busy[pid] = (c - last_cpu[pid]) / max(1e-6, now - last_t)
                 last_cpu[pid] = c
                 hwm[pid] = max(hwm.get(pid, 0.0), proc_rss_hwm(pid)[1])
+                io_ = proc_io(pid)
+                if io_:
+                    last_io[pid] = io_
+            try:
+                wal_max[0] = max(wal_max[0], wal_p.stat().st_size)
+            except OSError:
+                pass
             last_t = now
             samples.append({"t": round(now - T0, 2), "counts": counts,
                             "cpu_main": round(busy.get(os.getpid(), 0.0), 2),
@@ -288,7 +312,7 @@ def main() -> int:
     with store.connect() as con:
         qrows = con.execute("SELECT url, status, rows_emitted, error FROM url_queue ORDER BY id").fetchall()
         frows = con.execute("SELECT filename, status, rows_emitted FROM files").fetchall()
-    rows_by_name = {f[0].split("_", 1)[1]: f[2] for f in frows}
+    rows_by_name = {served(f[0]): f[2] for f in frows}
 
     # ---- per-file table ----
     per: dict[str, dict] = {nm: {"size_mb": sizes[nm] / 1e6} for nm in names}
@@ -303,7 +327,8 @@ def main() -> int:
         if e["kind"] in ("preflight", "dl_fingerprint", "finish_ok", "finalize"):
             d[e["kind"] + "_s"] = d.get(e["kind"] + "_s", 0.0) + e["dur"]
     rollups = [e for e in ev if e["kind"] == "rollup_end"]
-    lines = [f"# timeline — variant `{variant}` overrides={overrides}", "",
+    lines = [f"# timeline — variant `{variant}` overrides={overrides} keep_warm={keep_warm} "
+             f"reuse_store={reuse_store} http_root={http_root.name} stale_s={stale_s}", "",
              f"files: {len(names)} ({sum(sizes.values()) / 1e6:.0f} MB gz); processed={n}; "
              f"wall={wall:.1f}s; rollups={len(rollups)} "
              f"({sum(r['dur'] for r in rollups):.1f}s total); "
@@ -362,7 +387,12 @@ def main() -> int:
               f"write_bytes {(io1.get('write_bytes', 0) - io0.get('write_bytes', 0)) / 1e6:.0f} MB, "
               f"rchar {(io1.get('rchar', 0) - io0.get('rchar', 0)) / 1e6:.0f} MB, wchar {(io1.get('wchar', 0) - io0.get('wchar', 0)) / 1e6:.0f} MB",
               f"peak RSS (VmHWM): main {hwm.get(os.getpid(), 0):.0f} MB; workers "
-              + ", ".join(f"{hwm[p]:.0f}" for p in sorted(hwm) if p != os.getpid()) + " MB", ""]
+              + ", ".join(f"{hwm[p]:.0f}" for p in sorted(hwm) if p != os.getpid()) + " MB",
+              "worker io (last snapshot): " + "; ".join(
+                  f"pid {p}: rchar {v.get('rchar', 0) / 1e6:.0f} MB wchar {v.get('wchar', 0) / 1e6:.0f} MB "
+                  f"read_bytes {v.get('read_bytes', 0) / 1e6:.0f} MB write_bytes {v.get('write_bytes', 0) / 1e6:.0f} MB"
+                  for p, v in last_io.items() if p != os.getpid()),
+              f"max .wal size seen: {wal_max[0] / 1e6:.1f} MB (sampled every 0.5s)", ""]
     bad = [q for q in qrows if q[1] != "done"]
     lines.append(f"queue end states: {dict((s, sum(1 for q in qrows if q[1] == s)) for s in set(q[1] for q in qrows))}")
     for q in bad[:10]:
