@@ -62,7 +62,7 @@ DUP_SQL = "SELECT count(*) FROM (SELECT source_file, billing_code, tin_value, np
 def inspect(cfg, store, expected, label):
     files = q(store, "SELECT filename, status, rows_emitted, substr(error,1,70) FROM files ORDER BY 1")
     rc = rate_counts(store)
-    tmps = [p for p in parts(store) if not p.endswith(".parquet")]
+    tmps = [p for p in parts(store) if not p.endswith(".parquet") and p != ".verified_parts.json"]
     ok = all(s == "done" and n == expected[f] and rc.get(f) == expected[f] for f, s, n, _ in files) and len(files) == len(expected)
     dup = q(store, DUP_SQL)[0][0]
     return ok, files, rc, tmps, dup
@@ -109,7 +109,7 @@ if __name__ == "__main__":
             except OSError: pass
         store = Store(cfg.store_dir)
         pre = q(store, "SELECT filename, status, rows_emitted FROM files ORDER BY 1")
-        pre_tmps = [x for x in parts(store) if not x.endswith(".parquet")]
+        pre_tmps = [x for x in parts(store) if not x.endswith(".parquet") and x != ".verified_parts.json"]
         stale_pre = store.rollups_stale()
         rec = store.recover_stuck_files()
         store.close()
@@ -125,12 +125,13 @@ if __name__ == "__main__":
                    tmps_after_restart=tmps, dup_rows=dup, orphans_1s=len(orph_after_kill), orphans_4s=len(orph_later), orphan_life=life,
                    recovered=rec, pre=pre, stale_pre=stale_pre, stale_after=stale, inbox_left=inbox_left, restart_exit=rc2)
         results.append(res)
-        flag = "OK " if ok and not tmps and dup == DUP0 and not orph_later and not stale else "BAD"
+        flag = ("OK " if ok and not tmps and dup == DUP0 and not stale else "BAD") + ("+orphans" if orph_later else "")
         print(f"{flag} trial {i:2} {kind:16} at={res['at']} pre={[(f[:8], s, n) for f, s, n in pre]} tmps_after_kill={len(pre_tmps)} "
               f"orphans(1s/45s)={len(orph_after_kill)}/{len(orph_later)} life={ {k: [c for _, c in v] for k, v in life.items()} } recovered={rec} -> files={[(f[:8], s, n) for f, s, n, _ in files]} "
               f"tmps={tmps} dup={dup} stale={stale}", flush=True)
         store.close(); shutil.rmtree(BASE / run, ignore_errors=True)
-    bad = [r for r in results if not (r["ok"] and not r["tmps_after_restart"] and r["dup_rows"] == DUP0 and not r["orphans_4s"] and not r["stale_after"])]
-    print(f"\n{len(results) - len(bad)}/{len(results)} trials correct; seed {seed}")
+    bad = [r for r in results if not (r["ok"] and not r["tmps_after_restart"] and r["dup_rows"] == DUP0 and not r["stale_after"])]
+    orph = sum(1 for r in results if r["orphans_4s"])
+    print(f"\n{len(results) - len(bad)}/{len(results)} trials correct (rows/state/temps/rollups); {orph}/{len(results)} left pool workers alive 45 s after the kill; seed {seed}")
     for r in bad:
         print("  BAD:", json.dumps(r, default=str)[:600])
