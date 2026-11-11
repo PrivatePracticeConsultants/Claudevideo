@@ -1398,6 +1398,12 @@ def plain_parse_error(e: BaseException) -> str:
     the file with this sentence — never a silently wrong number."""
     text = f"{type(e).__name__}: {e}"
     low = str(e).lower()
+    if type(e).__name__ == "BrokenProcessPool":
+        # the parser process died twice (the pool healed and retried once):
+        # a sentence, not a Python exception (review 11 item 2.5)
+        return ("the parser process for this file was ended by the system twice "
+                "(usually the computer ran out of memory) — press retry; if it "
+                "happens again, lower parallel_ingests in config/mrfx.yaml")
     if "overflow" in low:
         why = ("the payer's file holds a number too large to be a real value "
                "(e.g. a 20-digit NPI or rate)")
@@ -1499,6 +1505,18 @@ def requeue_skipped(cfg: MrfxConfig, store: Store, payer: str,
                 log.info("%s: its provider reference file arrived after it was loaded and "
                          "its download was removed — downloading it again", fname)
                 requeued.append(fname)
+            else:
+                # no raw copy and no link: nothing can re-read it — say so on
+                # the file's row instead of a silent 0 (review 11 item 2.16)
+                st = store.file_status(fname) or {}
+                n = int(st.get("ref_groups_skipped") or 0)
+                store.upsert_file(fname, error=(
+                    f"its payer's provider list has now arrived — drop this file in again "
+                    f"to pick up the {n:,} rate group(s) that were waiting for it"
+                    if n else "its payer's provider list has now arrived — drop this file "
+                              "in again to pick up the providers it was missing"))
+                log.info("%s: its provider list arrived but the file is gone — asked the "
+                         "user to drop it in again", fname)
     return requeued
 
 

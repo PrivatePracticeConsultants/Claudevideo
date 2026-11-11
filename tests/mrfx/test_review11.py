@@ -54,6 +54,7 @@ class Srv:
     def __init__(self, routes: dict):
         self.routes = routes
         self.log: list[tuple] = []
+        self.starts: list[tuple] = []      # (path, Range) as each request ARRIVES
         outer = self
 
         class H(http.server.BaseHTTPRequestHandler):
@@ -63,6 +64,7 @@ class Srv:
                 pass
 
             def _go(self, head_only=False):
+                outer.starts.append((self.path, self.headers.get("Range")))
                 fn = outer.routes.get(self.path)
                 if fn is None:
                     self.send_response(404)
@@ -70,22 +72,36 @@ class Srv:
                     self.end_headers()
                     outer.log.append((self.path, 404, self.headers.get("Range"), 0))
                     return
-                status, headers, body, cut = fn(self)
+                got = fn(self)
+                status, headers, body, cut = got[:4]
+                pace = got[4] if len(got) > 4 else 0.0
                 self.send_response(status)
                 for k, v in headers.items():
                     self.send_header(k, v)
-                if "Content-Length" not in headers:
+                if "Content-Length" not in headers and "Transfer-Encoding" not in headers:
                     self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 out = body if cut is None else body[:cut]
+                written = 0
+                chunked = headers.get("Transfer-Encoding") == "chunked"
                 if not head_only:
                     try:
-                        self.wfile.write(out)
-                        self.wfile.flush()
+                        step = (64 << 10) if (pace or chunked) else max(1, len(out))
+                        for i in range(0, len(out), step):
+                            piece = out[i:i + step]
+                            if chunked:
+                                self.wfile.write(f"{len(piece):x}\r\n".encode() + piece + b"\r\n")
+                            else:
+                                self.wfile.write(piece)
+                            self.wfile.flush()
+                            written += len(piece)
+                            if pace:
+                                time.sleep(pace)
+                        if chunked:
+                            self.wfile.write(b"0\r\n\r\n")
                     except OSError:
                         pass
-                outer.log.append((self.path, status, self.headers.get("Range"),
-                                  0 if head_only else len(out)))
+                outer.log.append((self.path, status, self.headers.get("Range"), written))
                 if cut is not None:
                     self.close_connection = True
 
@@ -463,3 +479,244 @@ def test_blob_listing_dropped_in_the_inbox_is_quarantined_with_a_sentence(cfg, s
     out = scan_inbox(cfg, store)
     assert out[0]["status"] == "quarantined"
     assert "Links tab" in q(store, "SELECT error FROM files")[0][0]
+
+
+# ------------------------------------- Group 2: states, sentences, silences --
+
+def _index(base: str, n: int) -> bytes:
+    return json.dumps({"reporting_entity_name": "Twin Health", "reporting_structure": [
+        {"reporting_plans": [{"plan_name": "P"}],
+         "in_network_files": [{"location": f"{base}/f{i}.json.gz"} for i in range(n)]}]}).encode()
+
+
+def test_capped_index_can_be_retried_and_takes_the_rest(cfg, store, srv):
+    """2.1 (queue/s3_toc A/B): "raise max_toc_files and press retry on this
+    row" — there was no such button and the API refused. was: retry False;
+    f3/f4 never loaded."""
+    s = srv({})
+    for i in range(5):
+        body = gz(rate_doc(n=2, payer=f"P{i}"))
+        s.routes[f"/f{i}.json.gz"] = lambda req, b=body: ranged(b, req)
+    s.routes["/idx.json"] = lambda req: ranged(_index(s.base, 5), req)
+    cfg.max_toc_files = 3
+    fetch.add_urls(store, [s.base + "/idx.json"])
+    drain(cfg, store)
+    assert q(store, "SELECT count(*) FROM url_queue WHERE kind = 'in_network'")[0][0] == 3
+    cfg.max_toc_files = 10
+    idx = q(store, "SELECT id FROM url_queue WHERE kind = 'toc'")[0][0]
+    assert store.set_url_status_by_id(idx, "queued") is True
+    drain(cfg, store)
+    assert q(store, "SELECT count(*) FROM url_queue WHERE kind = 'in_network' "
+                    "AND status = 'done'")[0][0] == 5
+
+
+def test_oversize_row_records_its_size_and_requeues_when_the_limit_rises(cfg, store, srv):
+    """2.2 (queue/s11b_oversize_raise): the documented fix (raise
+    confirm_over_gb, restart) never re-queued it. was: bytes_total 0, 0 re-queued."""
+    body = gz(rate_doc(n=5, pad=3_000_000))
+    s = srv({"/big.json.gz": lambda req: ranged(body, req)})
+    cfg.confirm_over_gb = 0.000001
+    fetch.add_urls(store, [s.base + "/big.json.gz"])
+    drain(cfg, store)
+    assert q(store, "SELECT status, bytes_total FROM url_queue")[0] == ("oversize", len(body))
+    assert store.requeue_oversize_within(5 * 10**9) == 1
+
+
+def test_clear_queue_pressed_while_an_index_expands_sticks(cfg, store, srv, monkeypatch):
+    """2.3 (queue/s9_actions C). was: the index ended 'done' and all its files
+    were queued and loaded."""
+    s = srv({})
+    for i in range(3):
+        body = gz(rate_doc(n=2, payer=f"P{i}"))
+        s.routes[f"/f{i}.json.gz"] = lambda req, b=body: ranged(b, req)
+    s.routes["/idx.json"] = lambda req: ranged(_index(s.base, 3), req)
+    real = fetch.expand_toc_with_plans
+
+    def slow(*a, **k):
+        out = real(*a, **k)
+        store.clear_queued()          # the user presses "Clear queue" meanwhile
+        return out
+    monkeypatch.setattr(fetch, "expand_toc_with_plans", slow)
+    fetch.add_urls(store, [s.base + "/idx.json"])
+    drain(cfg, store)
+    assert q(store, "SELECT status FROM url_queue") == [("skipped",)]
+    assert q(store, "SELECT count(*) FROM rates")[0][0] == 0
+
+
+def test_redirect_loop_is_a_plain_sentence(cfg, srv):
+    """2.4 (download/c05 redirect_loop). was: httpx.TooManyRedirects escaped
+    download() (the row read "unexpected download error", with a traceback)."""
+    s = srv({"/loop": lambda req: (302, {"Location": "/loop"}, b"", None)})
+    with pytest.raises(fetch.DownloadError, match="redirects in a loop"):
+        fetch.download(cfg, s.base + "/loop", cfg.downloads_dir / "x.json.gz")
+
+
+def test_a_parser_process_that_died_twice_reads_as_a_sentence():
+    """2.5 (ingest/s7_pool exit). was: "BrokenProcessPool: A process in the
+    process pool was terminated abruptly …"."""
+    from concurrent.futures.process import BrokenProcessPool
+
+    from mrfx.ingest import plain_parse_error
+    msg = plain_parse_error(BrokenProcessPool("A process in the process pool was "
+                                              "terminated abruptly"))
+    assert msg.startswith("the parser process for this file was ended")
+    assert "parallel_ingests" in msg
+
+
+def test_a_user_retry_restores_the_auto_resume_budget(cfg, store):
+    """2.6 + 4.1 (queue/s6_counters): every requeue resets through one
+    fragment. was: auto_resumes 3, park_count 4, kind 'duplicate' kept."""
+    fetch.add_urls(store, ["http://127.0.0.1:9/a.json.gz"])
+    uid = q(store, "SELECT id FROM url_queue")[0][0]
+    with store.connect() as con:
+        con.execute("UPDATE url_queue SET status = 'failed', auto_resumes = 3, "
+                    "park_count = 4, kind = 'duplicate', big_lane = true WHERE id = ?", [uid])
+    assert store.set_url_status_by_id(uid, "queued")
+    assert q(store, "SELECT auto_resumes, park_count, kind, big_lane FROM url_queue")[0] == \
+        (0, 0, "unknown", False)
+
+
+def test_failed_pasted_rows_stay_listed_past_500_links(cfg, store):
+    """2.7 (queue/s9_actions B). was: the failed pasted row 1 not in list_urls()."""
+    fetch.add_urls(store, [f"http://127.0.0.1:9/f{i}.json.gz" for i in range(600)])
+    with store.connect() as con:
+        con.execute("UPDATE url_queue SET status = 'done'")
+        con.execute("UPDATE url_queue SET status = 'failed' WHERE id = 1")
+    assert 1 in {r["id"] for r in store.list_urls(500)}
+
+
+def test_small_file_slot_sizes_unsized_rows_and_takes_the_small_one(cfg, store, srv):
+    """2.8 (queue/s7_lanes): sizes are unknown on a fresh queue, so the
+    small-file slot took the first unsized big file. was: the small provider
+    list was fetched after the big files."""
+    big = rate_doc(n=20, pad=1_500_000)          # 1.5 MB, plain: over the 1 MB lane
+    small = gz(rate_doc(n=2, payer="Small"))
+    s = srv({})
+    for i in range(3):
+        s.routes[f"/big{i}.json.gz"] = lambda req: (*ranged(big, req), 0.05)
+    s.routes["/s.json.gz"] = lambda req: ranged(small, req)
+    cfg.parallel_downloads, cfg.small_file_downloads, cfg.small_file_mb = 3, 1, 1
+    fetch.add_urls(store, [s.base + f"/big{i}.json.gz" for i in range(3)]
+                   + [s.base + "/s.json.gz"])
+    drain(cfg, store)
+    full_gets = [p for p, r in s.starts if r is None]
+    # the small-only slot sized big0 (one 1-byte request), handed it to a big
+    # slot and took the small file while the big ones were still flowing
+    assert full_gets.index("/s.json.gz") < 3
+    assert q(store, "SELECT count(*) FROM url_queue WHERE bytes_total > 0")[0][0] == 4
+
+
+def test_reexpansion_leaves_an_oversize_child_that_still_does_not_fit(cfg, store):
+    """2.9 (queue/s11_oversize_reexpand). was: re-queued by every re-expansion."""
+    store.enqueue_urls([("http://h/idx.json", fetch.dedup_key("http://h/idx.json"))])
+    u = "http://h/big.json.gz"
+    store.enqueue_urls([(u, fetch.dedup_key(u))], parent_id=1)
+    with store.connect() as con:
+        con.execute("UPDATE url_queue SET status = 'oversize', bytes_total = 9000000000 "
+                    "WHERE url = ?", [u])
+    assert store.enqueue_urls([(u, fetch.dedup_key(u))], parent_id=1,
+                              oversize_limit=5 * 10**9) == 0
+    assert q(store, "SELECT status FROM url_queue WHERE url = ?", u)[0][0] == "oversize"
+
+
+def test_dedup_key_keeps_an_identity_param_beside_a_signature():
+    """2.10 (queue/s2_dedup): two DIFFERENT files collapsed to one key — the
+    second never queued. was: dl?token=FILE1&sig=a == dl?token=FILE2&sig=b."""
+    k = fetch.dedup_key
+    assert k("https://h/dl?token=FILE1&sig=a") != k("https://h/dl?token=FILE2&sig=b")
+    assert k("https://h/r.json?st=NY&sig=a") != k("https://h/r.json?st=CA&sig=b")
+    assert k("https://h/r?x-amz-meta-file=1") != k("https://h/r?x-amz-meta-file=2")
+    # the signed shapes still dedup
+    az = "https://a.blob.core.windows.net/c/f.gz?sv=2020-08-04&st=2026-11-0{}T00%3A00Z&se=2026-11-0{}T00%3A00Z&sr=b&sp=r&sig={}"
+    assert k(az.format(1, 2, "A")) == k(az.format(5, 6, "B"))
+    s3 = "https://b.s3.amazonaws.com/f.gz?X-Amz-Credential={}&X-Amz-Date={}&X-Amz-Signature={}"
+    assert k(s3.format("x", "20261101", "aa")) == k(s3.format("y", "20261102", "bb"))
+
+
+def test_a_set_aside_download_goes_behind_the_waiting_files(cfg, store, monkeypatch):
+    """2.11 (seams/setaside_order): the cap re-claimed the slot it just freed.
+    was: retries 0 — the same row claimed again at once."""
+    fetch.add_urls(store, ["http://127.0.0.1:9/a.json.gz", "http://127.0.0.1:9/b.json.gz"])
+
+    def capped(*a, **k):
+        raise fetch.DownloadError("set aside", retryable=True, set_aside=True)
+    monkeypatch.setattr(fetch, "download", capped)
+    fetch.fetch_url_record(cfg, store, store.next_queued_url())
+    assert store.next_queued_url()["url"].endswith("/b.json.gz")
+
+
+def test_stop_during_the_retry_back_off_frees_the_slot_at_once(cfg, srv):
+    """2.12 (download/c08 cancel_during_backoff). was: the slot was held for
+    the whole back-off (>= 2 s here, up to ~93 s at production values)."""
+    s = srv({"/f.json.gz": lambda req: (503, {}, b"", None)})
+    cfg.download_retries = 3
+    t0 = time.monotonic()
+    with pytest.raises(fetch.DownloadError):
+        fetch.download(cfg, s.base + "/f.json.gz", cfg.downloads_dir / "f.json.gz",
+                       cancel_check=lambda: time.monotonic() - t0 > 0.3)
+    assert time.monotonic() - t0 < 1.8
+
+
+def test_retry_after_is_honoured(cfg, srv):
+    """2.13 (download/c05 r429_retry_after). was: the generic back-off
+    (2-5 s) instead of the server's Retry-After: 1."""
+    body = gz(rate_doc())
+    seen = []
+
+    def fn(req):
+        seen.append(time.monotonic())
+        if len(seen) == 1:
+            return 429, {"Retry-After": "1"}, b"", None
+        return ranged(body, req)
+    s = srv({"/f.json.gz": fn})
+    fetch.download(cfg, s.base + "/f.json.gz", cfg.downloads_dir / "f.json.gz")
+    assert 0.9 <= seen[1] - seen[0] < 1.8
+
+
+def test_refused_range_ignoring_200s_do_not_spend_the_retry_budget(cfg, srv, monkeypatch):
+    """2.14 (download/c07 holey_restart_200): with download_retries <= 2 the
+    accept-and-restart branch was unreachable. was: DownloadError "server
+    ignored resume" — the file could never finish."""
+    body = gz(rate_doc(n=200, pad=400_000))
+    s = srv({"/f.json.gz": lambda req: (200, {}, body, None)})
+    monkeypatch.setattr(fetch, "_KEEP_PART_ON_200_BYTES", 1000)
+    cfg.download_retries = 1
+    dest = cfg.downloads_dir / "f.json.gz"
+    dest.with_suffix(".gz.part").write_bytes(body[:5000])
+    got, _ = fetch.download(cfg, s.base + "/f.json.gz", dest)
+    assert got == sha(body)
+
+
+def test_an_index_leaves_no_download_record_behind(cfg, store, srv):
+    """2.15 (queue s0/s1/s3/s5). was: '<hash>_idx.json.fetchmeta' left in downloads/."""
+    s = srv({})
+    body = gz(rate_doc(n=2))
+    s.routes["/f0.json.gz"] = lambda req: ranged(body, req)
+    s.routes["/idx.json"] = lambda req: ranged(_index(s.base, 1), req)
+    fetch.add_urls(store, [s.base + "/idx.json"])
+    drain(cfg, store)
+    assert list(cfg.downloads_dir.glob("*.fetchmeta")) == []
+
+
+def test_a_provider_list_arriving_for_a_file_that_is_gone_says_so(cfg, store):
+    """2.16 (ingest/s6_companion B'). was: rate file 'done', 0 rows, error ''."""
+    cfg.move_processed = False
+    rate = {"reporting_entity_name": "Ref Health", "last_updated_on": "2026-05-01",
+            "version": "2.0.0", "in_network": [
+                {"negotiation_arrangement": "ffs", "billing_code_type": "CPT",
+                 "billing_code": "97110", "negotiated_rates": [
+                     {"provider_references": [7], "negotiated_prices": [
+                         {"negotiated_type": "negotiated", "negotiated_rate": 40.0,
+                          "billing_class": "professional", "service_code": ["11"]}]}]}]}
+    p = cfg.inbox_dir / "ref_rates_2026-05.json"
+    p.write_text(json.dumps(rate))
+    scan_inbox(cfg, store)
+    p.unlink()                                     # the user tidied the inbox
+    (cfg.inbox_dir / "ref_refs_2026-05.json").write_text(json.dumps(
+        {"reporting_entity_name": "Ref Health", "last_updated_on": "2026-05-01",
+         "provider_groups": [{"provider_group_id": 7, "provider_groups": [
+             {"npi": [1234567893], "tin": {"type": "ein", "value": "111111111"}}]}]}))
+    scan_inbox(cfg, store)
+    err = q(store, "SELECT error FROM files WHERE filename = 'ref_rates_2026-05.json'")[0][0]
+    assert err and "drop this file in again" in err
+

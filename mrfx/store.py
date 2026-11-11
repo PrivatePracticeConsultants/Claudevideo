@@ -881,6 +881,20 @@ TIN_DIRECTORY_QUERY = (
 )
 
 
+# Every path that puts a finished / stopped / paused row back in the queue
+# resets the row's per-attempt bookkeeping through THIS fragment (review 11
+# item 4.1: each path kept a different subset — a spent auto_resumes made
+# every later stall an instant failure (2.6), a kept park_count shortened the
+# next park budget, a kept 'duplicate' kind made a user-skipped row eligible
+# for automatic revival, a kept force_size outlived its one shot). The error
+# text, `retries` and `force_size` (download anyway) are set by the caller.
+REQUEUE_RESET = (
+    "progress = 0, bytes_done = 0, retry_after = NULL, park_count = 0, "
+    "waiting_on = NULL, auto_resumes = 0, big_lane = false, finished_at = NULL, "
+    "duplicate_of = NULL, kind = CASE WHEN kind IN ('duplicate', 'canceled') "
+    "THEN 'unknown' ELSE kind END")
+
+
 class Store:
     def __init__(self, store_dir: Path, memory_limit_gb: int | None = None,
                  keep_warm: bool = False, temp_dir: Path | None = None,
@@ -2479,15 +2493,24 @@ class Store:
         with self.write_lock, self.connect() as con:
             return self._enqueue_one(con, url, dedup_key, parent_id)
 
-    def enqueue_urls(self, pairs: list[tuple[str, str]], parent_id: int | None = None) -> int:
+    def enqueue_urls(self, pairs: list[tuple[str, str]], parent_id: int | None = None,
+                     oversize_limit: int = 0, only_if_expanding: bool = False) -> int | None:
         """Batch enqueue under ONE lock + connection — a 2,000-child index
         expansion must not pay a connection/lock cycle per child. Same
         semantics as enqueue_url per row. Returns how many were newly queued
-        (or revived)."""
+        (or revived). `only_if_expanding`: the children of an index are
+        queued only while the index is still 'expanding' — checked in the
+        same locked step, so "Clear queue" pressed mid-expansion sticks
+        (review 11 item 2.3); None when it no longer is."""
         added = 0
         with self.write_lock, self.connect() as con:
+            if only_if_expanding and parent_id is not None:
+                st = con.execute("SELECT status FROM url_queue WHERE id = ?",
+                                 [parent_id]).fetchone()
+                if not st or st[0] != "expanding":
+                    return None
             for url, dk in pairs:
-                if self._enqueue_one(con, url, dk, parent_id) is not None:
+                if self._enqueue_one(con, url, dk, parent_id, oversize_limit) is not None:
                     added += 1
         return added
 
@@ -2582,10 +2605,10 @@ class Store:
                 return []
 
     def _enqueue_one(self, con: duckdb.DuckDBPyConnection, url: str, dedup_key: str,
-                     parent_id: int | None) -> int | None:
+                     parent_id: int | None, oversize_limit: int = 0) -> int | None:
         exists = con.execute(
-            "SELECT id, status FROM url_queue WHERE dedup_key = ? LIMIT 1", [dedup_key]
-        ).fetchone()
+            "SELECT id, status, kind, bytes_total FROM url_queue WHERE dedup_key = ? LIMIT 1",
+            [dedup_key]).fetchone()
         if exists:
             # Re-adding a failed/over-size link retries it (a fresh URL may
             # carry a new signature; or the user raised confirm_over_gb). A
@@ -2596,10 +2619,24 @@ class Store:
             # inheriting an old "download anyway".
             retryable = (("failed", "oversize") if parent_id is not None
                          else ("failed", "skipped", "oversize"))
-            if exists[1] in retryable:
+            revive = exists[1] in retryable
+            if revive and exists[1] == "oversize" and parent_id is not None:
+                # a re-expansion revives an over-size child only when its
+                # known size now fits: it re-checked the size (and a chunked
+                # one downloaded up to the limit again) every month (review
+                # 11 item 2.9)
+                revive = bool(oversize_limit) and 0 < int(exists[3] or 0) <= oversize_limit
+            if not revive and exists[1] == "done" and parent_id is None \
+                    and exists[2] in ("toc", "page"):
+                # a pasted index / page again: it carries no rates (it anchors
+                # no duplicate check), so it is fetched and expanded again —
+                # how a capped index takes the files past the cap once
+                # max_toc_files is raised (review 11 item 2.1)
+                revive = True
+            if revive:
                 con.execute(
                     "UPDATE url_queue SET url = ?, status = 'queued', error = NULL, "
-                    "progress = 0, bytes_done = 0, force_size = false WHERE id = ?",
+                    f"force_size = false, {REQUEUE_RESET} WHERE id = ?",
                     [url, exists[0]],
                 )
                 return exists[0]
@@ -2631,8 +2668,12 @@ class Store:
         idles while small files wait). None: the plain order."""
         big = (f"(coalesce(big_lane, false) OR coalesce(bytes_total, 0) > {int(lane_bytes)})")
         if lane in ("small", "small_only"):
-            rec = self._claim_next("queued", "downloading", where=f"NOT {big}",
-                                   order="(coalesce(bytes_total, 0) = 0), ")
+            # a provider reference list first by its name: rate files loaded
+            # before it skip their groups until it lands (review 11 item 2.8)
+            rec = self._claim_next(
+                "queued", "downloading", where=f"NOT {big}",
+                order="(NOT regexp_matches(lower(url), 'provider[-_ ]?ref|reference')), "
+                      "(coalesce(bytes_total, 0) = 0), ")
             if rec is not None:
                 return rec
             # nothing small (or unsized) is waiting: help with the big files
@@ -2679,7 +2720,7 @@ class Store:
         allowed = {"kind", "status", "filename", "bytes_total", "bytes_done",
                    "progress", "rows_emitted", "child_count", "error", "parent_id",
                    "content_sha", "park_count", "duplicate_of", "big_lane",
-                   "server_validator", "server_size", "revalidate"}
+                   "server_validator", "server_size", "revalidate", "retries"}
         fields = {k: v for k, v in fields.items() if k in allowed}
         terminal = fields.get("status") in ("done", "failed", "skipped", "oversize")
         if terminal:
@@ -2770,7 +2811,9 @@ class Store:
         slices = (
             ("status IN ('downloading', 'expanding', 'ingesting', 'fetched')", "id"),
             ("parent_id IS NULL", "id DESC"),
-            (f"parent_id IS NOT NULL AND status IN {actionable}", "id DESC"),
+            # actionable rows WHATEVER their parent: past 500 pasted links a
+            # failed / too-big / parked pasted row had no button (review 11 2.7)
+            (f"status IN {actionable}", "id DESC"),
             ("parent_id IS NOT NULL AND status = 'done'",
              "finished_at DESC NULLS LAST, id DESC"),
             ("parent_id IS NOT NULL AND status = 'queued'", "coalesce(retries, 0), id"),
@@ -3188,7 +3231,7 @@ class Store:
                 con.execute(
                     "UPDATE url_queue SET status = 'queued', "
                     "error = 'the identical link this deferred to failed — "
-                    "retrying (from the kept download when still present)' "
+                    f"retrying (from the kept download when still present)', {REQUEUE_RESET} "
                     "WHERE content_sha = ? AND status = 'skipped' "
                     "AND kind = 'duplicate' AND id != ?",
                     [content_sha, failed_id])
@@ -3338,16 +3381,29 @@ class Store:
         if allowed_from is None:
             return False
         with self.write_lock, self.connect() as con:
-            r = con.execute("SELECT status FROM url_queue WHERE id = ?", [url_id]).fetchone()
-            if not r or r[0] not in allowed_from:
+            r = con.execute("SELECT status, kind FROM url_queue WHERE id = ?",
+                            [url_id]).fetchone()
+            # a done INDEX / page may be fetched again (it anchors no duplicate
+            # check): its "press retry on this row" is a real button now
+            # (review 11 item 2.1)
+            if not r or not (r[0] in allowed_from or (
+                    status == "queued" and r[0] == "done" and r[1] in ("toc", "page"))):
                 return False
-            con.execute(
-                "UPDATE url_queue SET status = ?, error = NULL, progress = 0, bytes_done = 0, "
+            if status == "queued":
                 # plain retry must NOT inherit a prior "download anyway" — that
                 # override is one-shot; only force_size_requeue re-sets it
-                "force_size = false, retry_after = NULL, park_count = 0, waiting_on = NULL "
-                "WHERE id = ?",
-                [status, url_id])
+                con.execute(
+                    "UPDATE url_queue SET status = 'queued', error = NULL, force_size = false, "
+                    f"{REQUEUE_RESET} WHERE id = ?", [url_id])
+            else:
+                con.execute(
+                    "UPDATE url_queue SET status = ?, error = NULL, progress = 0, "
+                    "bytes_done = 0, force_size = false, retry_after = NULL, park_count = 0, "
+                    # a row the USER skipped is never revived automatically —
+                    # only kind 'duplicate' rows are (review 11 item 4.1)
+                    "kind = CASE WHEN kind = 'duplicate' THEN 'unknown' ELSE kind END, "
+                    "waiting_on = NULL, finished_at = ? WHERE id = ?",
+                    [status, _utcnow(), url_id])
             return True
 
     def done_rate_rows(self, dedup_keys: list[str]) -> list[dict]:
@@ -3371,9 +3427,8 @@ class Store:
             return 0
         with self.write_lock, self.connect() as con:
             n = con.execute(
-                "UPDATE url_queue SET status = 'queued', error = ?, progress = 0, "
-                "bytes_done = 0, retry_after = NULL, park_count = 0, waiting_on = NULL, "
-                "auto_resumes = 0, force_size = false, revalidate = ? "
+                "UPDATE url_queue SET status = 'queued', error = ?, force_size = false, "
+                f"revalidate = ?, {REQUEUE_RESET} "
                 "WHERE id IN (SELECT unnest(?::BIGINT[])) AND status = 'done' RETURNING id",
                 [reason, int(revalidate), list(ids)]).fetchall()
         return len(n)
@@ -3389,9 +3444,8 @@ class Store:
             if not row:
                 return False
             con.execute(
-                "UPDATE url_queue SET status = 'queued', error = ?, progress = 0, "
-                "bytes_done = 0, retry_after = NULL, park_count = 0, waiting_on = NULL, "
-                "revalidate = 2 WHERE id = ?", [reason, row[0]])
+                "UPDATE url_queue SET status = 'queued', error = ?, force_size = false, "
+                f"revalidate = 2, {REQUEUE_RESET} WHERE id = ?", [reason, row[0]])
             return True
 
     def force_size_requeue(self, url_id: int) -> bool:
@@ -3406,7 +3460,7 @@ class Store:
                 return False
             con.execute(
                 "UPDATE url_queue SET status = 'queued', force_size = true, error = NULL, "
-                "progress = 0, bytes_done = 0 WHERE id = ?", [url_id])
+                f"{REQUEUE_RESET} WHERE id = ?", [url_id])
             return True
 
     def requeue_urls(self, urls: list[str]) -> int:
@@ -3422,9 +3476,9 @@ class Store:
             if n:
                 con.execute(
                     "UPDATE url_queue SET status = 'queued', error = NULL, "
-                    "retries = coalesce(retries, 0) + 1, progress = 0, bytes_done = 0, "
-                    "force_size = false, revalidate = CASE WHEN status = 'done' THEN 1 "
-                    "ELSE 0 END WHERE url IN (SELECT unnest(?::VARCHAR[])) "
+                    "retries = coalesce(retries, 0) + 1, force_size = false, "
+                    "revalidate = CASE WHEN status = 'done' THEN 1 ELSE 0 END, "
+                    f"{REQUEUE_RESET} WHERE url IN (SELECT unnest(?::VARCHAR[])) "
                     "AND status IN ('done', 'failed', 'skipped')", [list(urls)])
         return n
 
@@ -3505,10 +3559,10 @@ class Store:
             if n:
                 # paused rows too: pressing retry means "now", not tomorrow
                 con.execute(
-                    "UPDATE url_queue SET status = 'queued', error = NULL, retry_after = NULL, "
-                    "retries = coalesce(retries, 0) + 1, park_count = 0, "
+                    "UPDATE url_queue SET status = 'queued', error = NULL, "
+                    "retries = coalesce(retries, 0) + 1, "
                     # bulk retry never inherits a one-shot "download anyway"
-                    "progress = 0, bytes_done = 0, force_size = false, waiting_on = NULL "
+                    f"force_size = false, {REQUEUE_RESET} "
                     "WHERE status IN ('failed', 'paused')"
                 )
         return n
@@ -3562,8 +3616,8 @@ class Store:
             n = con.execute("SELECT count(*) FROM url_queue WHERE status = 'skipped' "
                             "AND kind = 'canceled'").fetchone()[0]
             if n:
-                con.execute("UPDATE url_queue SET status = 'queued', kind = 'unknown', "
-                            "error = NULL, waiting_on = NULL "
+                con.execute("UPDATE url_queue SET status = 'queued', error = NULL, "
+                            f"force_size = false, {REQUEUE_RESET} "
                             "WHERE status = 'skipped' AND kind = 'canceled'")
         return n
 
@@ -3616,8 +3670,8 @@ class Store:
                 # 0, which "fit" every limit — an 8 GB chunked file re-
                 # downloaded 5 GB and tripped oversize on every restart
                 con.execute(
-                    "UPDATE url_queue SET status = 'queued', error = NULL "
-                    "WHERE status = 'oversize' AND bytes_total > 0 "
+                    "UPDATE url_queue SET status = 'queued', error = NULL, force_size = false, "
+                    f"{REQUEUE_RESET} WHERE status = 'oversize' AND bytes_total > 0 "
                     "AND bytes_total <= ?", [limit_bytes])
         return n
 

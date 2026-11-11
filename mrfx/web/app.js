@@ -4408,6 +4408,11 @@ async function loadUrlQueue() {
     if (u.status === "paused") {
       statusCell += ` <button class="btn" style="padding:1px 8px;font-size:11.5px" title="don't wait — try this download again right now" data-url-retry="${u.id}">try now</button>`;
     }
+    // a finished index / page can be read again (it holds no rates): how a
+    // capped list takes the files past the cap once max_toc_files is raised
+    if (u.status === "done" && (u.kind === "toc" || u.kind === "page")) {
+      statusCell += ` <button class="btn" style="padding:1px 8px;font-size:11.5px" title="read this list again and queue any files not taken yet (files already loaded are not downloaded again)" data-url-retry="${u.id}">retry</button>`;
+    }
     // over the size ceiling? offer a one-click "download anyway"
     // (the disk-space guard still protects the drive)
     if (u.status === "oversize" ||

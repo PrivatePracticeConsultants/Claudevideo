@@ -58,6 +58,33 @@ _VOLATILE_IF_SIGNED = re.compile(
 )
 _SIGNATURE_MARKERS = re.compile(
     r"^(sig|signature|x-amz-signature|x-amz-credential|awsaccesskeyid|key-pair-id)$", re.I)
+# the S3 SigV4 query params themselves; any OTHER x-amz-* (x-amz-meta-file=2)
+# can name the file (review 11 item 2.10)
+_AMZ_SIGNING = re.compile(
+    r"^x-amz-(algorithm|credential|date|expires|signature|security-token|signedheaders"
+    r"|content-sha256|user-agent)$", re.I)
+# names the signing schemes use that payers ALSO use for the file's identity
+# (?token=<file-id>, ?st=NY, ?policy=A): stripped only when the VALUE looks
+# like a signature part — long, a JWT, or a timestamp (review 11 item 2.10)
+_AMBIGUOUS = re.compile(r"^(token|st|policy)$", re.I)
+
+
+def _looks_signed_value(v: str) -> bool:
+    v = unquote(v)
+    return (len(v) >= 20 or v.count(".") >= 2
+            or bool(re.match(r"^\d{4}-\d{2}-\d{2}", v)) or bool(re.match(r"^\d{9,}$", v)))
+
+
+def _volatile(k: str, v: str, signed: bool) -> bool:
+    if _AMBIGUOUS.match(k):
+        if k.lower() == "policy" or signed:
+            return _looks_signed_value(v)
+        return False
+    if k.lower().startswith("x-amz-"):
+        return bool(_AMZ_SIGNING.match(k))
+    if _VOLATILE_ALWAYS.match(k):
+        return True
+    return signed and bool(_VOLATILE_IF_SIGNED.match(k))
 
 
 def dedup_key(url: str) -> str:
@@ -68,12 +95,7 @@ def dedup_key(url: str) -> str:
     parts = urlsplit(url)
     pairs = [p.partition("=") for p in parts.query.split("&") if p]
     signed = any(_SIGNATURE_MARKERS.match(k) for k, _, _ in pairs if k)
-    kept = sorted(
-        f"{k}={v}"
-        for k, _, v in pairs
-        if k and not _VOLATILE_ALWAYS.match(k)
-        and not (signed and _VOLATILE_IF_SIGNED.match(k))
-    )
+    kept = sorted(f"{k}={v}" for k, _, v in pairs if k and not _volatile(k, v, signed))
     query = ("?" + "&".join(kept)) if kept else ""
     return f"{parts.scheme.lower()}://{parts.netloc.lower()}{parts.path}{query}"
 
@@ -738,14 +760,22 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
         except Exception:  # noqa: BLE001 — a check failure must not crash the download
             return False
 
-    def too_big(n: int) -> DownloadError:
-        return DownloadError(
-            f"file is {n / 1e9:.1f} GB — larger than the confirm_over_gb "
+    def too_big(n: int, known: bool = True) -> DownloadError:
+        what = (f"file is {n / 1e9:.1f} GB" if known else
+                f"the server did not say how big this file is, and it passed "
+                f"{n / 1e9:.1f} GB")
+        e_big = DownloadError(
+            f"{what} — larger than the confirm_over_gb "
             f"safety limit ({(max_bytes or 0) / 1e9:.1f} GB). Press "
             "\"download anyway\" on this row to ingest it, or raise "
             "confirm_over_gb in config/mrfx.yaml for all files.",
             retryable=False, oversize=True,
         )
+        # the row records the size so raising confirm_over_gb re-queues it
+        # (review 11 item 2.2); an unknown size stays 0 — "fits" would
+        # re-download up to the limit on every start
+        e_big.total = n if known else None
+        return e_big
 
     verify_override = None
     tried_chain_repair = False
@@ -1116,7 +1146,7 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                                     "drive). Free up space and press retry — it resumes "
                                     "where it stopped.", retryable=False)
                         if max_bytes and done > max_bytes:
-                            raise too_big(done)  # no Content-Length header case
+                            raise too_big(done, known=False)  # no Content-Length
                         # enforce the wall-clock cap MID-STREAM too: a single slow
                         # attempt that trickles bytes stays inside this loop for
                         # hours and would never reach the loop-top check. Raise
@@ -2623,7 +2653,11 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict, lane_max: int = 0
             # days"). Requeued, it resumes from its .part on the next pass.
             # It cannot spin: a file that STOPS progressing trips the stall
             # deadline instead, which is a real failure and ends it.
-            store.update_url(url_id, status="queued", error=str(e))
+            # behind the files waiting (the fair tier): requeued with no bump,
+            # the claim order handed this slot straight back to it — "so other
+            # files get a turn" was false (review 11 item 2.11)
+            store.update_url(url_id, status="queued", error=str(e),
+                             retries=int(rec.get("retries") or 0) + 1)
             log.info("url %s: %s", url, e)
             return False
         if e.parked:
@@ -2669,7 +2703,8 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict, lane_max: int = 0
         # every routine park logged two warnings)
         log.warning("url %s download stopped: %s", url, e)
         store.update_url(url_id, status="oversize" if e.oversize else "failed",
-                         error=_failure_message(store, rec, e))
+                         error=_failure_message(store, rec, e),
+                         **({"bytes_total": int(e.total)} if e.oversize and e.total else {}))
         # duplicates may have deferred to this row in an earlier life (it
         # ingested once, failed, was retried, and now its signed URL is dead):
         # they hold the kept bytes and must get their promised auto-retry
@@ -2758,11 +2793,16 @@ def _refresh_loaded_children(cfg: MrfxConfig, store: Store, urls: list[str],
     return n
 
 
-def _enqueue_children(store: Store, urls: list[str], parent_id: int) -> int:
+def _enqueue_children(store: Store, urls: list[str], parent_id: int,
+                      cfg: MrfxConfig | None = None, only_if_expanding: bool = False) -> int | None:
     """Queue discovered child URLs under their parent row; returns how many
-    were newly queued. One lock/connection for the whole batch — thousands of
+    were newly queued (None: the parent was cleared meanwhile — nothing
+    queued). One lock/connection for the whole batch — thousands of
     children from one index must not thrash the store."""
-    return store.enqueue_urls([(u, dedup_key(u)) for u in urls], parent_id=parent_id)
+    return store.enqueue_urls(
+        [(u, dedup_key(u)) for u in urls], parent_id=parent_id,
+        oversize_limit=int(cfg.confirm_over_gb * 1e9) if cfg is not None else 0,
+        only_if_expanding=only_if_expanding)
 
 
 def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=None,
@@ -2820,7 +2860,8 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
                 return False
             log.warning("url %s download stopped: %s", url, e)
             store.update_url(url_id, status="oversize" if e.oversize else "failed",
-                             error=_failure_message(store, rec, e))
+                             error=_failure_message(store, rec, e),
+                             **({"bytes_total": int(e.total)} if e.oversize and e.total else {}))
             _maybe_queue_prev_month(store, rec, str(e))
             # a failed re-download may strand twins that deferred to this row
             # on a PREVIOUS attempt (its sha is still on the record)
@@ -2908,7 +2949,16 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
             unlink_with_retry(dest)
             unlink_with_retry(_meta_path(dest))  # its sidecar too (review 11 2.15)
             return False
-        added = _enqueue_children(store, child_urls, url_id)
+        added = _enqueue_children(store, child_urls, url_id, cfg, only_if_expanding=True)
+        if added is None:
+            # the user pressed "Clear queue" while this index was being read:
+            # its files are not queued and the row keeps the user's status
+            # (review 11 item 2.3 — the expansion used to finish, queue every
+            # child and overwrite the skip with 'done')
+            log.info("%s — cleared while it was being read; its files were not queued", url)
+            unlink_with_retry(dest)
+            unlink_with_retry(_meta_path(dest))
+            return False
         added += _refresh_loaded_children(cfg, store, child_urls, int(rec.get("revalidate") or 0))
         # which PLANS each queued file serves — the dimension that stops a
         # payer's narrow-network and broad-PPO books blending into one median.
@@ -2996,7 +3046,7 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
                 except RenderBrowserMissing:
                     browser_missing = True
             if links:
-                added = _enqueue_children(store, links, url_id)
+                added = _enqueue_children(store, links, url_id, cfg)
                 log.info("%s — web page: found %d file links, %d newly queued", url, len(links), added)
                 store.update_url(url_id, status="done", kind="page", child_count=len(links),
                                  error=cap_note(cfg.max_toc_files) if trunc.get("truncated") else None)
@@ -3017,7 +3067,7 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
             if links:
                 unlink_with_retry(dest)
                 unlink_with_retry(_meta_path(dest))  # its sidecar too (review 11 2.15)
-                added = _enqueue_children(store, links, url_id)
+                added = _enqueue_children(store, links, url_id, cfg)
                 log.info("%s — link container: %d file links, %d newly queued", url, len(links), added)
                 store.update_url(url_id, status="done", kind="page", child_count=len(links),
                                  error=cap_note(cfg.max_toc_files) if trunc.get("truncated") else None)
@@ -3405,6 +3455,21 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                     # (was: re-query every 0.5 s, forever, on 6 threads)
                     store.wait_queue_change(epoch, QUEUE_IDLE_WAIT_SECONDS)
                     continue
+                if lane in ("small", "small_only") and not int(rec.get("bytes_total") or 0) \
+                        and not rec.get("big_lane") and rec.get("kind") not in ("toc", "page"):
+                    # sizes are unknown on a fresh queue, so the small-file
+                    # slots took the first unsized BIG file and a 5 KB provider
+                    # list waited behind fifty shards (review 11 item 2.8). One
+                    # 1-byte request sizes the row before any body is fetched;
+                    # a big one goes back for a big slot (no GET wasted)
+                    probe = _server_now(cfg, rec["url"])
+                    size = int((probe or {}).get("total") or 0)
+                    if size > lane_bytes:
+                        store.update_url(rec["id"], status="queued", bytes_total=size,
+                                         big_lane=True)
+                        continue
+                    if size:
+                        store.update_url(rec["id"], bytes_total=size)
                 holding[threading.current_thread().name] = rec["id"]
                 try:
                     # lanes decide which row a slot CLAIMS, never whether a
