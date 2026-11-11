@@ -865,6 +865,7 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
     # the connection sat idle meanwhile, inviting the next reset). Re-hashed
     # from disk only when the .part isn't exactly what we hashed.
     sha_carry: tuple | None = None   # (hasher, bytes hashed)
+    early_probe: int | None = None   # a chunked body's size, from one probe
     # byte offsets where this download joined a resume the server did NOT
     # vouch for with a validator (see _splice_agrees)
     splices: list[int] = []
@@ -1113,10 +1114,21 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                         sha.update(chunk)
                         done += len(chunk)
                         sha_carry = (sha, done)
-                        if next_early and total and total > next_early \
+                        early_total = total
+                        if next_early and not total and done >= next_early \
+                                and early_probe is None:
+                            # no Content-Length (chunked): a copy of a loaded
+                            # file downloaded in full before the full sha said
+                            # so (review 11 item 3.7). One 1-byte range request
+                            # names the size, and the early check runs
+                            pr = _probe_ranges(cfg, str(resp.url), ua_override)
+                            early_probe = pr[0] if pr else 0
+                        if not early_total and early_probe:
+                            early_total = early_probe
+                        if next_early and early_total and early_total > next_early \
                                 and done >= next_early:
                             f.flush()
-                            v = early_check(part, total, str(resp.url), ua_override,
+                            v = early_check(part, early_total, str(resp.url), ua_override,
                                             verify_override)
                             next_early = 0
                             if isinstance(v, int) and not isinstance(v, bool):
@@ -2424,7 +2436,7 @@ def _apply_verdict(cfg: MrfxConfig, store: Store, url_id: int, url: str, dest: P
         part.unlink(missing_ok=True)
         Path(str(part) + ".val").unlink(missing_ok=True)
         store.update_url(url_id, status="skipped", kind="duplicate", duplicate_of=twin, error=(
-            f"identical to {_twin_label(store, twin)}, already loaded — same size, same "
+            f"checksum-equal to {_twin_label(store, twin)}, already loaded — same size, same "
             f"first {cfg.early_dedup_mb} MB, same last 1 MB and 8 samples between, and "
             "compressed (its end carries a checksum of the whole file) — skipped after "
             f"{got / 1e6:,.1f} MB instead of downloading the whole file (payers host "
@@ -3360,6 +3372,11 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
         log.info("updating analytics rollups (%d newly ingested file(s))...", n)
         try:
             try:
+                if not store.rollups_ever_built():
+                    # a fresh store: the incremental's precondition (a prior
+                    # full build) cannot hold — go straight to the full build
+                    # instead of raising through it (review 11 item 3.1)
+                    raise RuntimeError("first analytics build of this store")
                 # payer-slice update: cost scales with the new files' payers,
                 # not the whole store (an hour-long full scan on a big book)
                 r = store.update_rollups_incremental(skip_if_busy=True)

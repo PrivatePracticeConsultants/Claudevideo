@@ -437,6 +437,33 @@ def _finish_file(cfg: MrfxConfig, path: Path, ok: bool) -> None:
 _PARSE_POOL = None
 
 
+PARENT_WATCH_SECONDS = 3.0
+
+
+def _worker_watch_parent(parent_pid: int) -> None:
+    """Pool initializer: every parser worker ends itself when the process that
+    started it is gone. The liveness check inside a parse ran only on a chunk
+    change (never after the first report for a file under 64 MB) and an IDLE
+    worker blocks on the pool's queue — killed servers left workers alive for
+    good, ~220 MB each (review 11 item 3.3). Not PR_SET_PDEATHSIG: it fires
+    when the THREAD that spawned the worker ends (a replaced processor
+    thread), which would kill a healthy parse."""
+    import threading as _th
+
+    def watch() -> None:
+        from .store import _pid_alive
+        while True:
+            time.sleep(PARENT_WATCH_SECONDS)
+            try:
+                gone = (os.getppid() != parent_pid) if os.name == "posix" \
+                    else not _pid_alive(parent_pid)
+            except Exception:  # noqa: BLE001 — never kill a worker on a probe error
+                gone = False
+            if gone:
+                os._exit(0)
+    _th.Thread(target=watch, name="mrfx-parent-watch", daemon=True).start()
+
+
 class ParsePoolManager:
     """Self-healing wrapper around a ProcessPoolExecutor. If a worker process
     dies (OOM killer, crash, someone kills it), the executor is permanently
@@ -456,7 +483,8 @@ class ParsePoolManager:
 
         return concurrent.futures.ProcessPoolExecutor(
             max_workers=self._max_workers,
-            mp_context=multiprocessing.get_context("spawn"))
+            mp_context=multiprocessing.get_context("spawn"),
+            initializer=_worker_watch_parent, initargs=(os.getpid(),))
 
     def submit(self, fn, *args):
         with self._lock:

@@ -2429,7 +2429,12 @@ class Store:
                             [json.dumps(doomed)])
         if rows_written:
             try:
-                replace_with_retry(tmp, path)
+                # this runs under write_lock: a lock held by an export or
+                # antivirus kept EVERY claim and status write waiting up to the
+                # full ~90 s retry budget (review 11 item 3.5). Try for ~1.4 s,
+                # then park the finished part — _retry_pending_part_ops swaps
+                # it in at the next rollup / open
+                replace_with_retry(tmp, path, attempts=4)
             except PermissionError:
                 park = f".{file_key(source_file)}.parked"
                 replace_with_retry(tmp, self.rates_dir / park)
@@ -3891,7 +3896,9 @@ class Store:
                 continue
             old = self._part_payers_for_removal(dst)
             try:
-                replace_with_retry(src, dst)
+                # a short try: this runs at every rollup and open, and a part
+                # still held open must not stall the rollup ~90 s each time
+                replace_with_retry(src, dst, attempts=3)
             except OSError:
                 still_parked[park] = name
                 continue
@@ -4089,6 +4096,15 @@ class Store:
                      "downloads and parsing continue meanwhile)",
                      (time.monotonic() - t_wait) / 60)
         return True
+
+    def rollups_ever_built(self) -> bool:
+        """Has a full rollup build ever completed on this store (the
+        incremental update's precondition)?"""
+        try:
+            with self.connect() as con:
+                return bool(self._meta_get(con, "rollup_schema_version"))
+        except duckdb.Error:
+            return True     # can't tell: let the incremental decide
 
     def update_rollups_incremental(self, skip_if_busy: bool = False) -> float:
         """Incremental alternative to rebuild_rollups(): recompute ONLY the

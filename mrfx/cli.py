@@ -412,8 +412,11 @@ def cmd_add(cfg: MrfxConfig, args) -> int:
 
     from .fetch import add_urls, run_queue
 
+    # keep_warm: a drain makes thousands of small queue writes; a fresh
+    # connection each cost 12.6 ms and held write_lock 14.9 % of the wall
+    # (review 11 item 3.4) — the pinned store `serve` uses
     store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir,
-                  auto_spill=True)  # drains/rebuilds rollups — rollup-heavy
+                  auto_spill=True, keep_warm=True)  # drains/rebuilds rollups
     store.recover_stuck_files()  # no server owns the store — safe to recover
     counts = add_urls(store, urls)
     print(f"queued {counts['added']} URL(s) "
@@ -616,7 +619,7 @@ def cmd_ingest(cfg: MrfxConfig, args) -> int:
     # auto_spill: a CLI ingest of a directory can trigger big rollups, so let it
     # route spill to a fast disk too (same as serve)
     store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir,
-                  auto_spill=True)
+                  auto_spill=True, keep_warm=True)   # pinned, like serve (review 11 3.4)
     store.recover_stuck_files()  # crashed 'processing' rows re-ingest this pass
     path = Path(args.path) if args.path else cfg.inbox_dir
     bar = _make_cli_progress()

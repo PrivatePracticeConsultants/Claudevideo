@@ -720,3 +720,160 @@ def test_a_provider_list_arriving_for_a_file_that_is_gone_says_so(cfg, store):
     err = q(store, "SELECT error FROM files WHERE filename = 'ref_rates_2026-05.json'")[0][0]
     assert err and "drop this file in again" in err
 
+
+# ------------------------------------------------ Group 3: work done twice --
+
+def test_inbox_ingest_reads_the_file_about_twice_not_three_times(cfg, store, monkeypatch):
+    """3.2 (ingest/s9b_opens): the parse, then file_fingerprint and hash_file
+    read it again. was: 2.49x on a 35 MB real file; 3.4x on this one."""
+    import builtins
+    import io
+    import random
+    pad = random.Random(3).randbytes(1_500_000)        # incompressible: ~3 MB gz
+    p = cfg.inbox_dir / "reads.json.gz"
+    p.write_bytes(gzip.compress(rate_doc(n=50)[:-1] + b', "zpad": "' + pad.hex().encode()
+                                + b'"}', mtime=0))
+    size = p.stat().st_size
+    read = {"n": 0}
+    real_open = builtins.open
+
+    class Counting(io.FileIO):
+        def readinto(self, b):
+            n = super().readinto(b)
+            read["n"] += n or 0
+            return n
+
+    def spy(file, mode="r", *a, **k):
+        if str(file) == str(p) and "r" in mode and "b" in mode:
+            return io.BufferedReader(Counting(file, "rb"))
+        return real_open(file, mode, *a, **k)
+    monkeypatch.setattr(builtins, "open", spy)
+    from mrfx.ingest import ingest_file
+    assert ingest_file(cfg, store, p)["status"] == "done"
+    monkeypatch.setattr(builtins, "open", real_open)
+    # the identity pass + the parse = 2x, plus the sniff's 1 MB header windows
+    # (this hex filler inflates only ~2:1, so they cost ~0.8x here; 0.003x on
+    # the 35 MB real file, where s9b_opens measures 2.49x -> 2.01x)
+    assert read["n"] / size < 3.0, read["n"] / size
+
+
+_WATCH_DRIVER = """
+import os, sys, time
+sys.path.insert(0, {root!r})
+from mrfx.ingest import ParsePoolManager
+if __name__ == "__main__":
+    pool = ParsePoolManager(1)
+    print(pool.submit(os.getpid).result(), flush=True)
+    time.sleep(120)
+"""
+
+
+def test_parser_workers_end_when_their_parent_is_killed(tmp_path):
+    """3.3 (ingest/s4b_orphans): an idle worker blocked on the pool queue
+    forever after a hard kill of the server. was: alive (ppid 1) 15 s later."""
+    import os
+    import subprocess
+    import sys
+    drv = tmp_path / "drv.py"
+    drv.write_text(_WATCH_DRIVER.format(root=str(Path(__file__).resolve().parents[2])))
+    proc = subprocess.Popen([sys.executable, str(drv)], stdout=subprocess.PIPE, text=True)
+    try:
+        wpid = int(proc.stdout.readline())
+        proc.kill()
+        proc.wait()
+        deadline = time.monotonic() + 15
+        alive = True
+        while time.monotonic() < deadline:
+            try:
+                os.kill(wpid, 0)
+            except ProcessLookupError:
+                alive = False
+                break
+            time.sleep(0.25)
+        assert not alive
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
+def test_cli_drains_open_the_store_pinned(cfg, monkeypatch):
+    """3.4: `mrfx ingest` / `mrfx add` (no dashboard) opened the store without
+    keep_warm — 12.6 ms per connection, write_lock held 14.9 % of the wall.
+    was: keep_warm absent."""
+    import argparse
+
+    from mrfx import cli
+    seen = {}
+
+    class Stop(Exception):
+        pass
+
+    def fake(*a, **k):
+        seen.update(k)
+        raise Stop
+    monkeypatch.setattr(cli, "Store", fake)
+    monkeypatch.setattr(cli, "_something_owns_the_port", lambda *a, **k: False)
+    with pytest.raises(Stop):
+        cli.cmd_ingest(cfg, argparse.Namespace(path=None, force=False))
+    assert seen.get("keep_warm") is True
+
+
+def test_a_part_swap_held_open_parks_instead_of_holding_the_lock(cfg, store, monkeypatch):
+    """3.5: finalize_rates_part held write_lock through replace_with_retry's
+    ~90 s loop while another program held the old part. was: ~85 s."""
+    (cfg.inbox_dir / "a.json.gz").write_bytes(gz(rate_doc(n=3)))
+    scan_inbox(cfg, store)
+    real = Path.replace
+
+    def locked(self, target):
+        if str(target).endswith(".parquet") and not str(target).endswith(".tmp"):
+            raise PermissionError(32, "being used by another process")
+        return real(self, target)
+    import shutil
+    part = next(store.rates_dir.glob("*.parquet"))
+    tmp = part.with_name(".replacement.parquet.tmp")
+    shutil.copy(part, tmp)
+    monkeypatch.setattr(Path, "replace", locked)
+    t0 = time.monotonic()
+    with store.write_lock:              # what finalize_rates_part holds
+        store._swap_in_part("a.json.gz", tmp, part, 3)
+    assert time.monotonic() - t0 < 5
+    with store.connect() as con:
+        assert json.loads(store._meta_get(con, "parked_parts") or "{}")
+
+
+def test_a_chunked_copy_of_a_loaded_file_is_skipped_early(cfg, store, srv):
+    """3.7 + 3.8 (download/c03 early_dedup chunked twin): no Content-Length
+    meant no early check. was: downloaded in full (every byte), then skipped
+    by the full sha."""
+    import random
+    pad = random.Random(5).randbytes(1_500_000).hex().encode()
+    body = gzip.compress(rate_doc(n=50)[:-1] + b', "zpad": "' + pad + b'"}', mtime=0,
+                         compresslevel=1)
+    cfg.early_dedup_mb = 1
+    s = srv({"/a.json.gz": lambda req: ranged(body, req),
+             "/b.json.gz": lambda req: (
+                 ranged(body, req) if req.headers.get("Range")
+                 else (200, {"Transfer-Encoding": "chunked"}, body, None, 0.01))})
+    (cfg.inbox_dir / "a_loaded.json.gz").write_bytes(body)
+    scan_inbox(cfg, store)
+    fetch.add_urls(store, [s.base + "/b.json.gz"])
+    drain(cfg, store)
+    row = q(store, "SELECT status, kind, error FROM url_queue")[0]
+    assert row[:2] == ("skipped", "duplicate") and "checksum-equal" in row[2]
+    assert "instead of downloading the whole file" in row[2]
+
+
+def test_a_fresh_store_goes_straight_to_the_full_rollup(cfg, store, srv, monkeypatch):
+    """3.1 (throughput default_warm): every fresh store's first rebuild raised
+    through update_rollups_incremental first. was: incremental attempted."""
+    body = gz(rate_doc())
+    s = srv({"/f.json.gz": lambda req: ranged(body, req)})
+    calls = []
+    real = store.update_rollups_incremental
+    monkeypatch.setattr(store, "update_rollups_incremental",
+                        lambda *a, **k: calls.append(1) or real(*a, **k))
+    fetch.add_urls(store, [s.base + "/f.json.gz"])
+    drain(cfg, store)
+    assert calls == [] and store.rollups_ever_built()
+
