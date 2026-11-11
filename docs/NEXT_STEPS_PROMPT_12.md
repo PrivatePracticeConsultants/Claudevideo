@@ -47,7 +47,7 @@ Everything below carries the script that reproduces it and what it printed on
 hang, or a user action silently undone; **P2** waste, a misleading message,
 or a documented behaviour the code does not have; **P3** cosmetic.
 
-Full suite on the extracted zip (box shared with four reviewers, so the time is not a number): see the status block of the commit that closes this round; the result at audit time is recorded in `docs/review12_repros/mine/full_suite.txt`.
+Full suite on the extracted zip: **1164 passed, 0 failed, 28:34** (box shared with four reviewers, so the time is an upper bound; `docs/review12_repros/mine/full_suite.txt`). The quick tier on the repo head: 562 passed, 4:50. `tests/mrfx/test_review11.py`: 49 passed.
 
 ---
 
