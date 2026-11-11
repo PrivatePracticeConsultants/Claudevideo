@@ -546,6 +546,13 @@ def _practice_attr_where(market: dict) -> tuple[list, list]:
 # billing_code, tin_value). The version is in the name: change the SQL, bump it.
 PRACTICE_MEDIANS = "practice_medians_v1"
 PAYER_PRACTICE_MEDIANS = "practice_medians_payer_v1"
+# (c) per (discipline, payer, billing_code, tin_value) — the house basis with
+# the discipline LINE filter (a discipline's own lines plus untagged ones,
+# _market_where's rule) applied per discipline. Round 12 item 3: the Rate
+# card's "Visit value in this market" is confined to one discipline; without
+# this table every request was a live GROUP BY over the spine.
+DISC_PAYER_PRACTICE_MEDIANS = "practice_medians_disc_payer_v1"
+DISCIPLINES = ("PT", "OT", "SLP")
 
 
 def _house_eligible(market: dict) -> bool:
@@ -560,6 +567,25 @@ def _house_eligible(market: dict) -> bool:
             and bool(market.get("base_only", True))
             and market.get("billing_class", "professional") == "professional"
             and not market.get("discipline") and not market.get("pos"))
+
+
+def _house_disc_eligible(market: dict) -> bool:
+    """The house basis with ONE discipline (PT / OT / SLP) as the only line
+    filter beyond it — what the per-discipline table holds."""
+    return (market.get("discipline") in DISCIPLINES
+            and _house_eligible({k: v for k, v in market.items() if k != "discipline"}))
+
+
+def _house_disc_table_sql() -> tuple[str, list]:
+    house = {"month": LATEST_MONTH}
+    where, params = _market_where(house, False, False)
+    disc_values = ", ".join(f"('{d}')" for d in DISCIPLINES)
+    return (f"SELECT d.discipline, t.payer, t.billing_code, t.tin_value, "
+            f"median(t.negotiated_rate) AS rate "
+            f"FROM {_rates_relation(house)} t, (VALUES {disc_values}) d(discipline) "
+            f"WHERE {where} AND (t.discipline = d.discipline OR t.discipline = 'unspecified') "
+            f"GROUP BY d.discipline, t.payer, t.billing_code, t.tin_value "
+            f"ORDER BY t.billing_code, t.tin_value, d.discipline, t.payer"), params
 
 
 def _house_table_sql(per_payer: bool) -> tuple[str, list]:
@@ -595,6 +621,20 @@ def practice_base_sql(store: Store, market: dict, *, per_payer: bool = False,
     where, params = _market_where(market, ia, ind)       # validates the market too
     keys = (["t.payer"] if per_payer else []) + ["t.billing_code", "t.tin_value"]
     payers = market.get("payers") or []
+    if per_payer and _house_disc_eligible(market):
+        rel = store.spine_materialised(DISC_PAYER_PRACTICE_MEDIANS, *_house_disc_table_sql())
+        clauses, cparams = ["t.discipline = ?"], [market["discipline"]]
+        if payers:
+            clauses.append(f"t.payer IN ({', '.join('?' for _ in payers)})")
+            cparams += payers
+        attr, attr_params = _practice_attr_where(market)
+        clauses += attr
+        cparams += attr_params
+        join = (" LEFT JOIN tin_directory td USING (tin_value)"
+                if any("td." in c for c in clauses) or "td." in extra else "")
+        sql = (f"SELECT {', '.join(keys)}, t.rate FROM {rel} t{join} "
+               f"WHERE {' AND '.join(clauses)}{extra}")
+        return sql, [*cparams, *extra_params]
     if _house_eligible(market) and (per_payer or len(payers) <= 1):
         use_payer = per_payer or len(payers) == 1
         name = PAYER_PRACTICE_MEDIANS if use_payer else PRACTICE_MEDIANS

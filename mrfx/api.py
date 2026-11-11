@@ -4018,11 +4018,63 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         except (VisitError, BenchmarkError, ValueError, TypeError) as e:
             raise HTTPException(422, str(e))
 
+    # -- "Visit value in this market" (review 12, Group 3) -------------------
+    def _visit_market(body: dict) -> dict:
+        from .visit_market import market_visit_value
+        subject = body.get("subject")
+        return market_visit_value(
+            store, body.get("market") or {}, body.get("lines") or None,
+            str(body["preset"]) if body.get("preset") else None,
+            str(subject) if subject not in (None, "") else None)
+
+    def _visit_market_or_refusal(body: dict) -> tuple[dict | None, str | None]:
+        """For the rate card's printable / CSV: the block, or why not (a
+        refusal never costs the rate card itself)."""
+        from .visit import VisitError
+        if not body.get("visit_market"):
+            return None, None
+        try:
+            return _visit_market(body), None
+        except (VisitError, BenchmarkError, ValueError, TypeError) as e:
+            return None, str(e)
+
+    @app.post("/api/schedule/visit/market")
+    def schedule_visit_market(body: dict = Body(...)):
+        """One standard visit priced at every practice of a state and
+        discipline: mean / median / P25 / P75 per payer and over all payers,
+        and the optional subject's place in each (mrfx/visit_market.py)."""
+        from .visit import VisitError
+        try:
+            return _visit_market(body)
+        except (VisitError, BenchmarkError, ValueError, TypeError) as e:
+            raise HTTPException(422, str(e))
+
+    @app.post("/api/schedule/visit/market.csv", response_class=PlainTextResponse)
+    def schedule_visit_market_csv(body: dict = Body(...)):
+        from .visit import VisitError
+        from .visit_market import to_csv
+        try:
+            return PlainTextResponse("\ufeff" + to_csv(_visit_market(body)), headers={
+                "Content-Disposition": 'attachment; filename="visit_value.csv"'})
+        except (VisitError, BenchmarkError, ValueError, TypeError) as e:
+            raise HTTPException(422, str(e))
+
+    @app.post("/api/report/visitvalue", response_class=HTMLResponse)
+    def report_visit_value(body: dict = Body(...)):
+        from .visit import VisitError
+        from .visit_market import render_report
+        try:
+            return HTMLResponse(render_report(cfg, store, _visit_market(body)))
+        except (VisitError, BenchmarkError, ValueError, TypeError) as e:
+            raise HTTPException(422, str(e))
+
     @app.post("/api/report/ratecard", response_class=HTMLResponse)
     def ratecard_report(body: dict = Body(...)):
         try:
             fs = compute_fee_schedule(store, str(body.get("subject", "")), body.get("market") or {})
-            return HTMLResponse(render_rate_card(cfg, store, fs, payer_scorecard(fs)))
+            vm, why = _visit_market_or_refusal(body)
+            return HTMLResponse(render_rate_card(cfg, store, fs, payer_scorecard(fs),
+                                                 visit_market=vm, visit_market_refusal=why))
         except (BenchmarkError, ValueError, TypeError) as e:
             # ValueError/TypeError: a non-numeric or null volume/percentile in
             # the JSON body — a client input error (422), never a 500.
@@ -4033,6 +4085,12 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         try:
             fs = compute_fee_schedule(store, str(body.get("subject", "")), body.get("market") or {})
             csv_text = fee_schedule_csv(fs, payer_scorecard(fs), store)
+            vm, why = _visit_market_or_refusal(body)
+            if vm is not None:
+                from .visit_market import to_csv
+                csv_text += "\n" + to_csv(vm)
+            elif why:
+                csv_text += f"\n# Visit value in this market: not shown — {why}\n"
             return PlainTextResponse("﻿" + csv_text, headers={  # BOM for Excel
                 "Content-Disposition": 'attachment; filename="rate_card.csv"'})
         except (BenchmarkError, ValueError, TypeError) as e:

@@ -74,6 +74,15 @@ RANKED = [
     ("rate card", "/api/schedule/fee", {"subject": "431000000", "market": MS}),
     ("pitch report", "/api/report/pitch",
      {"subject": "431000000", "market": MS}),
+    # review 12: the Rate card's "Visit value in this market" (screen, printable, CSV)
+    ("visit value in this market", "/api/schedule/visit/market",
+     {"subject": "431000000", "market": {**MS, "discipline": "PT"},
+      "lines": "97110, 15\n97140, 15"}),
+    ("visit value printable", "/api/report/visitvalue",
+     {"subject": "431000000", "market": {**MS, "discipline": "PT"},
+      "lines": "97110, 15\n97140, 15"}),
+    ("visit value csv", "/api/schedule/visit/market.csv",
+     {"market": {**MS, "discipline": "PT"}, "lines": "97110, 15\n97140, 15"}),
 ]
 
 
@@ -86,6 +95,8 @@ def test_a_ranked_list_with_ties_comes_back_in_one_stable_order(
     for _ in range(REPEATS):
         r = c.post(route, json=body)
         assert r.status_code < 500, f"{label}: {r.text[:200]}"
+        if label.startswith("visit value"):     # a real answer, not a refusal
+            assert r.status_code == 200, f"{label}: {r.text[:200]}"
         # the methodology footer stamps a wall-clock minute; that is allowed to
         # move, the ORDER of the rows is not
         import re

@@ -378,7 +378,8 @@ def require_rate_card_content(fee_schedule: dict) -> None:
 
 
 def render_rate_card(cfg: MrfxConfig, store: Store, fee_schedule: dict,
-                     scorecard: dict) -> str:
+                     scorecard: dict, visit_market: dict | None = None,
+                     visit_market_refusal: str | None = None) -> str:
     """Print-ready branded rate card: payer scorecard on top, full fee-schedule
     matrix below (payer columns ordered best→worst). Refuses without a month,
     and refuses to render an empty card."""
@@ -481,6 +482,15 @@ def render_rate_card(cfg: MrfxConfig, store: Store, fee_schedule: dict,
         if has_trend else fee_row(entry)
         for entry in fee_schedule["codes"])
     trend_note = (f"<p class='sub'>{e(SPARK_NOTE)}</p>" if has_trend else "")
+    # the market block (review 12 Group 3): the same dict the screen and the
+    # CSV print from; a refusal is said in its place, never a failed card
+    vm_html = ""
+    if visit_market is not None:
+        from .visit_market import block_html
+        vm_html = block_html(visit_market)
+    elif visit_market_refusal:
+        vm_html = (f"<h2>Visit value in this market</h2>"
+                   f"<p class='sub'>Not shown — {e(visit_market_refusal)}</p>")
     footer = _methodology(store, fee_schedule)
     shared = scorecard.get("shared_codes") or []
     best_line = ((f"Best-paying payer: <b>{e(scorecard['best_payer'])}</b> — ranked on "
@@ -508,6 +518,7 @@ def render_rate_card(cfg: MrfxConfig, store: Store, fee_schedule: dict,
  tr.best {{ background: #eef6ee; }} td.top {{ font-weight: 700; color: #1c6b3a; }}
  .sub .up {{ color: #1c6b3a; font-weight: 600; }} .sub .down {{ color: #b3261e; font-weight: 600; }}
  .sub .thin {{ color: #9a6b00; font-weight: 600; }}
+ tr.allp td {{ font-weight: 700; border-top: 2px solid #d0d5dd; }}
  .geo-warn {{ background: #fbe9d0; border: 1px solid #d99a3a; color: #7a4a00;
              padding: 8px 12px; margin: 10px 0 14px; font-size: 12px; }}
 {SPARK_CSS}
@@ -525,6 +536,7 @@ def render_rate_card(cfg: MrfxConfig, store: Store, fee_schedule: dict,
 <h2>Fee schedule</h2>
 <div class="wrap"><table><thead><tr>{fee_head}</tr></thead><tbody>{fee_html}</tbody></table></div>
 {trend_note}
+{vm_html}
 <footer>METHODOLOGY\n{e(footer)}</footer>
 </body></html>"""
 

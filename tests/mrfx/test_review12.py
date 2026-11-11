@@ -469,3 +469,197 @@ def test_the_stored_row_update_opens_the_dashboard_first(cfg, store, monkeypatch
     s2.close()
     s3 = Store(cfg.store_dir)
     assert q(s3, "SELECT DISTINCT row_rules FROM files") == [(ROW_RULES_VERSION,)]
+
+
+# ------------------------- Group 3: visit value in this market (Rate card) --
+#
+# Hand-worked case. The `ortho` visit = 97110 + 97530 + 97140 + 97112, one
+# unit each, so a practice's visit value = the sum of its four rates. Every
+# practice below is paid ONE rate r on all four codes (value 4r), PT lines (GP),
+# located in MO:
+#
+#   payer A: T1 20, T2 25, T3 30, T4 35, T5 40, T6 45 -> 80 100 120 140 160 180
+#            n 6, mean 130, median 130, P25 105 (pos 1.25), P75 155 (pos 3.75)
+#   payer B: T1 30, T2 30, T3 35, T4 40, T5 50 -> 120 120 140 160 200;
+#            T6 is priced on 97110 / 97530 / 97112 only -> EXCLUDED (1 pair)
+#            n 5, mean 148, median 140, P25 120, P75 160
+#   payer C: T1 10, T2 10 -> 2 practices < 5: suppressed (no numbers, no count)
+#   out of scope: T7 in MO priced by A on OT lines (GO) only; T8 in KS (PT).
+#   all payers, each practice's median of its own payer values (C counts):
+#            T1 med(80,120,40)=80  T2 med(100,120,40)=100  T3 med(120,140)=130
+#            T4 150  T5 180  T6 180 (A only)
+#            n 6, mean 820/6 = 136.67, median 140, P25 107.50, P75 172.50
+#   subject T3: A 120 -> others 80 100 140 160 180: 2 below -> 2/5 = p40, Q2
+#                  (105 <= 120 < 130), vs mean -$10.00 (-7.7%), vs median -$10.00 (-7.7%)
+#               B 140 -> others 120 120 160 200: 2 below -> 2/4 = p50, Q3
+#                  (140 <= 140 < 160), vs mean -$8.00 (-5.4%), vs median $0.00 (+0.0%)
+#               all payers med(120,140) = 130 -> others 80 100 150 180 180: 2/5 = p40,
+#                  Q2 (107.50 <= 130 < 140), vs mean -$6.67 (-4.9%), vs median -$10.00 (-7.1%)
+
+VV_TINS = {f"T{i}": f"{730000000 + i}" for i in range(1, 9)}
+VV_STATE = {**{f"T{i}": "MO" for i in range(1, 8)}, "T8": "KS"}
+ORTHO = ("97110", "97530", "97140", "97112")
+VV_A = dict(T1=20, T2=25, T3=30, T4=35, T5=40, T6=45, T8=60)
+VV_B = dict(T1=30, T2=30, T3=35, T4=40, T5=50)
+VV_C = dict(T1=10, T2=10)
+
+
+def _vv_doc(payer, prices: dict, partial: dict | None = None, mods=("GP",)):
+    items = []
+    for code in ORTHO:
+        groups = []
+        for k, r in prices.items():
+            if partial and code in partial.get(k, ()):
+                continue
+            groups.append({"provider_groups": [{"npi": [f"18{VV_TINS[k][1:]}"],
+                                                "tin": {"type": "ein", "value": VV_TINS[k]}}],
+                           "negotiated_prices": [{"negotiated_type": "negotiated",
+                                                  "negotiated_rate": float(r),
+                                                  "billing_class": "professional",
+                                                  "service_code": ["11"],
+                                                  "billing_code_modifier": list(mods),
+                                                  "expiration_date": "9999-12-31"}]})
+        if groups:
+            items.append({"negotiation_arrangement": "ffs", "billing_code_type": "CPT",
+                          "billing_code": code, "negotiated_rates": groups})
+    return {"reporting_entity_name": payer, "last_updated_on": "2026-06-01",
+            "version": "2.0.0", "in_network": items}
+
+
+@pytest.fixture
+def vv_app(cfg, store):
+    docs = {"a_2026-06.json": _vv_doc("Payer A", VV_A),
+            "a_ot_2026-06.json": _vv_doc("Payer A OT book", {"T7": 50}, mods=("GO",)),
+            "b_2026-06.json": _vv_doc("Payer B", {**VV_B, "T6": 45},
+                                      partial={"T6": ("97140",)}),
+            "c_2026-06.json": _vv_doc("Payer C", VV_C)}
+    for name, doc in docs.items():
+        (cfg.inbox_dir / name).write_text(json.dumps(doc))
+    assert all(r["status"] == "done" for r in scan_inbox(cfg, store))
+    for k, tin in VV_TINS.items():
+        store.save_npi(f"18{tin[1:]}", f"{k} REHAB", "225100000X", "x", "Town",
+                       VV_STATE[k], entity_type="NPI-2", zip_code="64105")
+    store.rebuild_rollups()
+    return TestClient(create_app(cfg, store), base_url="http://localhost")
+
+
+VV_BODY = {"market": {"state": "MO", "discipline": "PT", "month": "latest"}, "preset": "ortho"}
+
+
+def _vv_rows(d):
+    return {r["payer"]: r for r in d["rows"] + [d["all_payers"]]}
+
+
+def test_visit_value_in_this_market_is_the_hand_answer(vv_app):
+    """3.1-3.3 known answer (worked above). was: no such block —
+    POST /api/schedule/visit/market answered 404."""
+    r = vv_app.post("/api/schedule/visit/market", json={**VV_BODY, "subject": "730000003"})
+    assert r.status_code == 200, r.text
+    d = r.json()
+    rows = _vv_rows(d)
+    assert list(rows) == ["Payer A", "Payer B", "Payer C", "All payers"]
+    stat = ("practices", "mean", "median", "p25", "p75", "incomplete_excluded", "suppressed")
+    assert {k: tuple(rows[k][s] for s in stat) for k in rows} == {
+        "Payer A": (6, 130.0, 130.0, 105.0, 155.0, 0, False),
+        "Payer B": (5, 148.0, 140.0, 120.0, 160.0, 1, False),
+        "Payer C": (None, None, None, None, None, 0, True),
+        "All payers": (6, 136.67, 140.0, 107.5, 172.5, None, False)}
+    pos = ("value", "percentile", "ranked_among", "quartile", "vs_mean", "vs_mean_pct",
+           "vs_median", "vs_median_pct")
+    assert tuple(rows["Payer A"]["subject"][k] for k in pos) == (
+        120.0, 40, 6, "Q2", -10.0, -7.7, -10.0, -7.7)
+    assert tuple(rows["Payer B"]["subject"][k] for k in pos) == (
+        140.0, 50, 5, "Q3", -8.0, -5.4, 0.0, 0.0)
+    assert rows["Payer C"]["subject"] is None
+    assert tuple(rows["All payers"]["subject"][k] for k in pos) == (
+        130.0, 40, 6, "Q2", -6.67, -4.9, -10.0, -7.1)
+    assert d["incomplete_excluded"] == 1 and d["suppressed_payers"] == ["Payer C"]
+    assert (d["state"], d["discipline"], d["units"]) == ("MO", "PT", 4)
+    # the subject is optional: the market numbers do not move without it
+    alone = vv_app.post("/api/schedule/visit/market", json=VV_BODY).json()
+    assert {k: tuple(v[s] for s in stat) for k, v in _vv_rows(alone).items()} == \
+        {k: tuple(v[s] for s in stat) for k, v in rows.items()}
+    assert all("subject" not in v for v in _vv_rows(alone).values())
+
+
+def test_visit_value_screen_printable_and_csv_print_the_same_numbers(vv_app):
+    """3.2: one dict, three surfaces. was: no printable / CSV (404)."""
+    import csv
+    import io
+    import re
+    body = {**VV_BODY, "subject": "730000003"}
+    d = vv_app.post("/api/schedule/visit/market", json=body).json()
+    page = vv_app.post("/api/report/visitvalue", json=body)
+    assert page.status_code == 200
+    table = re.search(r"<table class='vv'>.*?</table>", page.text, re.S).group(0)
+    printed = [[re.sub(r"<[^>]+>", "", c).replace("&amp;", "&") for c in
+                re.findall(r"<td[^>]*>(.*?)</td>", tr, re.S)]
+               for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", table.split("<tbody>")[1], re.S)]
+    text = vv_app.post("/api/schedule/visit/market.csv", json=body).text.lstrip("﻿")
+    data = [ln for ln in text.splitlines() if not ln.startswith("#")]
+    recs = list(csv.DictReader(io.StringIO("\n".join(data))))
+    for r, p, c in zip(d["rows"] + [d["all_payers"]], printed, recs):
+        assert p[0] == c["payer"] == r["payer"]
+        if r["suppressed"]:
+            assert c["suppressed"] == "yes" and c["mean"] == "" and "not shown" in p[1]
+            continue
+        for k, i in (("mean", 2), ("median", 3), ("p25", 4), ("p75", 5)):
+            assert p[i] == f"${r[k]:,.2f}" and c[k] == f"{r[k]:.2f}", (k, p, c)
+        assert p[1] == f"{r['practices']:,}" == c["practices"]
+        s = r.get("subject")
+        if s:
+            assert p[7] == f"${s['value']:,.2f}" and c["subject_value"] == f"{s['value']:.2f}"
+            assert p[8] == f"p{s['percentile']} of {s['ranked_among']}"
+            assert c["subject_percentile"] == f"{s['percentile']}" and p[9] == c["quartile"]
+    assert len(printed) == len(recs) == 4
+    # and the printable RATE CARD carries the same block when asked
+    rc = vv_app.post("/api/report/ratecard", json={
+        "subject": "730000003", "market": {"month": "latest", "state": "MO", "discipline": "PT"},
+        "preset": "ortho", "visit_market": True})
+    assert rc.status_code == 200 and table in rc.text
+    fee = vv_app.post("/api/schedule/fee.csv", json={
+        "subject": "730000003", "market": {"month": "latest", "state": "MO", "discipline": "PT"},
+        "preset": "ortho", "visit_market": True}).text
+    assert data[1] in fee
+
+
+def test_visit_value_refuses_without_state_or_discipline_or_a_market(vv_app):
+    """3.1: a sentence, never an empty table. was: 404 (no block)."""
+    for market, words in (({"discipline": "PT"}, "pick a state"),
+                          ({"state": "MO"}, "pick a discipline"),
+                          ({"state": "MO", "discipline": "XX"}, "pick a discipline"),
+                          ({"state": "KS", "discipline": "PT"}, "no payer prices this visit"),
+                          ({"state": "MO", "discipline": "OT"}, "no payer prices this visit")):
+        r = vv_app.post("/api/schedule/visit/market", json={"market": market, "preset": "ortho"})
+        assert r.status_code == 422 and words in r.json()["detail"], (market, r.text)
+    r = vv_app.post("/api/schedule/visit/market", json={**VV_BODY, "subject": "NO SUCH PLACE"})
+    assert r.status_code == 422 and "no practice" in r.json()["detail"]
+
+
+def test_visit_value_is_the_same_on_two_generations(vv_app, store):
+    """3.2 determinism: the same question on an unchanged store after a
+    rebuild (a new generation) returns the same bytes. was: 404."""
+    body = {**VV_BODY, "subject": "730000003"}
+    one = vv_app.post("/api/schedule/visit/market", json=body).content
+    csv_one = vv_app.post("/api/schedule/visit/market.csv", json=body).content
+    store.rebuild_rollups()
+    two = vv_app.post("/api/schedule/visit/market", json=body).content
+    csv_two = vv_app.post("/api/schedule/visit/market.csv", json=body).content
+    assert one == two and csv_one == csv_two
+
+
+def test_visit_value_reads_the_materialised_medians(vv_app, store, monkeypatch):
+    """3.2: no new per-request scan of raw rates — the per-discipline
+    practice medians (built once per spine generation) feed the block, and
+    give the live query's numbers to the bit. was: 404 (no block)."""
+    import mrfx.benchmark as bm
+    from mrfx.visit_market import market_visit_value
+    built = []
+    real = store.spine_materialised
+    monkeypatch.setattr(store, "spine_materialised",
+                        lambda name, *a: built.append(name) or real(name, *a))
+    fast = market_visit_value.uncached(store, VV_BODY["market"], None, "ortho", "730000003")
+    assert built == [bm.DISC_PAYER_PRACTICE_MEDIANS]
+    monkeypatch.setattr(bm, "_house_eligible", lambda m: False)
+    live = market_visit_value.uncached(store, VV_BODY["market"], None, "ortho", "730000003")
+    assert json.dumps(fast, sort_keys=True) == json.dumps(live, sort_keys=True)

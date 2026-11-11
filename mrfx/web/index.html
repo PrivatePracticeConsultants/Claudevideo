@@ -686,6 +686,22 @@
                     placeholder="97110, 15&#10;97530, 15&#10;97140, 15&#10;97112, 15"></textarea>
           <div id="sv-out" style="margin-top:8px"></div>
         </div>
+        <div class="validate-card" style="margin-top:14px">
+          <h3>Visit value in this market</h3>
+          <p class="muted">The same visit priced at every practice of one state and one
+            discipline, payer by payer: how many practices, the average (mean), the median and
+            the middle half (P25&ndash;P75). Uses the State, Discipline, As-of month and
+            Payer(s) above &mdash; State and Discipline are required. The practice is optional:
+            when one is picked, it is placed in each payer's spread. A practice counts for a
+            payer only when that payer prices every code of the visit.</p>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <button class="btn primary" id="vv-run">Show visit value in this market</button>
+            <button class="btn" id="vv-report" disabled>Open printable</button>
+            <button class="btn" id="vv-csv" disabled>Download CSV</button>
+            <span id="vv-msg" class="muted"></span>
+          </div>
+          <div id="vv-out" style="margin-top:8px"></div>
+        </div>
       </div>
     </div>
   </section>

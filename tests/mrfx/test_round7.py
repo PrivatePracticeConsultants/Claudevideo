@@ -559,7 +559,10 @@ def test_every_benchmark_reader_is_identical_from_the_materialised_medians(leads
                {"month": "latest", "therapy_only": False, "allow_national": True},
                {"month": "latest", "payers": ["Rho Health"], "allow_national": True},
                {"month": "latest", "codes": ["97110", "97140"], "state": "MO"},
-               {"month": "latest", "city": "Town", "therapy_only": True}]
+               {"month": "latest", "city": "Town", "therapy_only": True},
+               # review 12: a discipline on the house basis reads the
+               # per-discipline table (DISC_PAYER_PRACTICE_MEDIANS)
+               {"month": "latest", "state": "MO", "discipline": "PT"}]
 
     def run_all():
         out = []
@@ -583,7 +586,9 @@ def test_every_benchmark_reader_is_identical_from_the_materialised_medians(leads
     monkeypatch.setattr(store, "spine_materialised",
                         lambda name, *a: built.append(name) or real(name, *a))
     from_tables = run_all()
-    assert set(built) == {bm.PRACTICE_MEDIANS, bm.PAYER_PRACTICE_MEDIANS}
+    # review 12 added the per-discipline table (the discipline market above)
+    assert set(built) == {bm.PRACTICE_MEDIANS, bm.PAYER_PRACTICE_MEDIANS,
+                          bm.DISC_PAYER_PRACTICE_MEDIANS}
     monkeypatch.setattr(bm, "_house_eligible", lambda m: False)
     live = run_all()
     assert from_tables == live
