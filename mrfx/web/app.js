@@ -4254,7 +4254,7 @@ async function loadFilesNow() {
       <td><span class="badge ${esc(f.status)}">${esc(f.status)}</span>${statusExtra}${progressBar}</td>
       <td class="num">${fmtInt(f.rows_emitted)}</td>
       <td>${qaLine(f.qa)}</td>
-      <td>${warn}${f.error ? `<div class="${f.status === "pending_confirmation" ? "warn-text" : "err-text"}">${esc(f.error)}</div>` : ""}</td>
+      <td>${warn}${f.error ? `<div class="${f.status === "pending_confirmation" ? "warn-text" : f.status === "skipped" || f.status === "done" ? "muted" : "err-text"}">${esc(f.error)}</div>` : ""}</td>
       <td class="sub">${f.finished_at ? esc(localTime(f.finished_at)) : ""}</td>
       <td>${f.status === "processing" || f.status === "queued" ? "" : `<button class="btn forget-btn" title="erase this file's rates and free its disk space (re-add its link or file to get it back)" data-forget="${esc(f.filename)}">remove</button>`}</td>
     </tr>`;

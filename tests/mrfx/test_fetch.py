@@ -2178,6 +2178,9 @@ def test_resume_continues_the_running_hash_instead_of_rereading(cfg, monkeypatch
             self.send_response(206 if rng else 200)
             if rng:
                 self.send_header("Content-Range", f"bytes {start}-{len(payload)-1}/{len(payload)}")
+            # a strong validator on every answer: each resume is vouched for,
+            # so no splice sample is read (review 11 item 1.2)
+            self.send_header("ETag", '"r1"')
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             # every response drops after ~1.5 MB until the last stretch

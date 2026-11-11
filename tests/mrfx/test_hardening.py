@@ -402,7 +402,12 @@ def test_prefetch_reuses_kept_download_never_redownloads(cfg, store, tmp_path):
     rec = store.next_queued_url()
     assert fetch_url_record(cfg, store, rec) is True
     row = next(r for r in store.list_urls() if r["url"] == url)
-    assert row["status"] == "fetched" and row["content_sha"] == "cafe" * 16
+    # the kept bytes are reused with no request; the sha is the bytes' own —
+    # a sidecar that does not describe the file on disk is never trusted
+    # (review 11 item 1.6: a stale sha let a true copy load twice)
+    import hashlib
+    assert row["status"] == "fetched"
+    assert row["content_sha"] == hashlib.sha256(dest.read_bytes()).hexdigest()
     assert dest.exists()  # bytes untouched
 
 

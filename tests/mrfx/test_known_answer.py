@@ -19,7 +19,8 @@ The files (payer "Alpha Health"):
      97112  tin.type=npi, tin.value = X  $35 (NPI-in-the-TIN-slot)
      97116  provider_references [1] -> companion refs file: X @ T1  $33
   B  2026-06   97110 [X] @ T1 $42 GP      (June republication: a raise)
-  B' 2026-07-named, byte-identical twin of B (an inbox re-drop)
+  B' 2026-07-named, byte-identical twin of B (an inbox re-drop: recognised
+     as the same file and not loaded twice)
   S  2026-05   97110 [Z] @ 078-05-1120 (an SSN-pattern TIN) $45 GP
 
 Raw rows by hand: A = 4+1+1+1+1 (97110) + 2 (97140) + 0 (bundle) + 1 + 1 = 12.
@@ -109,9 +110,11 @@ def test_raw_row_counts_match_hand_count(ka):
     results, _ = ka
     assert results["alpha_2026-05_in-network.json"]["rows"] == 12
     assert results["alpha_2026-06_in-network.json"]["rows"] == 1
-    # no content-dedup outside the URL queue: the twin IS ingested; its row
-    # merges in dedup (source_count 2 below), so no number changes
-    assert results["alpha_2026-07_in-network.json"]["rows"] == 1
+    # the byte-identical twin is the same file under another name: it is not
+    # loaded twice (review 11 item 1.1 — before, it was, and every raw count
+    # and source_count carried the copy)
+    assert results["alpha_2026-07_in-network.json"]["status"] == "skipped"
+    assert results["alpha_2026-07_in-network.json"]["duplicate_of"] == "alpha_2026-06_in-network.json"
     assert results["alpha_ssn_2026-05_in-network.json"]["rows"] == 1
 
 
@@ -129,7 +132,7 @@ def test_npi_lookup_is_exactly_the_hand_answer(ka):
         (T1, "97116", "GP", "2026-05", 33.0),      # resolved via provider_references
     }   # no bundle $500, no percentage 40, no $0.01
     assert got[(X, "97112", "GP", "2026-05", 35.0)]["tin_is_really_npi"] is True
-    assert got[(T1, "97110", "GP", "2026-06", 42.0)]["source_count"] == 2   # B + its twin
+    assert got[(T1, "97110", "GP", "2026-06", 42.0)]["source_count"] == 1   # B; its twin is a copy
     assert all(r["payer"] == "Alpha Health" for r in rows)
 
 

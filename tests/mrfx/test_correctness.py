@@ -223,7 +223,7 @@ def test_second_concurrent_ingest_of_same_file_bows_out(cfg, store, monkeypatch)
 
     real = ing._ingest_file_locked
 
-    def slow(cfg2, store2, path2, pf2, bar2, rb2):
+    def slow(cfg2, store2, path2, pf2, bar2, rb2, **_kw):
         barrier.wait()  # hold the claim until the second call has been tried
         return real(cfg2, store2, path2, pf2, bar2, rb2)
 

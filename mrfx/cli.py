@@ -905,7 +905,11 @@ def cmd_forget(cfg: MrfxConfig, args) -> int:
             print(f"{name}: not in the store (check `mrfx status` for exact filenames)")
             rc = 1
             continue
-        if st.get("status") in ("processing", "queued") or store.url_inflight_for_filename(name):
+        # a 'queued' row nobody is loading (a "Keep both" whose load never ran)
+        # can be removed — it was stuck for good before (review 11 item 1.3)
+        from .ingest import ingest_in_progress
+        if st.get("status") == "processing" or store.url_inflight_for_filename(name) or \
+                (st.get("status") == "queued" and ingest_in_progress(name)):
             print(f"{name}: being processed right now — wait for it to finish, "
                   "then forget it (removing mid-parse would quietly resurrect)")
             rc = 1

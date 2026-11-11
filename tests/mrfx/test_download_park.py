@@ -164,7 +164,9 @@ def test_a_parked_file_resumes_where_it_stopped_when_the_server_comes_back(parki
         assert fetch_url_record(parking, store, rec) is True           # the server came back
     finally:
         stop()
-    assert seen["ranges"][-1] == f"bytes={2 << 20}-", "resumed from the kept 2 MB, not byte 0"
+    # (a resume no validator vouched for is then checked against a 64 KB
+    # sample of what was kept — review 11 item 1.2 — so it is not the last)
+    assert f"bytes={2 << 20}-" in seen["ranges"], "resumed from the kept 2 MB, not byte 0"
     assert hashlib.sha256(dest.read_bytes()).digest() == hashlib.sha256(body).digest()
     row = store.list_urls()[0]
     assert row["status"] == "fetched" and row["park_count"] == 0

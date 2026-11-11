@@ -187,8 +187,11 @@ def test_confirm_over_gb_gate(cfg, store):
 def test_dedup_view_counts_sources(cfg, store):
     drop(cfg, "innetwork_mixed.json")
     scan_inbox(cfg, store)
-    # same rates from a second source file
-    drop(cfg, "innetwork_mixed.json", rename="second_copy.json")
+    # same rates from a second source file — a DIFFERENT file (one more byte
+    # of whitespace): a byte-identical copy under another name is the same
+    # file and is not loaded twice (review 11 item 1.1)
+    p2 = drop(cfg, "innetwork_mixed.json", rename="second_copy.json")
+    p2.write_bytes(p2.read_bytes() + b"\n")
     scan_inbox(cfg, store)
     with store.connect() as con:
         row = con.execute(

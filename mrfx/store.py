@@ -949,6 +949,14 @@ class Store:
         # the parent's wait loop turns it into a sentinel file the worker
         # polls. Cleared once the parse has stopped.
         self._stopped_parses: set[str] = set()
+        # content (sha256) -> filename of an INBOX file being loaded right now
+        # (review 11 item 1.1). The link path's in-flight claim is the
+        # url_queue row ('ingesting' + content_sha); an inbox load has no
+        # queue row, so its claim lives here — read and written ONLY under
+        # write_lock, by claim_inbox_content and claim_content_ingest, so a
+        # link and an inbox copy of the same bytes can never both win. In
+        # memory on purpose: a crash ends every load it could describe.
+        self._inbox_claims: dict[str, str] = {}
         # Rollup rebuilds serialize against EACH OTHER here — NOT against the
         # write_lock. Holding write_lock for a rebuild froze the whole
         # pipeline: claiming a queue row (downloaders AND parsers) needs
@@ -2317,6 +2325,15 @@ class Store:
         con.execute("ALTER TABLE url_queue ADD COLUMN IF NOT EXISTS waiting_on BIGINT")
         con.execute("ALTER TABLE url_queue ADD COLUMN IF NOT EXISTS duplicate_of VARCHAR")
         con.execute("ALTER TABLE url_queue ADD COLUMN IF NOT EXISTS big_lane BOOLEAN DEFAULT false")
+        # what the payer's server said about the file when it was downloaded
+        # (strong ETag, else Last-Modified; and its size), and whether a
+        # re-queued row must ask the server again before it reuses or skips
+        # anything: 1 = a refresh (unchanged -> done again without a load),
+        # 2 = a reload (the bytes must be loaded again; a kept download is
+        # reused only if the server still serves it). Review 11 item 1.7.
+        con.execute("ALTER TABLE url_queue ADD COLUMN IF NOT EXISTS server_validator VARCHAR")
+        con.execute("ALTER TABLE url_queue ADD COLUMN IF NOT EXISTS server_size BIGINT")
+        con.execute("ALTER TABLE url_queue ADD COLUMN IF NOT EXISTS revalidate INTEGER DEFAULT 0")
 
     def _register_views(self, con: duckdb.DuckDBPyConnection) -> None:
         """(Re)point the derived views. Callers must hold write_lock."""
@@ -2661,7 +2678,8 @@ class Store:
     def update_url(self, url_id: int, **fields) -> None:
         allowed = {"kind", "status", "filename", "bytes_total", "bytes_done",
                    "progress", "rows_emitted", "child_count", "error", "parent_id",
-                   "content_sha", "park_count", "duplicate_of", "big_lane"}
+                   "content_sha", "park_count", "duplicate_of", "big_lane",
+                   "server_validator", "server_size", "revalidate"}
         fields = {k: v for k, v in fields.items() if k in allowed}
         terminal = fields.get("status") in ("done", "failed", "skipped", "oversize")
         if terminal:
@@ -3076,11 +3094,79 @@ class Store:
                     # a terminal row keeps no in-flight fingerprint (review 9 3.5)
                     con.execute("DELETE FROM inflight_fingerprints WHERE url_id = ?", [url_id])
                     return (twin_url, twin_status)
+                # the same bytes loaded from the INBOX (or loading from it right
+                # now) are the same content too (review 11 item 1.1): one
+                # content claim for every path
+                other = self._loaded_or_claimed_locked(con, content_sha, filename)
+                if other:
+                    twin_name, twin_status = other
+                    msg = (f"identical to {twin_name}, which is already loaded — skipped "
+                           "as a duplicate (it is not counted twice)"
+                           if twin_status == "done" else
+                           f"identical to {twin_name}, which is being loaded from the inbox "
+                           "right now — will retry automatically from the kept download "
+                           "if that one fails")
+                    con.execute(
+                        "UPDATE url_queue SET status = 'skipped', kind = 'duplicate', "
+                        "error = ?, finished_at = ?, duplicate_of = ? WHERE id = ?",
+                        [msg, _utcnow(), twin_name, url_id])
+                    con.execute("DELETE FROM inflight_fingerprints WHERE url_id = ?", [url_id])
+                    return (twin_name, twin_status)
             con.execute(
                 "UPDATE url_queue SET status = 'ingesting', kind = ?, filename = ? WHERE id = ?",
                 [kind, filename, url_id],
             )
         return None
+
+    def _loaded_or_claimed_locked(self, con, content_sha: str,
+                                  own_name: str | None) -> tuple[str, str] | None:
+        """Under write_lock: (filename, 'done') of a LOADED file with these
+        bytes under another name, else (filename, 'ingesting') of an inbox
+        file with these bytes being loaded right now, else None."""
+        row = con.execute(
+            "SELECT c.filename FROM content_fingerprints c JOIN files f "
+            "ON f.filename = c.filename WHERE c.full_sha = ? AND f.status = 'done' "
+            "AND c.filename IS DISTINCT FROM ? ORDER BY c.filename LIMIT 1",
+            [content_sha, own_name]).fetchone()
+        if row:
+            return (row[0], "done")
+        claimant = self._inbox_claims.get(content_sha)
+        if claimant and claimant != own_name:
+            return (claimant, "ingesting")
+        return None
+
+    def claim_inbox_content(self, content_sha: str, filename: str) -> tuple[str, str] | None:
+        """The inbox twin of claim_content_ingest (review 11 item 1.1): may
+        `filename` (no queue row — dropped in the inbox, uploaded, chosen on
+        the Files tab) load these bytes? Under the SAME write_lock as the link
+        path's claim, so the two can never both win. Returns None after
+        winning (released by release_inbox_claim), else (twin, status):
+        status 'done' — the bytes are already loaded under another name or
+        link; 'ingesting' — a link or another inbox file with these bytes is
+        being loaded right now (the caller waits and asks again)."""
+        if not content_sha:
+            return None
+        with self.write_lock, self.connect() as con:
+            row = con.execute(
+                "SELECT coalesce(filename, url), status FROM url_queue WHERE content_sha = ? "
+                "AND status IN ('done', 'ingesting') AND filename IS DISTINCT FROM ? "
+                "ORDER BY (status = 'done') DESC, id LIMIT 1",
+                [content_sha, filename]).fetchone()
+            if row:
+                # the loaded file's name (what the Files tab lists), else its link
+                return (row[0].split("?", 1)[0], row[1])
+            other = self._loaded_or_claimed_locked(con, content_sha, filename)
+            if other:
+                return other
+            self._inbox_claims[content_sha] = filename
+        return None
+
+    def release_inbox_claim(self, content_sha: str | None, filename: str) -> None:
+        if not content_sha:
+            return
+        with self.write_lock:
+            if self._inbox_claims.get(content_sha) == filename:
+                del self._inbox_claims[content_sha]
 
     def revive_skipped_duplicates(self, content_sha: str, failed_id: int) -> int:
         """The in-flight twin this sha's duplicates deferred to has FAILED:
@@ -3151,6 +3237,23 @@ class Store:
                     "error = 'interrupted by a restart — will re-ingest on the next scan' "
                     "WHERE status = 'processing'"
                 )
+            # 'queued' is a promise of a load in THIS process ("Keep both" /
+            # Replace / "ingest anyway" start a thread; a pool restart hands the
+            # file back): at start nothing owns it any more. Left 'queued' it
+            # could never be removed, retried or chosen again (review 11 item
+            # 1.3). A row whose rates are live goes back to 'done' (a chosen
+            # replacement still loads from inbox/.replacing at the next scan);
+            # any other becomes 'failed' — the next scan loads it when the file
+            # is still in the inbox (or inbox/.held), and it can be removed.
+            for (qn,) in con.execute(
+                    "SELECT filename FROM files WHERE status = 'queued'").fetchall():
+                live = (self.rates_dir / f"{file_key(qn)}.parquet").exists()
+                con.execute(
+                    "UPDATE files SET status = ?, error = ? WHERE filename = ?",
+                    ["done" if live else "failed",
+                     None if live else ("interrupted by a restart before it loaded — it "
+                                        "loads at the next scan if it is still in the "
+                                        "inbox; otherwise drop it in again"), qn])
         for n in names:          # an interrupted RE-ingest leaves the old part live
             self.requeue_part_payers(n)
         return len(names)
@@ -3247,6 +3350,34 @@ class Store:
                 [status, url_id])
             return True
 
+    def done_rate_rows(self, dedup_keys: list[str]) -> list[dict]:
+        """Loaded rate / reference rows among these links (an index's children
+        on a re-expansion): id, url, what the server said when each was
+        downloaded, and whether a raw copy name is known."""
+        if not dedup_keys:
+            return []
+        with self.connect() as con:
+            cur = con.execute(
+                "SELECT id, url, server_validator, server_size, filename FROM url_queue "
+                "WHERE dedup_key IN (SELECT unnest(?::VARCHAR[])) AND status = 'done' "
+                "AND kind IN ('in_network', 'provider_reference')", [list(dedup_keys)])
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    def requeue_republished(self, ids: list[int], revalidate: int, reason: str) -> int:
+        """Loaded rows whose server now serves something else (or can't say):
+        back in the queue to be downloaded and loaded again (review 11 1.7)."""
+        if not ids:
+            return 0
+        with self.write_lock, self.connect() as con:
+            n = con.execute(
+                "UPDATE url_queue SET status = 'queued', error = ?, progress = 0, "
+                "bytes_done = 0, retry_after = NULL, park_count = 0, waiting_on = NULL, "
+                "auto_resumes = 0, force_size = false, revalidate = ? "
+                "WHERE id IN (SELECT unnest(?::BIGINT[])) AND status = 'done' RETURNING id",
+                [reason, int(revalidate), list(ids)]).fetchall()
+        return len(n)
+
     def requeue_url_for_file(self, filename: str, reason: str) -> bool:
         """Download a loaded file's link again (its raw copy is gone) — the
         payer's provider list for it arrived after it was loaded (review 9
@@ -3259,8 +3390,8 @@ class Store:
                 return False
             con.execute(
                 "UPDATE url_queue SET status = 'queued', error = ?, progress = 0, "
-                "bytes_done = 0, retry_after = NULL, park_count = 0, waiting_on = NULL "
-                "WHERE id = ?", [reason, row[0]])
+                "bytes_done = 0, retry_after = NULL, park_count = 0, waiting_on = NULL, "
+                "revalidate = 2 WHERE id = ?", [reason, row[0]])
             return True
 
     def force_size_requeue(self, url_id: int) -> bool:
@@ -3292,7 +3423,8 @@ class Store:
                 con.execute(
                     "UPDATE url_queue SET status = 'queued', error = NULL, "
                     "retries = coalesce(retries, 0) + 1, progress = 0, bytes_done = 0, "
-                    "force_size = false WHERE url IN (SELECT unnest(?::VARCHAR[])) "
+                    "force_size = false, revalidate = CASE WHEN status = 'done' THEN 1 "
+                    "ELSE 0 END WHERE url IN (SELECT unnest(?::VARCHAR[])) "
                     "AND status IN ('done', 'failed', 'skipped')", [list(urls)])
         return n
 
@@ -5516,7 +5648,7 @@ _QUEUE_WRITERS_IF_DONE = ("_claim_next", "enqueue_url", "enqueue_urls", "requeue
                           "clear_queued", "cancel_all_downloading", "resume_canceled",
                           "revive_skipped_duplicates", "claim_content_ingest",
                           "release_claim", "release_mismatched_waiters",
-                          "requeue_url_for_file")
+                          "requeue_url_for_file", "requeue_republished")
 
 
 def _signals_queue(fn, always: bool):

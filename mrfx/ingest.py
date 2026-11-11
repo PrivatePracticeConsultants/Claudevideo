@@ -361,7 +361,7 @@ def _finish_ok(cfg: MrfxConfig, store: Store, path: Path) -> None:
     the new bytes as what they are. Cosmetic tier: an identity that can't be
     recorded costs only an early skip / a same-name check, never the
     ingest."""
-    from .identity import LOCAL_HASH_MAX_BYTES, hash_file
+    from .identity import LOCAL_HASH_MAX_BYTES
     started = _INGEST_STAT.pop(str(path), None)
     try:
         st = path.stat()
@@ -371,13 +371,21 @@ def _finish_ok(cfg: MrfxConfig, store: Store, path: Path) -> None:
                         "is offered at the next scan", path.name)
             return
         from .fetch import file_fingerprint, trailer_proves_for
-        fp = file_fingerprint(path, cfg.early_dedup_mb)
+        ident = _download_identity(path)
+        # the identity pass made before the load (the content claim, review
+        # 11 items 1.1 + 3.2) already holds the fingerprint and the sha: no
+        # second and third read of the file here
+        seen = _IDENT_SEEN.pop((str(path), st.st_size, st.st_mtime_ns), None)
+        if seen is None and ident is None and st.st_size <= LOCAL_HASH_MAX_BYTES:
+            seen = _identity_of(path, cfg.early_dedup_mb, keep=False)
+        fp = (ident or {}).get("fp") or (seen or {}).get("fp")
+        if fp is None and cfg.early_dedup_mb:
+            fp = file_fingerprint(path, cfg.early_dedup_mb)
         if fp is not None:
             store.record_fingerprint(path.name, fp)
-        ident = _download_identity(path)
-        if ident is None and st.st_size <= LOCAL_HASH_MAX_BYTES:
-            sha, gz = hash_file(path)
-            ident = {"sha": sha, "trailer_proves": trailer_proves_for(path, gz)}
+        if ident is None and seen is not None and seen.get("sha"):
+            ident = {"sha": seen["sha"],
+                     "trailer_proves": trailer_proves_for(path, seen.get("gz_members"))}
         store.record_identity(path.name, st.st_size, st.st_mtime_ns,
                               (ident or {}).get("sha"), (ident or {}).get("trailer_proves"))
     except Exception:  # noqa: BLE001
@@ -396,6 +404,14 @@ def _finish_file(cfg: MrfxConfig, path: Path, ok: bool) -> None:
     a non-technical user with a failure on data that actually ingested fine.
     Log it and leave the file in place (a re-scan sees status='done' and skips
     it)."""
+    if not ok:
+        # a link's download record describes a file that is leaving: an
+        # orphaned sidecar was later trusted for whatever arrived under the
+        # name (review 11 item 1.6)
+        try:
+            Path(str(path) + ".fetchmeta").unlink(missing_ok=True)
+        except OSError:
+            pass
     if not path.exists():
         return
     try:
@@ -1121,14 +1137,29 @@ def ingest_file(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight | None 
         # requeue_skipped can all collide here — one wins, the rest bow out.
         log.info("%s: already being ingested by another worker — skipping", name)
         return {"status": "skipped", "error": "already being ingested by another worker"}
+    claim: dict = {}
+    result = None
     try:
-        return _ingest_file_locked(cfg, store, path, pf, progress_bar, rebuild_rollups)
+        result = _ingest_file_locked(cfg, store, path, pf, progress_bar, rebuild_rollups,
+                                     claim=claim)
+        return result
     finally:
+        sha = claim.get("sha")
+        if sha:
+            # the files row (done, with its sha) is the record from here on
+            store.release_inbox_claim(sha, name)
+            if not result or result.get("status") != "done":
+                # link copies of these bytes deferred to this load: it did not
+                # load, so they get their promised automatic retry
+                try:
+                    store.revive_skipped_duplicates(sha, -1)
+                except Exception:  # noqa: BLE001 — the next scan/retry covers it
+                    log.debug("duplicate revival skipped", exc_info=True)
         _release_ingest(name)
 
 
 def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight | None,
-                        progress_bar, rebuild_rollups: bool) -> dict:
+                        progress_bar, rebuild_rollups: bool, claim: dict | None = None) -> dict:
     name = path.name
     _note_ingest_start(path)
     try:
@@ -1170,6 +1201,23 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
             store.upsert_file(name, status="quarantined", error=msg, finished_at=_now())
             _finish_file(cfg, path, ok=False)
             return {"status": "quarantined", "error": msg}
+
+        if pf.file_type not in ("in_network", "provider_reference"):
+            # a portal file listing ({"blobs": [...]}) or any other shape the
+            # sniff says is NOT A RATE FILE: it was parsed as a rate file and
+            # recorded done with 0 rows and no word (review 11 item 1.10)
+            msg = ("a portal file listing, not a rate file — paste its web address on "
+                   "the Links tab instead, and the files it lists are downloaded"
+                   if pf.file_type == "blob_listing" else
+                   "; ".join(pf.messages) or "not a rate file")
+            store.upsert_file(name, status="quarantined", error=msg, finished_at=_now())
+            _finish_file(cfg, path, ok=False)
+            return {"status": "quarantined", "error": msg}
+
+        if claim is not None:
+            twin = _content_claim(cfg, store, path, name, claim)
+            if twin:
+                return _record_duplicate(cfg, store, path, name, pf, twin)
 
         if pf.file_type == "provider_reference":
             return _ingest_reference_file(cfg, store, path, pf)
@@ -1470,12 +1518,114 @@ def _sha_of(path: Path) -> str | None:
     if st.st_size > LOCAL_HASH_MAX_BYTES:
         return None
     key = (str(path), st.st_size, st.st_mtime_ns)
+    if key in _IDENT_SEEN:
+        return _IDENT_SEEN[key]["sha"]
     if key not in _SHA_SEEN:
         if st.st_size > (256 << 20):
             log.info("%s: reading it to see whether it is the file already loaded "
                      "(%.1f GB)", path.name, st.st_size / 1e9)
         _SHA_SEEN[key] = hash_file(path)[0]
     return _SHA_SEEN[key]
+
+
+# (path, size, mtime_ns) -> {"sha", "gz_members", "fp"}: the ONE read that
+# names a local file's content (fetch.file_identity), made before its load for
+# the content claim and reused by _finish_ok after it (review 11 items 1.1/3.2)
+_IDENT_SEEN: dict = {}
+
+
+def _identity_of(path: Path, head_mb: int, keep: bool = True) -> dict:
+    from .fetch import file_identity
+    st = path.stat()
+    key = (str(path), st.st_size, st.st_mtime_ns)
+    got = _IDENT_SEEN.get(key)
+    if got is None:
+        if st.st_size > (256 << 20):
+            log.info("%s: reading it once to see whether these bytes are already "
+                     "loaded (%.1f GB)", path.name, st.st_size / 1e9)
+        got = file_identity(path, head_mb)
+        if keep:
+            if len(_IDENT_SEEN) > 2000:      # a long-lived server: never grows unbounded
+                _IDENT_SEEN.clear()
+            _IDENT_SEEN[key] = got
+    return got
+
+
+def _big_local_twin(cfg: MrfxConfig, store: Store, path: Path, name: str) -> str | None:
+    """A local file over LOCAL_HASH_MAX_BYTES is not hashed in full: it is a
+    copy of a loaded file when the proof the link path already trusts holds —
+    same size, beginning, end and 8 samples, compressed with a trailer that
+    vouches for the whole content (fetch._proves)."""
+    from .fetch import _proves, file_fingerprint
+    if not cfg.early_dedup_mb:
+        return None
+    fp = file_fingerprint(path, cfg.early_dedup_mb)
+    if not fp:
+        return None
+    for c in store.fingerprint_candidates(fp["size"], None, name):
+        if c["kind"] == "loaded" and int(c["head_bytes"] or 0) == fp["head_bytes"] \
+                and c["head_sha"] == fp["head_sha"] and _proves(fp, c):
+            return c["filename"]
+    return None
+
+
+def _content_claim(cfg: MrfxConfig, store: Store, path: Path, name: str,
+                   claim: dict) -> str | None:
+    """Review 11 item 1.1: the inbox had no content check at all — the same
+    bytes under a second name (the browser's "file (1).json.gz", a copy, or
+    the file a link already loaded) were loaded again and every raw count
+    doubled. Claim these bytes for `name` the way a link's queue row does
+    (Store.claim_inbox_content, under the same lock as the link path's
+    claim). Returns None to go ahead (claim['sha'] holds the claim, released
+    by ingest_file), or the name of the loaded twin this file duplicates.
+    A twin being loaded RIGHT NOW is waited for: when it finishes this file
+    is its duplicate; when it fails this file loads."""
+    from .identity import LOCAL_HASH_MAX_BYTES
+    if cfg.downloads_dir in path.parents:
+        return None          # a link's download: claimed by its queue row
+    if (store.rates_dir / f"{file_key(name)}.parquet").exists():
+        return None          # a re-load of a loaded name replaces its own part
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    if size > LOCAL_HASH_MAX_BYTES:
+        return _big_local_twin(cfg, store, path, name)
+    sha = _identity_of(path, cfg.early_dedup_mb)["sha"]
+    told = False
+    while True:
+        got = store.claim_inbox_content(sha, name)
+        if got is None:
+            claim["sha"] = sha
+            return None
+        twin, status = got
+        if status == "done":
+            return twin
+        if not told:
+            log.info("%s: the same bytes are being loaded right now (%s) — waiting for "
+                     "that load instead of loading them twice", name, twin)
+            told = True
+        time.sleep(2.0)
+
+
+def _record_duplicate(cfg: MrfxConfig, store: Store, path: Path, name: str,
+                      pf: Preflight, twin: str) -> dict:
+    msg = (f"identical to {twin}, which is already loaded — not loaded twice (the same "
+           "file under another name: a second download, a copy, or the file a link "
+           "already brought in)")
+    sha = None
+    try:
+        st = path.stat()
+        sha = (_IDENT_SEEN.get((str(path), st.st_size, st.st_mtime_ns)) or {}).get("sha")
+    except OSError:
+        pass
+    store.upsert_file(name, payer=pf.payer, file_type=pf.file_type, status="skipped",
+                      rows_emitted=0, error=msg, finished_at=_now(),
+                      qa={"duplicate_of": twin, "duplicate_sha": sha})
+    log.info("%s: %s", name, msg)
+    _INGEST_STAT.pop(str(path), None)
+    _finish_file(cfg, path, ok=True)
+    return {"status": "skipped", "duplicate_of": twin, "error": msg}
 
 
 def _month_of(payer_month: tuple) -> tuple:
@@ -1633,6 +1783,23 @@ def resolve_choice(cfg: MrfxConfig, store: Store, name: str, action: str) -> dic
     raise ValueError("choose replace or keep")
 
 
+def _qa_of(row: dict) -> dict:
+    qa = row.get("qa")
+    if isinstance(qa, str):
+        try:
+            qa = json.loads(qa)
+        except ValueError:
+            qa = None
+    return qa if isinstance(qa, dict) else {}
+
+
+def _same_duplicate(p: Path, prior: dict) -> bool:
+    """A file left in the inbox (move_processed: false) that an earlier scan
+    already recognised as a copy of a loaded file: the same bytes still."""
+    want = _qa_of(prior).get("duplicate_sha")
+    return bool(want) and _sha_of(p) == want
+
+
 def scan_inbox(cfg: MrfxConfig, store: Store, force: bool = False, progress_bar=None) -> list[dict]:
     """One-shot pass over the inbox (used by `mrfx ingest` and the watcher).
 
@@ -1675,22 +1842,49 @@ def scan_inbox(cfg: MrfxConfig, store: Store, force: bool = False, progress_bar=
                 flights.append((p, preflight(p, cfg, store)))
             except Exception as e:  # noqa: BLE001
                 log.warning("%s: could not read the chosen replacement (%s)", p.name, e)
+    # "Keep both" was chosen for a held file but its load never ran (a restart,
+    # or the choice's thread died): the row sat 'queued' forever with no button
+    # that worked (review 11 item 1.3). Load it now, like a replacement.
+    for p in sorted((cfg.inbox_dir / HELD_DIR).glob("*")) \
+            if (cfg.inbox_dir / HELD_DIR).is_dir() else []:
+        if not p.is_file():
+            continue
+        st_held = (store.file_status(p.name) or {}).get("status")
+        if st_held in ("queued", "failed") and not ingest_in_progress(p.name):
+            try:
+                flights.append((p, preflight(p, cfg, store)))
+            except Exception as e:  # noqa: BLE001
+                log.warning("%s: could not read the file you chose to keep (%s)", p.name, e)
     for p in paths:
         prior = store.file_status(p.name)
         if prior and prior.get("status") == NEEDS_CHOICE:
             continue
         if prior and prior.get("status") == "processing" and not force:
             continue          # being loaded right now: this IS that file
+        orig = p.name
+        if prior and prior.get("status") == "skipped" and not force:
+            if _same_duplicate(p, prior):
+                # already recognised as a copy of a loaded file
+                if cfg.move_processed:
+                    _finish_file(cfg, p, ok=True)
+                continue
+            alias = _qa_of(prior).get("duplicate_of")
+            twin_row = store.file_status(alias) if alias else None
+            if twin_row and twin_row.get("status") == "done":
+                # this name only ever named a copy of `alias`: different bytes
+                # under it are judged against what IS loaded — a corrected file
+                # for the same payer and month is held for the user's choice
+                orig, prior = alias, twin_row
         if prior and prior.get("status") == "done" and not force:
             # a file under a name the store already holds (review 9 1.2 / 4.5)
-            verdict, sha = same_name_verdict(cfg, store, p, p.name, prior)
+            verdict, sha = same_name_verdict(cfg, store, p, orig, prior)
             if verdict == "same":
                 if cfg.move_processed:
                     _finish_file(cfg, p, ok=True)
                 continue
             try:
                 if verdict == "replace":
-                    hold_for_choice(cfg, store, p, p.name, sha)
+                    hold_for_choice(cfg, store, p, orig, sha)
                     results.append({"file": p.name, "status": NEEDS_CHOICE})
                     continue
                 import hashlib

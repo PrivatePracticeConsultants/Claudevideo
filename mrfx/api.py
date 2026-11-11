@@ -1432,6 +1432,76 @@ class LocalOnlyMiddleware:
         await send({"type": "http.response.body", "body": body})
 
 
+def _part_swap_race(exc: BaseException) -> bool:
+    """A read that met a rates part being swapped under it (review 11 item
+    1.8): DuckDB reads a part's footer when it plans a query and opens the
+    path again to scan it — a re-ingest replacing that part in between gives
+    "Parquet file is likely corrupted, dictionary offset out of range" (one
+    version's footer with the other's bytes). The rows are never wrong; the
+    question just has to be asked again."""
+    import duckdb
+    if not isinstance(exc, duckdb.Error):
+        return False
+    low = str(exc).lower()
+    return any(k in low for k in (
+        "likely corrupted", "dictionary offset", "invalid magic", "no magic bytes",
+        "parquet file is", "could not open file", "no such file or directory"))
+
+
+class SwapRetryMiddleware:
+    """Ask a dashboard question again, once, when it lost a race with a part
+    swap (`_part_swap_race`). Only before any byte of the answer was sent,
+    and only for requests whose body is small enough to replay (never an
+    upload)."""
+    REPLAY_MAX = 1 << 20
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1")
+                   for k, v in scope.get("headers") or []}
+        try:
+            clen = int(headers.get("content-length") or 0)
+        except ValueError:
+            clen = self.REPLAY_MAX + 1
+        if clen > self.REPLAY_MAX or "multipart" in headers.get("content-type", ""):
+            return await self.app(scope, receive, send)
+        body = b""
+        more = True
+        while more:
+            msg = await receive()
+            if msg["type"] != "http.request":
+                return await self.app(scope, receive, send)
+            body += msg.get("body", b"")
+            more = msg.get("more_body", False)
+        for attempt in (0, 1):
+            started = False
+            delivered = False
+
+            async def replay():
+                nonlocal delivered
+                if not delivered:
+                    delivered = True
+                    return {"type": "http.request", "body": body, "more_body": False}
+                return await receive()
+
+            async def tracked(message):
+                nonlocal started
+                if message["type"] == "http.response.start":
+                    started = True
+                await send(message)
+            try:
+                return await self.app(scope, replay, tracked)
+            except Exception as e:  # noqa: BLE001 — re-raised unless it is the race
+                if attempt or started or not _part_swap_race(e):
+                    raise
+                log.info("%s: a rates part was swapped during the query — asking again",
+                         scope.get("path"))
+
+
 def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     # Startup work is collected here and run by the lifespan handler below.
     # `@app.on_event("startup")` is deprecated and slated for removal, but the
@@ -1449,6 +1519,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         yield
 
     app = FastAPI(title="MRF Explorer", docs_url="/api/docs", lifespan=lifespan)
+    app.add_middleware(SwapRetryMiddleware)
     app.add_middleware(LocalOnlyMiddleware)
     registry = Registry(cfg)
     sync_entity_map(cfg, store)
@@ -2348,7 +2419,11 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         st = store.file_status(filename)
         if not st:
             raise HTTPException(404, "no such file in the store")
-        if st.get("status") in ("processing", "queued"):
+        from .ingest import ingest_in_progress
+        if st.get("status") == "processing" or (
+                st.get("status") == "queued" and ingest_in_progress(filename)):
+            # (a 'queued' row nobody is loading — a "Keep both" whose load never
+            # ran — CAN be removed: it was stuck for good, review 11 item 1.3)
             # forgetting mid-parse would silently lose the race: the ingest
             # keeps reading its open file handle and re-creates every record
             # minutes after this endpoint returned "forgotten"
@@ -2535,6 +2610,15 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                                  unique_inbox_name)
             prior = store.file_status(safe)
             renamed_from = None
+            # the same BYTES already loaded under another name (a second
+            # browser download "x (1).json.gz", a copy): not loaded twice —
+            # every raw count doubled before (review 11 item 1.1)
+            sha0 = _sha_of(tmp)
+            twin = store.done_file_with_sha(sha0) if sha0 else None
+            if twin and twin != safe:
+                return {"status": "duplicate", "filename": safe, "bytes": size,
+                        "note": (f"{safe} is the same file as {twin}, which is already "
+                                 "loaded — it was not loaded a second time")}
             if prior and prior.get("status") in ("done", "processing", "queued"):
                 verdict, sha = same_name_verdict(cfg, store, tmp, safe, prior)
                 if verdict == "same":
@@ -4325,6 +4409,12 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 f"({store._memory_limit_gb} GB). Narrow it with a filter (payer, "
                 f"code, or state), or raise duckdb_memory_gb in config/mrfx.yaml "
                 f"if your machine has spare RAM, then restart.")})
+        if _part_swap_race(exc):
+            # asked twice and both times a rates part was being replaced (a
+            # big re-ingest finishing): the data is fine — ask again
+            return JSONResponse(status_code=503, content={"error": (
+                "The data was being updated while this was read (a file finished "
+                "loading). Nothing is wrong — try again in a moment.")})
         if isinstance(exc, ValueError):
             # a filter/parameter the request supplied was unusable (e.g. the
             # explorer month filter given the report tabs' 'latest' sentinel) —
