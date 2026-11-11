@@ -222,12 +222,21 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
     stop = threading.Event()
     _start_stack_recorder(Path(cfg.store_dir), stop=stop)
     log.info("opening the store at %s …", cfg.store_dir)
-    store = Store(cfg.store_dir, cfg.duckdb_memory_gb, keep_warm=True, temp_dir=cfg.duckdb_temp_dir, auto_spill=True)
+    # the one-time stored-row update gets MIGRATION_BUDGET_S before the
+    # dashboard opens; the rest runs behind it (review 12 item 2.9)
+    from .store import MIGRATION_BUDGET_S
+    store = Store(cfg.store_dir, cfg.duckdb_memory_gb, keep_warm=True, temp_dir=cfg.duckdb_temp_dir,
+                  auto_spill=True, migrate_budget_s=MIGRATION_BUDGET_S)
+    store.finish_row_rules_in_background()
     # BEFORE any worker starts: a crash mid-parse leaves files at
     # 'processing', which scan_inbox skips forever. Flipping them to failed
     # here (single-threaded, nothing else owns the store yet) lets the very
     # first inbox scan re-ingest them without racing a live ingest.
     n_stuck = store.recover_stuck_files()
+    # ...and the queue's rows a dead run left in flight, before the inbox
+    # watcher can meet one of them as a "load in progress" (review 12 item 1.3;
+    # the URL worker's run_queue does it again, harmlessly)
+    store.recover_stuck_urls()
     if n_stuck:
         log.info("recovered %d file(s) left mid-parse by a previous run", n_stuck)
     if store.rollups_stale():

@@ -193,7 +193,8 @@ download_auto_resumes: 5
 # once if nothing else is waiting, and resumes where it stopped ("parked" in the
 # Files tab). So a slow-to-answer payer never leaves a slot idle. After
 # download_park_limit parks in a row with no progress at all, the server is
-# treated as down and the file takes the pause above. 0 turns parking off.
+# treated as down and the file takes the pause above. download_park_seconds: 0
+# turns parking off (download_park_limit is at least 1).
 download_park_seconds: 240
 download_park_minutes: 10
 download_park_limit: 6
@@ -205,11 +206,12 @@ store_dir: data/mrfx_store
 move_processed: true          # false = leave files in inbox, track via checkpoint
 
 # Memory ceiling (GB) for the analytics database (rollup rebuilds + dashboard
-# queries). 8 is the sweet spot on a 32 GB machine: the rebuild sizes its work
-# to fit on the first try (instead of failing upward into retries) while
-# leaving headroom for the parser workers, Windows, and your browser.
-# Remove the line to let the app choose automatically from available RAM.
-duckdb_memory_gb: 8
+# queries). Leave it unset: the app picks a safe value from this machine's RAM
+# after setting aside room for the parser workers (about 1 GB each), Windows
+# and your browser — about 4 GB on a 16 GB laptop, 12 GB on a 32 GB desktop.
+# Set it only if a rebuild says it ran out of memory (8 is a good value on a
+# 32 GB machine):
+# duckdb_memory_gb: 8
 
 # Where DuckDB writes temporary SPILL scratch during the heavy end-of-batch
 # rollup. Unset = AUTOMATIC: if your store is on a slow spinning hard drive and
@@ -260,6 +262,38 @@ enrichment:
 
 port: 8377
 confirm_over_gb: 5.0          # files above this wait for confirmation in the Files view
+
+# The settings below are shown with their DEFAULT values, commented out. To
+# change one, remove the "# " in front of it and edit the value.
+#
+# How many files one pasted index (table of contents) may queue. A national
+# index can list tens of thousands; raise this to take more of them.
+# max_toc_files: 2000
+#
+# Delete the downloaded payer file once its rates are loaded (the compact
+# database keeps everything the app needs; the link can download it again).
+# false keeps the raw files in data/downloads.
+# delete_raw_after_ingest: true
+#
+# While the dashboard runs, queue the tested payer indexes again once a month
+# so new months load without re-pasting links. Off by default: it uses your
+# bandwidth and disk, so it is your choice.
+# monthly_refresh: false
+#
+# Medicare Order & Referring Tracker: where its data lives if it is not in the
+# usual place, and whether a newer eligibility roster it downloaded is loaded
+# automatically at start (off: the Medicare tab offers a button instead).
+# tracker_dir: "E:\\OrfTracker"
+# tracker_auto_import: false
+#
+# JavaScript-only payer pages: render them in a built-in browser to find the
+# file links, and download that browser once by itself when it is missing.
+# render_js: true
+# render_auto_install: true
+#
+# A Medicare fee schedule (code,locality,non_facility_rate CSV) loaded at start;
+# the Benchmark tab's "Load MPFS" button does the same from the dashboard.
+# mpfs_path: data/mpfs.csv
 
 registry_path: config/payer_registry.yaml
 registry_overrides_path: config/registry_overrides.yaml

@@ -1710,18 +1710,63 @@ def _record_duplicate(cfg: MrfxConfig, store: Store, path: Path, name: str,
            "file under another name: a second download, a copy, or the file a link "
            "already brought in)")
     sha = None
+    size = None
     try:
         st = path.stat()
+        size = st.st_size
         sha = (_IDENT_SEEN.get((str(path), st.st_size, st.st_mtime_ns)) or {}).get("sha")
     except OSError:
         pass
+    drop = _twin_kept_in_processed(cfg, store, path, twin, sha, size)
+    if drop:
+        # the original is already kept in data/processed: a second copy of a
+        # 20 GB file there is 20 GB kept for nothing (review 12 item 2.8)
+        msg += f" — this copy was deleted; the original is kept in data/processed as {twin}"
     store.upsert_file(name, payer=pf.payer, file_type=pf.file_type, status="skipped",
                       rows_emitted=0, error=msg, finished_at=_now(),
                       qa={"duplicate_of": twin, "duplicate_sha": sha})
     log.info("%s: %s", name, msg)
     _INGEST_STAT.pop(str(path), None)
-    _finish_file(cfg, path, ok=True)
+    if drop:
+        try:
+            path.unlink()
+        except OSError:          # a Windows lock: housekeeping, move it instead
+            _finish_file(cfg, path, ok=True)
+    else:
+        _finish_file(cfg, path, ok=True)
     return {"status": "skipped", "duplicate_of": twin, "error": msg}
+
+
+def _twin_kept_in_processed(cfg: MrfxConfig, store: Store, path: Path, twin: str,
+                            sha: str | None, size: int | None) -> bool:
+    """Is the loaded twin's own file in data/processed, unchanged since it was
+    loaded, and provably these same bytes? Then the copy need not be kept.
+    Same bytes = the same full sha256 (≤ 4 GB), or over that the proof the
+    link path trusts (same size, beginning, end with its whole-content CRC and
+    8 samples — fetch._proves). Anything less keeps today's move."""
+    if cfg.inbox_dir not in path.parents or not cfg.move_processed or size is None:
+        return False
+    kept = cfg.processed_dir / twin
+    try:
+        kst = kept.stat()
+        if kept.resolve() == path.resolve():
+            return False
+    except OSError:
+        return False
+    ident = store.loaded_identity(twin) or {}
+    if kst.st_size != size or ident.get("size") != size \
+            or ident.get("mtime_ns") not in (None, kst.st_mtime_ns):
+        return False
+    if sha:
+        return ident.get("full_sha") == sha
+    try:
+        from .fetch import _proves, file_fingerprint
+        fp = file_fingerprint(path, cfg.early_dedup_mb)
+        loaded = store.loaded_fingerprint(twin)
+        return bool(fp and loaded and fp.get("head_sha") == loaded.get("head_sha")
+                    and _proves(fp, {**loaded, "trailer_proves": ident.get("trailer_proves")}))
+    except Exception:  # noqa: BLE001 — housekeeping: when unsure, keep the copy
+        return False
 
 
 def _month_of(payer_month: tuple) -> tuple:

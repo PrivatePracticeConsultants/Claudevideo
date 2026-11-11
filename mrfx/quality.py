@@ -147,6 +147,61 @@ def rate_type_mix(store: Store, market: dict | None = None) -> dict:
     }
 
 
+POOLED_FILES_NOTE = (
+    "Several files of one payer for one month are POOLED, not superseded: a "
+    "practice priced in two of them gets the median of the rates they give. "
+    "Payers publish one file per plan book (measured: Tufts' subsidized and "
+    "non-subsidized books of 2026-11 price 43,810 of 46,149 contract lines in "
+    "both, 1,350 of them at different rates) and split national books into "
+    "numbered files, all stamped with the same date — no file is \"newer\". "
+    "A payer that republishes a CORRECTED file under a new name in the same "
+    "month is pooled with the file it corrects: remove the old one on the "
+    "Files tab.")
+
+
+@generation_cached('quality.pooled_month_files')
+def pooled_month_files(store: Store) -> list[dict]:
+    """Payer x month cells loaded from more than one file, with how many
+    practices and contract lines appear in more than one of them and how many
+    of those lines carry different rates (review 12 item 2.5: the rule is
+    pooling, and the Files tab and every methodology say so with the numbers).
+    One aggregate over the spine per data generation."""
+    with store.connect() as con:
+        files = con.execute("""
+            SELECT payer, file_month, count(*) FROM files
+            WHERE status = 'done' AND file_type = 'in_network'
+              AND coalesce(rows_emitted, 0) > 0 AND payer IS NOT NULL
+            GROUP BY 1, 2 HAVING count(*) > 1""").fetchall()
+        if not files:
+            return []
+        spine = {(p, m): (pr, ln, df) for p, m, pr, ln, df in con.execute("""
+            SELECT payer, file_month,
+                   count(DISTINCT tin_value) FILTER (WHERE source_count > 1),
+                   count(*) FILTER (WHERE source_count > 1),
+                   count(*) FILTER (WHERE source_count > 1 AND rate_variants > 1)
+            FROM rates_by_tin GROUP BY 1, 2""").fetchall()}
+    out = []
+    for payer, month, n in files:
+        pr, ln, df = spine.get((payer, month), (0, 0, 0))
+        out.append({"payer": payer, "file_month": month, "files": int(n),
+                    "practices_in_several": int(pr or 0), "lines_in_several": int(ln or 0),
+                    "lines_differing": int(df or 0)})
+    out.sort(key=lambda r: (-r["lines_differing"], r["payer"], r["file_month"] or ""))
+    return out
+
+
+def pooled_files_sentence(rows: list[dict]) -> str | None:
+    """One line for a methodology sidecar / the Files tab, or None."""
+    if not rows:
+        return None
+    cells = "; ".join(
+        f"{r['payer']} {r['file_month']}: {r['files']} files, {r['practices_in_several']:,} "
+        f"practices priced in more than one ({r['lines_differing']:,} lines at different rates)"
+        for r in rows[:8])
+    more = f"; and {len(rows) - 8} more" if len(rows) > 8 else ""
+    return f"Pooled months — {cells}{more}. {POOLED_FILES_NOTE}"
+
+
 @generation_cached('quality.payer_freshness', daily=True)
 def payer_freshness(store: Store, *, stale_days: int = 270) -> dict:
     """How recently each payer re-published, by its own last_updated_on."""

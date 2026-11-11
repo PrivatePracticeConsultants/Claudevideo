@@ -89,6 +89,22 @@ def sql_path(p) -> str:
     return str(p).replace("'", "''")
 
 
+# The analytics pool chosen automatically (duckdb_memory_gb unset) and the
+# parser workers share one machine: the pool takes 40 % of RAM (2..12 GB) but
+# never so much that the OS and two parser workers no longer fit beside it
+# (review 12 item 2.6 — the shipped 8 GB sat beside the workers' budget on a
+# 16 GB laptop). fetch._ram_worker_cap sizes the workers from the same pool.
+PARSER_WORKER_RAM_GB = 2.0
+OS_RESERVE_GB = 3.0
+MIN_PARSER_WORKERS_RESERVED = 2
+
+
+def auto_pool_gb(total_bytes: int) -> int:
+    total_gb = total_bytes / 1e9
+    room = total_gb - OS_RESERVE_GB - MIN_PARSER_WORKERS_RESERVED * PARSER_WORKER_RAM_GB
+    return max(2, min(12, int(total_gb * 0.4), int(room)))
+
+
 def _total_ram_bytes() -> int:
     """Physical RAM, cross-platform, 0 if unknown. os.sysconf doesn't exist on
     Windows — without this branch the documented '40% of RAM, clamped [2,12] GB'
@@ -520,6 +536,10 @@ ROW_RULES_VERSION = 4
 # parts per query of the stored-row type check: small enough that the
 # progress line moves on a slow drive, large enough to amortise the query
 _TYPE_SCAN_BATCH = 40
+# files per budget check of the one-time stored-row update (review 12 item 2.9)
+_MIGRATE_SLICE = 200
+# how long `mrfx serve` lets that update run before the dashboard opens
+MIGRATION_BUDGET_S = 30.0
 
 
 # a paused row that is NOT a copy waiting on an earlier row still in flight
@@ -913,8 +933,14 @@ REQUEUE_RESET = (
 class Store:
     def __init__(self, store_dir: Path, memory_limit_gb: int | None = None,
                  keep_warm: bool = False, temp_dir: Path | None = None,
-                 auto_spill: bool = False):
+                 auto_spill: bool = False, migrate_budget_s: float | None = None):
         self.dir = Path(store_dir)
+        # the one-time stored-row update (_migrate_row_rules): None = all of
+        # it before the store is handed over (every CLI command); a number of
+        # seconds = at most that long before the dashboard opens, the rest in
+        # the background (`mrfx serve` — review 12 item 2.9)
+        self._migrate_budget_s = migrate_budget_s
+        self.rows_update: dict | None = None
         self.rates_dir = self.dir / "rates"
         self.rates_dir.mkdir(parents=True, exist_ok=True)
         # DuckDB spill directory. Defaults inside the store; the spill is what
@@ -1034,7 +1060,7 @@ class Store:
         else:
             total = _total_ram_bytes()
             if total:
-                cap = max(2, min(12, int(total * 0.4 / 1e9)))
+                cap = auto_pool_gb(total)
                 avail = _avail_ram_bytes()
                 if avail:
                     # never plan to use more than ~60% of what is FREE right
@@ -1151,7 +1177,7 @@ class Store:
         self._retry_pending_part_ops()
         # BEFORE the rollup check: a full rebuild it may trigger must see the
         # fixed rows, and the payers this queues ride the next incremental
-        self._migrate_row_rules()
+        self._migrate_row_rules(budget_s=self._migrate_budget_s)
         self._migrate_stale_rollups()
         self._migrate_latest_flag()
 
@@ -1474,7 +1500,7 @@ class Store:
             logging.getLogger(__name__).warning(
                 "could not convert stored times to UTC (%s) — will retry at next start", e)
 
-    def _migrate_row_rules(self) -> None:
+    def _migrate_row_rules(self, budget_s: float | None = None, hold=None) -> list[str]:
         """Rewrite, once, the rate parts written under older ROW rules
         (files.row_rules < ROW_RULES_VERSION) so they read exactly as a
         re-ingest by this version would write them — no re-download.
@@ -1497,7 +1523,17 @@ class Store:
         minutes, which reads as a hang. Files already at rules 2 now need only
         the rule-3 check, answered for ALL of them by one narrow scan of two
         columns; only parts that actually change are rewritten (each logged),
-        and progress is logged every 15 s."""
+        and progress is logged every 15 s.
+
+        THE RULE FOR EVERY STORED-ROW UPDATE (review 12 item 2.9, AI_HANDOFF
+        Round 12): the dashboard opens first. With `budget_s` (serve) the
+        update works for at most that long before the store is handed over;
+        the files it did not reach are returned and finished by
+        finish_row_rules_in_background, file by file under the same per-file
+        claim an ingest takes (`hold`), with `rows_update` describing the
+        progress for the Files tab. Without a budget (every CLI command: an
+        export or a report must never mix rule versions) it runs to the end.
+        Returns the names left for the background."""
         log = logging.getLogger(__name__)
         try:
             with self.connect() as con:
@@ -1507,7 +1543,7 @@ class Store:
                     [ROW_RULES_VERSION]).fetchall()
         except Exception as e:  # noqa: BLE001 — never block the app from opening
             log.warning("row-rules check skipped (%s)", e)
-            return
+            return []
         # a file whose newer rates are PARKED (its old part was held open when
         # they finished) waits: rewriting the old part swaps it in through
         # _swap_in_part, which discards the park — the newer rates would be
@@ -1525,35 +1561,70 @@ class Store:
                          "updated at a later start", len(held))
                 todo = [(n, r) for n, r in todo if n not in set(held)]
         if not todo:
-            return
+            return []
         t0 = time.monotonic()
-        log.info("one-time update of %d stored file(s) to this version's rules — the "
-                 "dashboard opens as soon as it is done (progress below)", len(todo))
+        deadline = None if budget_s is None else t0 + max(0.0, float(budget_s))
+        log.info("one-time update of %d stored file(s) to this version's rules — %s "
+                 "(progress below)", len(todo),
+                 "the dashboard opens as soon as it is done" if deadline is None else
+                 f"the dashboard opens within {budget_s:.0f} s and the rest continues "
+                 "behind it" if hold is None else "continuing behind the dashboard")
         tick = [t0]
+        if hold is not None:
+            self.rows_update = {"total": len(todo), "done": 0, "running": True}
 
         def progress(done: int) -> None:
+            if self.rows_update is not None and hold is not None:
+                self.rows_update["done"] = done
             if time.monotonic() - tick[0] >= 15 or (done == len(todo) and done > 500):
                 tick[0] = time.monotonic()
                 log.info("  … %d of %d files checked (%.0f s)", done, len(todo),
                          tick[0] - t0)
 
+        def over() -> bool:
+            return deadline is not None and time.monotonic() > deadline
+
+        def held_names(names: list[str]) -> list[str]:
+            # in the background a file being (re)loaded right now is skipped:
+            # its new part is written under the current rules anyway
+            return [n for n in names if hold is None or hold[0](n)]
+
         fixed = rows_fixed = done = 0
         left: list[str] = []
-        # files at rules 2: only the type-spelling rule is new for them
+        deferred: list[str] = []
+        # files at rules 2: only the type-spelling rule is new for them —
+        # in slices, so a budget can stop between two of them
         recent = [n for n, r in todo if r >= 2]
-        if recent:
+        for i in range(0, len(recent), _MIGRATE_SLICE):
+            chunk = recent[i:i + _MIGRATE_SLICE]
+            if over():
+                deferred += chunk
+                continue
+            mine = held_names(chunk)
             try:
-                f, n_rows, left_recent = self._migrate_types_only(recent, progress)
+                f, n_rows, left_recent = self._migrate_types_only(mine, progress) \
+                    if mine else (0, 0, [])
                 fixed += f
                 rows_fixed += n_rows
                 left += left_recent
             except Exception as e:  # noqa: BLE001 — never block the app from opening
                 log.warning("could not update the stored rows to the current rules "
                             "(%s) — they are unchanged; will retry at the next start", e)
-                left += recent
-            done = len(recent)
+                left += mine
+            finally:
+                if hold is not None:
+                    for n in mine:
+                        hold[1](n)
+            done += len(chunk)
+            progress(done)
         for name, _r in todo:
             if _r >= 2:
+                continue
+            if over():
+                deferred.append(name)
+                continue
+            if not held_names([name]):
+                done += 1
                 continue
             try:
                 n = self._normalize_part(name)
@@ -1564,11 +1635,23 @@ class Store:
                 left.append(name)
                 continue
             finally:
+                if hold is not None:
+                    hold[1](name)
                 done += 1
                 progress(done)
             if n:
                 fixed += 1
                 rows_fixed += n
+        if deferred:
+            log.info("stored rows: %d of %d file(s) updated before the dashboard opened "
+                     "(%.0f s); the other %d are updated behind it — the Files tab shows "
+                     "the progress", len(todo) - len(deferred), len(todo),
+                     time.monotonic() - t0, len(deferred))
+            self.rows_update = {"total": len(todo), "done": len(todo) - len(deferred),
+                                "running": False, "pending": len(deferred)}
+            return deferred
+        if hold is not None:
+            self.rows_update = None
         if left:
             # never "up to date" while a file is left (review 9 item 1.1b)
             log.warning("stored rows: %d of %d file(s) checked, %s row(s) in %d file(s) "
@@ -1581,6 +1664,41 @@ class Store:
                      "rewritten (modifier / place-of-service fields, future-dated months, "
                      "'fee_schedule' spelling) in %.0f s — one time",
                      len(todo), f"{rows_fixed:,}", fixed, time.monotonic() - t0)
+        return []
+
+    def finish_row_rules_in_background(self, on_done=None) -> threading.Thread | None:
+        """The files the start-up budget did not reach (review 12 item 2.9):
+        updated behind the dashboard, one at a time under the per-file claim
+        an ingest takes, then the analytics catch up on the payers they
+        touched. `rows_update` says how far it is ({"total", "done",
+        "running"}; None once done). None when nothing was left."""
+        if not self.rows_update or not self.rows_update.get("pending"):
+            return None
+        from .ingest import _claim_ingest, _release_ingest
+
+        def run() -> None:
+            log = logging.getLogger(__name__)
+            try:
+                self._migrate_row_rules(budget_s=None, hold=(_claim_ingest, _release_ingest))
+            except Exception as e:  # noqa: BLE001 — the next start retries
+                log.warning("background update of stored rows stopped (%s) — it "
+                            "continues at the next start", e)
+            finally:
+                self.rows_update = None
+            try:
+                if self.rollups_stale():
+                    try:
+                        if self.update_rollups_incremental(skip_if_busy=True) == ROLLUP_SKIPPED:
+                            return
+                    except Exception:  # noqa: BLE001 — the full build is always correct
+                        self.rebuild_rollups(skip_if_busy=True)
+            except Exception as e:  # noqa: BLE001
+                log.warning("analytics after the stored-row update: %s", e)
+            if on_done is not None:
+                on_done()
+        t = threading.Thread(target=run, name="mrfx-row-rules", daemon=True)
+        t.start()
+        return t
 
     def _migrate_types_only(self, names: list[str], progress) -> tuple[int, int, list[str]]:
         """Rules 3-4 for files already at rules 2: read (negotiated_type,
@@ -3420,6 +3538,26 @@ class Store:
                     "error = 'the identical link this deferred to failed — retrying "
                     f"(from the kept download when still present)' WHERE {revive_pred}")
                 n += revived
+            # A link that deferred to an INBOX load ("being loaded from the
+            # inbox right now") is revived only by that load's own `finally` —
+            # which a crash never reaches. At start no inbox load can be
+            # running (the claim lived in memory), so a deferral whose inbox
+            # file did not load (recover_stuck_files made it 'failed') gets its
+            # promised retry here (review 12 item 2.2). Not when that name
+            # still has a live part (a failed RE-load leaves the old rates):
+            # the link would load the same bytes beside them.
+            for uid, dup in con.execute(
+                    "SELECT q.id, q.duplicate_of FROM url_queue q JOIN files f "
+                    "ON f.filename = q.duplicate_of WHERE q.status = 'skipped' "
+                    "AND q.kind = 'duplicate' AND f.status = 'failed' ORDER BY q.id").fetchall():
+                if (self.rates_dir / f"{file_key(dup)}.parquet").exists():
+                    continue
+                con.execute(
+                    "UPDATE url_queue SET status = 'queued', error = ?, "
+                    f"{REQUEUE_RESET} WHERE id = ?",
+                    [f"the inbox load of {dup} this deferred to did not finish — retrying "
+                     "(from the kept download when still present)", uid])
+                n += 1
         return n
 
     # legal transitions for user actions: retry revives dead rows; skip
@@ -5688,8 +5826,12 @@ class Store:
         - otherwise REFUSED with the reason — never estimated."""
         st = (state or "").strip().upper() or None
         with self.connect() as con:
+            # a non-finite or non-positive stored rate (an anchor uploaded by
+            # 0.7.5, which accepted 'nan') is no anchor for that code — never a
+            # NaN percentage that fails the whole screen (review 12 item 2.1)
             rows = con.execute("SELECT state, locality, source, code, non_facility_rate "
-                               "FROM mpfs").fetchall()
+                               "FROM mpfs WHERE isfinite(non_facility_rate) "
+                               "AND non_facility_rate > 0").fetchall()
         if not rows:
             return {"rates": {}, "label": None, "refusal": None}
         states = sorted({r[0] for r in rows if r[0]})

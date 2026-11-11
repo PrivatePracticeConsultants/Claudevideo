@@ -1204,6 +1204,15 @@ def filters_in_words(described: dict) -> str:
     return "; ".join(out) or "none"
 
 
+def _pooled_line(store: Store) -> str | None:
+    """The pooled-months sentence (review 12 item 2.5); cosmetic tier."""
+    try:
+        from .quality import pooled_files_sentence, pooled_month_files
+        return pooled_files_sentence(pooled_month_files(store))
+    except Exception:  # noqa: BLE001 — a methodology line never fails an export
+        return None
+
+
 def methodology_text(cfg: MrfxConfig, store: Store, grain: str, fs: FilterSet,
                      sort: str, direction: str, view: str) -> str:
     with store.connect() as con:
@@ -1255,6 +1264,7 @@ def methodology_text(cfg: MrfxConfig, store: Store, grain: str, fs: FilterSet,
         MODIFIER_INGEST_NOTE,
         "Per-row provenance: source_files names ONE representative file per row; "
         "source_count is the number of distinct files behind that row.",
+        *([_pooled] if (_pooled := _pooled_line(store)) else []),
         "Rate files in the store at export time (the export above draws on the "
         "subset matching its filters, NOT necessarily all of these): "
         f"{'; '.join(f'{f[0]} ({f[1]}, month {f[2]}, updated {f[3]})' for f in files) or 'none'}",
@@ -2403,8 +2413,18 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                     r["qa"] = json.loads(r["qa"])
                 except json.JSONDecodeError:
                     pass
+        try:
+            from .quality import POOLED_FILES_NOTE, pooled_month_files
+            pooled = pooled_month_files(store)     # cached per data generation
+        except Exception:  # noqa: BLE001 — a note never fails the Files poll
+            pooled = []
         return {"files": rows, "total": total, "limit": limit, "offset": offset,
-                "attention": len(attention)}
+                "attention": len(attention),
+                "pooled_months": pooled[:20],
+                "pooled_note": POOLED_FILES_NOTE if pooled else None,
+                # the one-time stored-row update still running behind the
+                # dashboard (review 12 item 2.9)
+                "rows_update": store.rows_update}
 
     @app.post("/api/files/scan")
     def files_scan():
@@ -4287,6 +4307,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         try:
             n = _load_mpfs_csv(store, data, fname)
         except (ValueError, KeyError) as e:
+            if str(e).startswith("line "):     # a bad value on one line: say which
+                raise HTTPException(422, f"MPFS CSV not loaded — {e}")
             raise HTTPException(422, f"MPFS CSV must have code,locality,non_facility_rate columns: {e}")
         return {"loaded": store.mpfs_loaded(), "rows": n}
 
@@ -4530,6 +4552,11 @@ def _load_mpfs_csv(store: Store, data: bytes, source: str) -> int:
             rate = float(rate_raw)
         except ValueError:
             raise ValueError(f"line {i} (code {code}): non-numeric rate {rate_raw!r}")
+        if not math.isfinite(rate) or rate <= 0:
+            # 'nan' / 'inf' parse as floats: accepted, they made every anchored
+            # screen a 422 until a new anchor was uploaded (review 12 item 2.1)
+            raise ValueError(f"line {i} (code {code}): the rate {str(rate_raw).strip()!r} is "
+                             "not a dollar amount above zero — fix that line and upload again")
         rows.append({
             "code": code,
             "locality": (row.get(fields.get("locality", ""), "") or "") if fields.get("locality") else "",

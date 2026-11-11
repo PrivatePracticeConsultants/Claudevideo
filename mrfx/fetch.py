@@ -2031,19 +2031,18 @@ def _meta_path(dest: Path) -> Path:
 # rest. Cores alone put 7 workers on a 16 GB 8-core laptop: 7 x 2 GB + a 6 GB
 # pool > 16 GB — swap or a native OOM death mid-grind. Throughput plateaus at
 # ~cores/1.4 workers anyway (measured), so the RAM cap costs little.
-WORKER_RAM_GB = 2.0
-OS_RESERVE_GB = 3.0
+from .store import OS_RESERVE_GB, PARSER_WORKER_RAM_GB as WORKER_RAM_GB  # noqa: E402 — one rule
 
 
 def _ram_worker_cap(cfg: MrfxConfig) -> int | None:
     """How many parser workers fit in RAM next to the analytics pool, or None
     when the machine's RAM can't be read (then cores decide, as before)."""
-    from .store import _total_ram_bytes
+    from .store import _total_ram_bytes, auto_pool_gb
 
     total_gb = _total_ram_bytes() / 1e9
     if total_gb <= 0:
         return None
-    pool_gb = getattr(cfg, "duckdb_memory_gb", None) or max(2, min(12, int(total_gb * 0.4)))
+    pool_gb = getattr(cfg, "duckdb_memory_gb", None) or auto_pool_gb(int(total_gb * 1e9))
     return max(1, int((total_gb - pool_gb - OS_RESERVE_GB) // WORKER_RAM_GB))
 
 

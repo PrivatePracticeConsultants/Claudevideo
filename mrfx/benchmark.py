@@ -1986,6 +1986,17 @@ def render_negotiation_report(cfg: MrfxConfig, store: Store, neg: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _pooled_lines(store: Store, payers: list) -> list[str]:
+    """The pooled-months line for the market's payers (review 12 item 2.5)."""
+    try:
+        from .quality import pooled_files_sentence, pooled_month_files
+        rows = [r for r in pooled_month_files(store) if not payers or r["payer"] in payers]
+        line = pooled_files_sentence(rows)
+        return [line] if line else []
+    except Exception:  # noqa: BLE001 — a footer line never fails a report
+        return []
+
+
 def methodology_footer(store: Store, benchmark: dict) -> str:
     market = benchmark["market"]
     with store.connect() as con:
@@ -2020,6 +2031,7 @@ def methodology_footer(store: Store, benchmark: dict) -> str:
         "Dedup rule: one row per (payer, TIN, code, modifier-set, billing class, "
         "place-of-service set, month); a TIN's rate is the median of its distinct "
         "published values excluding $0/$0.01 dollar placeholders (variants flagged).",
+        *_pooled_lines(store, payers),
         "Rate files in the store matching the market's payer scope (the "
         "benchmark draws on the subset matching the full market definition): "
         f"{'; '.join(f'{f[0]} ({f[1]}, {f[2]})' for f in files) or 'none'}.",

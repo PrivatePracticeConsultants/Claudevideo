@@ -4201,10 +4201,21 @@ async function loadFilesNow() {
       Drop an MRF into <code class="inline">data/inbox/</code> or use the upload zone above.</div>`;
     return;
   }
-  stateEl.innerHTML = d.total > d.files.length
+  // the one-time stored-row update still running behind the dashboard, and
+  // payer x month cells pooled from several files (review 12 items 2.9, 2.5)
+  const ru = d.rows_update;
+  const ruLine = ru && (ru.running || ru.pending)
+    ? `<div class="warn-text">Updating stored rows to this version's rules: ${fmtInt(ru.done || 0)} of ${fmtInt(ru.total || 0)} files — numbers from the files not yet updated can still change.</div>`
+    : "";
+  const pm = d.pooled_months || [];
+  const pmLine = pm.length
+    ? `<div class="muted" title="${esc(d.pooled_note || "")}">Pooled months: ${pm.slice(0, 4).map((r) =>
+        `${esc(r.payer)} ${esc(r.file_month || "")} has ${fmtInt(r.files)} files, ${fmtInt(r.practices_in_several)} practices priced in more than one (${fmtInt(r.lines_differing)} lines at different rates)`).join("; ")}${pm.length > 4 ? `; and ${fmtInt(pm.length - 4)} more` : ""} — their rates are pooled (median), not one file replacing another.</div>`
+    : "";
+  stateEl.innerHTML = ruLine + pmLine + (d.total > d.files.length
     ? `<div class="muted">Showing the newest ${fmtInt(d.files.length)} of ${fmtInt(d.total)} files.
         <button class="btn" id="files-more" style="padding:2px 8px;font-size:12px">show ${fmtInt(Math.min(d.total, (state.filesLimit || 500) * 4))}</button></div>`
-    : "";
+    : "");
   const more = $("#files-more");
   if (more) more.onclick = () => { state.filesLimit = Math.min(5000, (state.filesLimit || 500) * 4); loadFiles(); };
   body.innerHTML = d.files.map((f) => {
