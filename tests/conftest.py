@@ -45,6 +45,13 @@ _SLOW = {line.strip() for line in (Path(__file__).parent / "slow_tests.txt").rea
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "quick: fast inner-loop subset (see tests/slow_tests.txt)")
+    # review 12 item 4.1(j), decided: the app needs httpx only, so httpx2 stays
+    # out of requirements.txt (it installs on the user's PC too) and starlette
+    # stays pinned; its test client's "install httpx2" notice is silenced here,
+    # and test_review12's guard fails the suite the day starlette moves without
+    # httpx2 installed.
+    config.addinivalue_line(
+        "filterwarnings", "ignore:Using `httpx` with `starlette.testclient` is deprecated")
 
 
 def pytest_collection_modifyitems(config, items):

@@ -323,18 +323,35 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
             except OSError:
                 _t.sleep(0.5)
     threading.Thread(target=_announce_ready, name="mrfx-ready", daemon=True).start()
+    if os.name == "posix":
+        # a SIGTERM (a service manager, `kill`) ended the process at once:
+        # no `finally` below ran, the parser workers were orphaned and the
+        # resource tracker printed "5 leaked semaphore objects" (review 12
+        # item 4.1h). Treat it as the Ctrl-C it means. (Windows: no SIGTERM
+        # from a console close, and no resource tracker.)
+        import signal as _signal
+
+        def _term_as_interrupt(_sig, _frame):
+            raise KeyboardInterrupt
+        try:
+            _signal.signal(_signal.SIGTERM, _term_as_interrupt)
+        except (ValueError, OSError):      # not the main thread (tests)
+            pass
     try:
         uvicorn.run(app, host="127.0.0.1", port=cfg.port, log_level="warning")
     finally:
-        stop.set()
         # don't let concurrent.futures' atexit hook block process exit for
         # the remainder of a multi-hour parse: terminate workers now (their
-        # pid-suffixed temps are swept as orphans on the next start)
+        # pid-suffixed temps are swept as orphans on the next start). BEFORE
+        # stop.set(): the URL worker uninstalls the pool on stop, and the
+        # process then exited with its queues never closed — "5 leaked
+        # semaphore objects" on every POSIX stop (review 12 item 4.1h)
         from .ingest import get_parse_pool
 
         pool = get_parse_pool()
         if pool is not None and hasattr(pool, "shutdown_now"):
             pool.shutdown_now()
+        stop.set()
     return 0
 
 
@@ -700,13 +717,13 @@ def _print_code_coverage(cfg: MrfxConfig) -> None:
           "to pick the new codes up in files you already have.")
 
 
-def _print_medicare_status(cfg: MrfxConfig) -> None:
+def _print_medicare_status(cfg: MrfxConfig, store: Store | None = None) -> None:
     """One line for the Medicare layers, so it's obvious whether the referral
     and eligibility halves are actually loaded."""
     try:
         from .medicare import STALE_ROSTER_DAYS, medicare_status
-        st = medicare_status(Store(cfg.store_dir, cfg.duckdb_memory_gb,
-                                   temp_dir=cfg.duckdb_temp_dir))
+        st = medicare_status(store or Store(cfg.store_dir, cfg.duckdb_memory_gb,
+                                            temp_dir=cfg.duckdb_temp_dir))
     except Exception:  # noqa: BLE001 — a status line must never block the command
         return
     e = st.get("eligibility")
@@ -728,15 +745,15 @@ def _print_medicare_status(cfg: MrfxConfig) -> None:
     print("medicare:   " + " · ".join(bits))
 
 
-def _print_reference_status(cfg: MrfxConfig) -> None:
+def _print_reference_status(cfg: MrfxConfig, store: Store | None = None) -> None:
     """One line for the optional reference datasets — the dollar math and the
     market sizing are only as good as whether these are actually loaded."""
     try:
         from .demographics import demographics_status
         from .nppes import feed_status
         from .utilization import utilization_status
-        store = Store(cfg.store_dir, cfg.duckdb_memory_gb,
-                      temp_dir=cfg.duckdb_temp_dir)
+        store = store or Store(cfg.store_dir, cfg.duckdb_memory_gb,
+                               temp_dir=cfg.duckdb_temp_dir)
         u, d, n = (utilization_status(store), demographics_status(store),
                    feed_status(store))
     except Exception:  # noqa: BLE001 — a status line must never block `status`
@@ -752,12 +769,16 @@ def _print_reference_status(cfg: MrfxConfig) -> None:
 
 def cmd_status(cfg: MrfxConfig, args) -> int:
     _print_code_coverage(cfg)
-    _print_medicare_status(cfg)
-    _print_reference_status(cfg)
     if _something_owns_the_port(cfg, "reading the store locally"):
         print("(the dashboard's Files tab shows the same information live)")
         return 1
+    # ONE open for the whole command (review 12 item 4.1e: the Medicare and
+    # reference lines each opened their own Store — the "analytics memory
+    # budget" line printed three times, and they opened it before the check
+    # above that a running dashboard does not own it)
     store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir)
+    _print_medicare_status(cfg, store)
+    _print_reference_status(cfg, store)
     with store.connect() as con:
         rows = con.execute(
             """

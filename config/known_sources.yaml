@@ -1047,14 +1047,17 @@ sources:
 
   - name: Mass General Brigham Health Plan (formerly AllWays)
     states: [MA]
-    url: https://massgeneralbrighamhealthplan.org/pricetransparency/MRF/Base
+    url: https://awhpmrfeptprod-hqfydsghh6gzcpae.z01.azurefd.net/pricetransparency/MRF/Base/TOC/{FIRST_OF_MONTH}_AHP_index.json
     kind: toc
     queueable: true
-    verified: "2026-11-05"
+    verified: "2026-11-11"
     notes: >-
-      Verified 2026-11-05: 14 file links, newest dated 2026-10; sampled files
-      answer HTTP 200. A fixed link that redirects to the newest index
-      (2026-10-01_AHP_index.json, updated 2026-09-27). Also cross-lists UMR and
+      Re-checked 2026-11-11: the old fixed link
+      (massgeneralbrighamhealthplan.org/pricetransparency/MRF/Base) still
+      redirected to the October index, which the plan had removed (HTTP 404);
+      the monthly index itself, 2026-11-01_AHP_index.json (last_updated_on
+      2026-10-27), answers HTTP 200 at the address above, dated per month.
+      Verified 2026-11-05: 14 file links; also cross-lists UMR and
       MultiPlan/PHCS files.
 
   - name: CDPHP (New York)
@@ -1749,9 +1752,11 @@ sources:
     queueable: false
     verified: "2026-11-05"
     notes: >-
-      Checked 2026-11-05: UNVERIFIED: the server's certificate chain is
-      incomplete, so it did not validate here (the app never skips certificate
-      checks). Monthly network files
+      Checked 2026-11-05 and 2026-11-11: UNVERIFIED — the server sends an
+      incomplete certificate chain ("unable to get local issuer certificate"),
+      so the check here could not open it, and the app never skips certificate
+      checks. Open the address in your browser, download the network file you
+      need and drop it into data/inbox/. Monthly network files
       2026-11-01_midlands-choice_<net>_in-network-rates.json.gz.
 
   - name: GlobalHealth (Oklahoma)

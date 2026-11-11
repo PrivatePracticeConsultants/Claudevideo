@@ -61,6 +61,15 @@
 > delete of a superseded file still open in another reader (it is retried at
 > the next build, as before), and start-up read counts on a spinning drive.
 > Nothing is left for a round 10 prompt.
+>
+> **Correction (round 12, Nov 11, 2026).** Two claims above did not hold:
+> item 2.1's third bullet (decide and write the rule that the dashboard opens
+> before a stored-row update, with a budget or a background continuation) was
+> not done — round 12 item 2.9 did it (`Store(migrate_budget_s=…)`,
+> `MIGRATION_BUDGET_S = 30`, AI_HANDOFF "Round 12 additions"); and "1 GET per
+> file in every run" stopped being true in 0.7.5, when a small-file slot began
+> sending a 1-byte size probe first (1-2 requests per file). Left as written
+> above; corrected here.
 
 Rounds 1–8 are `docs/NEXT_STEPS_PROMPT.md`, `_2.md` … `_8.md`. This memo came
 out of a review on Nov 10, 2026 at HEAD 64a371c (version 0.7.2), asked for

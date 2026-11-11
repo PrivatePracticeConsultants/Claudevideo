@@ -574,6 +574,46 @@ class ParsePoolManager:
                     proc.terminate()
                 except Exception:  # noqa: BLE001 — already gone
                     pass
+            _release_pool_resources(pool, procs)
+
+    def close(self) -> None:
+        """Orderly end (run_queue's finally): wait for the pool, then free its
+        queues' semaphores (review 12 item 4.1h)."""
+        with self._lock:
+            pool = self._pool
+            procs = list((getattr(pool, "_processes", None) or {}).values())
+            pool.shutdown(wait=True, cancel_futures=True)
+            _release_pool_resources(pool, procs)
+
+
+def _release_pool_resources(pool, procs) -> None:
+    """Join the (terminated) workers briefly, then close the executor's two
+    multiprocessing queues. Left to the interpreter's exit they were never
+    finalised and POSIX's resource tracker printed "There appear to be 5
+    leaked semaphore objects" on every stop of `mrfx serve` (review 12 item
+    4.1h; Windows has no resource tracker). Best-effort: exiting must never
+    need a clean stop."""
+    for proc in procs:
+        try:
+            proc.join(timeout=2)
+        except Exception:  # noqa: BLE001
+            pass
+    mgr = getattr(pool, "_executor_manager_thread", None)
+    if mgr is not None:
+        try:
+            mgr.join(timeout=2)
+        except Exception:  # noqa: BLE001
+            pass
+    for name in ("_call_queue", "_result_queue"):
+        q = getattr(pool, name, None)
+        if q is None:
+            continue
+        try:
+            q.close()
+            if hasattr(q, "join_thread"):
+                q.join_thread()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def set_parse_pool(pool) -> None:
@@ -1156,6 +1196,10 @@ def _rebuild_rollups_best_effort(store: Store, name: str,
         except (TypeError, ValueError):  # C-callable / old test stub
             return {}
     try:
+        if incremental and not getattr(store, "rollups_ever_built", lambda: True)():
+            # a fresh store: say it is the first build (review 12 4.1g)
+            log.info("%s: first analytics build of this store — building them in full", name)
+            incremental = False
         if incremental:
             try:
                 if store.update_rollups_incremental(
@@ -1621,16 +1665,30 @@ def _sha_of(path: Path) -> str | None:
 _IDENT_SEEN: dict = {}
 
 
-def _identity_of(path: Path, head_mb: int, keep: bool = True) -> dict:
+# above this size the identity read (before the parse) says what it is doing
+# on the file's own Files-tab row: a 4 GB drop on a USB drive is minutes of
+# 'processing' with no progress bar otherwise (review 12 item 4.1d)
+IDENTITY_NOTE_BYTES = 256 << 20
+
+
+def _identity_of(path: Path, head_mb: int, keep: bool = True, note=None) -> dict:
     from .fetch import file_identity
     st = path.stat()
     key = (str(path), st.st_size, st.st_mtime_ns)
     got = _IDENT_SEEN.get(key)
     if got is None:
-        if st.st_size > (256 << 20):
+        progress = None
+        if st.st_size > IDENTITY_NOTE_BYTES:
             log.info("%s: reading it once to see whether these bytes are already "
                      "loaded (%.1f GB)", path.name, st.st_size / 1e9)
-        got = file_identity(path, head_mb)
+            if note is not None:
+                def progress(done, total):
+                    note(f"reading the file once to see whether these bytes are already "
+                         f"loaded — {done / 1e6:,.0f} of {total / 1e6:,.0f} MB")
+                progress(0, st.st_size)
+        got = file_identity(path, head_mb, progress=progress)
+        if progress is not None:
+            note(None)
         if keep:
             if len(_IDENT_SEEN) > 2000:      # a long-lived server: never grows unbounded
                 _IDENT_SEEN.clear()
@@ -1678,7 +1736,12 @@ def _content_claim(cfg: MrfxConfig, store: Store, path: Path, name: str,
         return None
     if size > LOCAL_HASH_MAX_BYTES:
         return _big_local_twin(cfg, store, path, name)
-    sha = _identity_of(path, cfg.early_dedup_mb)["sha"]
+    def note(text):
+        try:
+            store.upsert_file(name, error=text)
+        except Exception:  # noqa: BLE001 — cosmetic tier
+            pass
+    sha = _identity_of(path, cfg.early_dedup_mb, note=note)["sha"]
     told = False
     while True:
         got = store.claim_inbox_content(sha, name)

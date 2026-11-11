@@ -133,3 +133,17 @@ def test_starter_links_is_the_catalog():
     root = Path(__file__).resolve().parents[2]
     assert (root / "config" / "starter_links.txt").read_text(encoding="utf-8") == \
         starter_links_text(root / "config" / "known_sources.yaml")
+    # review 12 item 4.2: README's catalog counts come from the catalog
+    # (it said 110 queueable / 34 portals while the file held 109 / 41)
+    import re
+
+    import yaml
+    d = yaml.safe_load((root / "config" / "known_sources.yaml").read_text(encoding="utf-8"))
+    src = d["sources"] if isinstance(d, dict) else d
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    m = re.search(r"(\d+) of its (\d+) entries", readme)
+    rest = re.search(r"rest \((\d+)\) are portals", readme)
+    assert m and rest, "README lost its catalog counts"
+    assert (int(m.group(1)), int(m.group(2)), int(rest.group(1))) == (
+        sum(1 for s in src if s.get("queueable")), len(src),
+        sum(1 for s in src if not s.get("queueable")))

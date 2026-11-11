@@ -84,20 +84,26 @@ def geographic_rates(store: Store, code: str, market: dict, limit: int = 60) -> 
         WHERE {where} AND td.states IS NOT NULL AND len(td.states) > 0
         GROUP BY t.tin_value
     ),
-    exploded AS (SELECT unnest(states) AS state, tin_value, rate FROM base)
+    exploded AS (SELECT unnest(states) AS state, tin_value, rate FROM base),
+    -- only real states: an NPI filed under a military mail code (AE, AP, AA)
+    -- or a territory the app does not list was ranked as a "state" (review 12
+    -- item 4.1a; the state list already keeps STATE_CODES only)
+    exploded_st AS (SELECT * FROM exploded
+                    WHERE state IN (SELECT unnest(?::VARCHAR[])))
     SELECT state,
            count(DISTINCT tin_value)            AS n_practices,
            round(median(rate), 2)               AS median_rate,
            round(quantile_cont(rate, .25), 2)   AS p25,
            round(quantile_cont(rate, .75), 2)   AS p75
-    FROM exploded
+    FROM exploded_st
     GROUP BY state
     HAVING count(DISTINCT tin_value) >= ?
     ORDER BY median_rate DESC, state
     LIMIT ?
     """
     with store.connect() as con:
-        rows = _dicts(con.execute(sql, [*params, _MIN_CELL, limit]))
+        from .states import STATE_CODES
+        rows = _dicts(con.execute(sql, [*params, sorted(STATE_CODES), _MIN_CELL, limit]))
         # one national reference median (same per-TIN grain, ignoring geography)
         nat = con.execute(
             f"""WITH base AS (SELECT t.tin_value, median(t.negotiated_rate) AS rate

@@ -2264,14 +2264,16 @@ def file_fingerprint(path: Path, head_mb: int) -> dict | None:
             "win_sha": h.hexdigest(), "magic": _magic(first)}
 
 
-def file_identity(path: Path, head_mb: int) -> dict:
+def file_identity(path: Path, head_mb: int, progress=None) -> dict:
     """Everything the store remembers about a local file's content, from ONE
     sequential read (review 11 item 3.2 — the inbox ingest read a file 2.5
     times: the parse, then `file_fingerprint` and `hash_file` again):
     {"sha", "gz_members", "fp"} where fp is exactly file_fingerprint(path,
-    head_mb) (None when head_mb is 0). Raises OSError."""
+    head_mb) (None when head_mb is 0). Raises OSError. `progress(done,
+    total)` is called about once a second (cosmetic; never fails the read)."""
     from .identity import ContentHasher
     size = path.stat().st_size
+    next_note = time.monotonic() + 1.0
     full = ContentHasher()
     fp = None
     if head_mb:
@@ -2302,6 +2304,12 @@ def file_identity(path: Path, head_mb: int) -> dict:
                     if lo < hi:
                         win_buf[i] += blk[lo - pos:hi - pos]
             pos += len(blk)
+            if progress is not None and time.monotonic() >= next_note:
+                next_note = time.monotonic() + 1.0
+                try:
+                    progress(pos, size)
+                except Exception:  # noqa: BLE001 — a progress note never fails the read
+                    pass
     if pos != size:
         raise OSError(f"{path.name} changed size while it was read")
     if head_mb:
@@ -2691,9 +2699,17 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict, lane_max: int = 0
         except OSError:
             meta = None
         if meta:
+            # the row shows the file it holds: a reused download (its sidecar
+            # rebuilt from the bytes when it was missing) read "0 of 0 bytes"
+            # (review 12 item 4.1f)
+            try:
+                size = dest.stat().st_size
+            except OSError:
+                size = 0
             store.update_url(url_id, content_sha=meta["sha"], status="fetched",
                              server_validator=meta.get("validator"),
-                             server_size=meta.get("server_size"))
+                             server_size=meta.get("server_size"),
+                             bytes_done=size, bytes_total=size, progress=100.0)
             return True
     local = _local_duplicate_verdict(cfg, store, url_id, dest)
     if local:
@@ -3481,6 +3497,12 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
             if not Path(str(m)[: -len(_META_SUFFIX)]).exists():
                 m.unlink(missing_ok=True)
                 orphans += 1
+        # a kill between _write_val's write and its rename leaves
+        # `<name>.part.val.tmp`; no download is running yet, so it is litter
+        # (review 12 item 4.1c)
+        for m in cfg.downloads_dir.glob("*.val.tmp"):
+            m.unlink(missing_ok=True)
+            orphans += 1
     except OSError:
         pass
     if orphans:
@@ -3524,11 +3546,14 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                 if not store.rollups_ever_built():
                     # a fresh store: the incremental's precondition (a prior
                     # full build) cannot hold — go straight to the full build
-                    # instead of raising through it (review 11 item 3.1)
-                    raise RuntimeError("first analytics build of this store")
-                # payer-slice update: cost scales with the new files' payers,
-                # not the whole store (an hour-long full scan on a big book)
-                r = store.update_rollups_incremental(skip_if_busy=True)
+                    # (review 11 item 3.1), and say THAT, not "incremental
+                    # unavailable … running a full rebuild" (review 12 4.1g)
+                    log.info("first analytics build of this store — building them in full")
+                    r = store.rebuild_rollups(skip_if_busy=True)
+                else:
+                    # payer-slice update: cost scales with the new files'
+                    # payers, not the whole store (an hour-long full scan)
+                    r = store.update_rollups_incremental(skip_if_busy=True)
             except Exception as e:  # noqa: BLE001 — incremental is an
                 # optimization with strict preconditions (prior full build,
                 # current schema, payer recorded); the full rebuild is the

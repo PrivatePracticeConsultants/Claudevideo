@@ -1204,6 +1204,28 @@ def filters_in_words(described: dict) -> str:
     return "; ".join(out) or "none"
 
 
+SLOW_CALL_LOG_SECONDS = 5.0
+
+
+def _log_if_slow(label: str):
+    """Log a call slower than SLOW_CALL_LOG_SECONDS to serve.log: the 38-60 s
+    first /api/stats seen twice in round 10 left no trace (review 12 4.1i)."""
+    import functools
+
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*a, **k):
+            t0 = time.monotonic()
+            try:
+                return fn(*a, **k)
+            finally:
+                took = time.monotonic() - t0
+                if took > SLOW_CALL_LOG_SECONDS:
+                    log.warning("%s took %.1f s", label, took)
+        return wrapper
+    return deco
+
+
 def _pooled_line(store: Store) -> str | None:
     """The pooled-months sentence (review 12 item 2.5); cosmetic tier."""
     try:
@@ -4401,6 +4423,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     # -- misc -------------------------------------------------------------------------------
 
     @app.get("/api/stats")
+    @_log_if_slow("/api/stats")
     def stats():
         # the whole-store counts are cached + single-flight (store_stats): this
         # endpoint is on the dashboard's 15s poll, and an uncached
@@ -4431,6 +4454,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 "data_generation": store.data_generation}
 
     @app.get("/api/boot")
+    @_log_if_slow("/api/boot")
     def boot_info():
         """The one thing the first paint needs from /api/stats (whose
         whole-store counts made the table wait 1.2-1.7 s — review 10 1.4)."""

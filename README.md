@@ -342,7 +342,7 @@ badge and are never displayed as authoritative; confirming a URL persists it to
 
 `config/known_sources.yaml` is a shipped catalog of every payer entry point
 this app has been live-tested against — each entry carries its verification
-date and what happened (files listed, rows ingested, quirks). 110 entries (as of 2026-11-07) are
+date and what happened (files listed, rows ingested, quirks). 109 of its 150 entries (as of 2026-11-11) are
 **auto-queueable** (Highmark's 15 hosted Blue plans incl. FL/AZ/ID/MN/LA/NE,
 BCBS Mississippi's stable TOC, BCBS Tennessee's /tcr directory page,
 Cigna's signed-manifest page, BCBS South Carolina's CloudFront indexes,
@@ -360,7 +360,7 @@ SelectHealth's per-plan index directory (UT/ID/NV), Moda Health's
 first-of-month TOCs (OR/AK/TX), the First Health PPO rental network
 via Healthgram's stable TOC, Tufts Health Public Plans (MA), and Security
 Health Plan's per-employer zip-TOC listing (WI)); the
-rest (34) are portals that need a browser click (Humana, HCSC,
+rest (41) are portals that need a browser click (Humana, HCSC,
 BCBS AL/MA/RI/VT/KS, Wellmark, Horizon NJ,
 Premera, Priority Health, HMSA, Blue Shield
 of CA, Excellus, Capital BC, IBX, BCBS MN, UHS, plus a batch from the

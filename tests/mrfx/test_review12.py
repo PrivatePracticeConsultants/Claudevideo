@@ -640,7 +640,9 @@ def test_visit_value_is_the_same_on_two_generations(vv_app, store):
     """3.2 determinism: the same question on an unchanged store after a
     rebuild (a new generation) returns the same bytes. was: 404."""
     body = {**VV_BODY, "subject": "730000003"}
-    one = vv_app.post("/api/schedule/visit/market", json=body).content
+    first = vv_app.post("/api/schedule/visit/market", json=body)
+    assert first.status_code == 200          # (on 68d9bc7 two 404s were "identical")
+    one = first.content
     csv_one = vv_app.post("/api/schedule/visit/market.csv", json=body).content
     store.rebuild_rollups()
     two = vv_app.post("/api/schedule/visit/market", json=body).content
@@ -663,3 +665,139 @@ def test_visit_value_reads_the_materialised_medians(vv_app, store, monkeypatch):
     monkeypatch.setattr(bm, "_house_eligible", lambda m: False)
     live = market_visit_value.uncached(store, VV_BODY["market"], None, "ortho", "730000003")
     assert json.dumps(fast, sort_keys=True) == json.dumps(live, sort_keys=True)
+
+
+# ------------------------------------------------ Group 4: small items (P3) --
+
+def test_markets_state_ranking_lists_only_real_states(cfg, store):
+    """4.1(a): five practices filed under the military mail code AE beside
+    five in MO. was: the state ranking listed "AE" as a state."""
+    rows, dirs = [], []
+    for i, st in enumerate(["AE"] * 5 + ["MO"] * 5):
+        tin, npi = str(441000000 + i), str(1427594896 + i)
+        rows.append(dict(payer="Aetna", tin_value=tin, tin_type="ein", npi=npi,
+                         source_file="g.json", billing_code="97110", billing_code_type="CPT",
+                         discipline="PT", is_timed=True, billing_class="professional",
+                         negotiated_rate=40.0 + i, negotiated_type="negotiated",
+                         is_dollar_rate=True, billing_code_modifier=[], service_code=["11"],
+                         file_month="2026-06", last_updated_on="2026-06-01",
+                         expiration_date=None, schema_version="2.0.0",
+                         tin_is_really_npi=False, state=st))
+        dirs.append(dict(npi=npi, org_name=f"Clinic {i}", entity_type="NPI-2",
+                         taxonomy_code="261QP2000X", taxonomy_codes="261QP2000X",
+                         city="Town", state=st, address="x", zip="64105", phone=None))
+    with store.rates_part_writer("g.json") as w:
+        w.write_batch(rows)
+    store.save_npis_bulk(dirs)
+    store.rebuild_rollups()
+    store.upsert_file("g.json", payer="Aetna", status="done", file_type="in_network",
+                      last_updated_on="2026-06-01")
+    c = TestClient(create_app(cfg, store), base_url="http://localhost")
+    r = c.post("/api/market/geography", json={"code": "97110", "market": {"month": "2026-06"}})
+    assert r.status_code == 200, r.text
+    assert [x["state"] for x in r.json()["states"]] == ["MO"]
+
+
+def test_a_restart_from_zero_does_not_sample_old_splices(cfg, srv):
+    """4.1(b) (agent_diff/s8_stale_splices.py): no validator; the resume is
+    answered from byte 0 under a plausible Content-Range, caught as too long,
+    and the file is fetched fresh. was: 5 requests — two 64 KB samples of a
+    splice that no longer existed."""
+    import os
+    body = os.urandom(900_000)
+    st = {"n": 0}
+
+    def route(req):
+        st["n"] += 1
+        rng = req.headers.get("Range")
+        if st["n"] == 1:
+            return 200, {"Accept-Ranges": "bytes"}, body, 300 << 10
+        if rng and st["n"] == 2:       # claims the tail, sends the whole file
+            a = int(rng.split("=", 1)[1].split("-")[0])
+            return 206, {"Content-Range": f"bytes {a}-{len(body) - 1}/{len(body)}",
+                         "Content-Length": str(len(body))}, body, None
+        return ranged(body, req)
+    s = srv({"/f.bin": route})
+    cfg.download_retries = 4
+    sha, _ = fetch.download(cfg, s.base + "/f.bin", cfg.downloads_dir / "f.bin")
+    assert sha == _sha(body)
+    assert len(s.hits("/f.bin")) == 3, s.hits("/f.bin")
+
+
+def test_a_validator_temp_left_by_a_kill_is_swept(cfg, store):
+    """4.1(c): `<name>.part.val.tmp` (a kill between _write_val's write and
+    rename). was: left in data/downloads forever."""
+    litter = cfg.downloads_dir / "abc_x.json.gz.part.val.tmp"
+    litter.write_text('{"validator": "x"}')
+    fetch.run_queue(cfg, store, drain=True)
+    assert not litter.exists()
+
+
+def test_a_big_inbox_file_says_it_is_being_identified(cfg, store, monkeypatch):
+    """4.1(d): the identity read before the parse puts a progress line on the
+    file's row. was: no line (minutes of 'processing' with no progress on a
+    4 GB USB drop); IDENTITY_NOTE_BYTES did not exist."""
+    from mrfx import ingest
+    monkeypatch.setattr(ingest, "IDENTITY_NOTE_BYTES", 0)
+    notes = []
+    real = store.upsert_file
+
+    def spy(name, **f):
+        if "error" in f and f["error"] and "reading the file once" in f["error"]:
+            notes.append(f["error"])
+        return real(name, **f)
+    monkeypatch.setattr(store, "upsert_file", spy)
+    (cfg.inbox_dir / "big_2026-05.json.gz").write_bytes(gz(rate_doc(n=20)))
+    assert [r["status"] for r in scan_inbox(cfg, store)] == ["done"]
+    assert notes and " of " in notes[0] and "MB" in notes[0], notes
+    assert q(store, "SELECT error FROM files")[0][0] is None
+
+
+def test_mrfx_status_opens_the_store_once(cfg, store, monkeypatch, capsys):
+    """4.1(e): was: three Store opens (the Medicare and reference lines each
+    opened their own — "analytics memory budget" printed 3x after the table)."""
+    from types import SimpleNamespace
+
+    from mrfx import cli
+    opened = []
+
+    class Counting(Store):
+        def __init__(self, *a, **k):
+            opened.append(1)
+            super().__init__(*a, **k)
+    monkeypatch.setattr(cli, "Store", Counting)
+    monkeypatch.setattr(cli, "_something_owns_the_port", lambda *a, **k: False)
+    cli.cmd_status(cfg, SimpleNamespace())
+    assert len(opened) == 1
+
+
+def test_a_complete_download_without_its_record_shows_its_size(cfg, store):
+    """4.1(f) (review11 seams/dest_no_sidecar.py): the complete file is
+    reused with no request, its record rebuilt from the bytes, and the row
+    shows its size. was: fetched, requests [], bytes 0 of 0."""
+    body = gz(rate_doc(n=40))
+    url = "http://127.0.0.1:9/kept.json.gz"
+    fetch.add_urls(store, [url])
+    dest = cfg.downloads_dir / fetch.filename_for(url)
+    dest.write_bytes(body)
+    rec = store.next_queued_url()
+    assert fetch.fetch_url_record(cfg, store, rec) is True
+    assert q(store, "SELECT status, bytes_done, bytes_total FROM url_queue") == [
+        ("fetched", len(body), len(body))]
+    assert fetch._meta_path(dest).exists()
+
+
+def test_the_test_client_dependency_is_decided():
+    """4.1(j), decided: httpx2 stays out of requirements.txt (it installs on
+    the user's PC; the app needs httpx only) and starlette stays pinned. The
+    suite fails here the day starlette moves without httpx2. was: no guard —
+    the notice printed on every run and a bump would have broken the import."""
+    import importlib.util
+    from pathlib import Path
+
+    import starlette
+    pinned = [ln.split("==")[1].strip() for ln in
+              (Path(__file__).resolve().parents[2] / "requirements.txt").read_text().splitlines()
+              if ln.startswith("starlette==")]
+    assert pinned == [starlette.__version__] or importlib.util.find_spec("httpx2"), (
+        "starlette moved: add httpx2 to requirements.txt first (its test client needs it)")

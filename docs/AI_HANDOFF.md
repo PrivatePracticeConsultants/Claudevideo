@@ -60,13 +60,14 @@ Two codebases live in this repo:
 | NPPES weekly incrementals (`enrich.apply_weekly_update`) | NPPES publishes a full file monthly and small incrementals weekly; without them names, taxonomies, enumeration and deactivation dates run up to a month stale — worst for the two feeds built on exactly those columns. A weekly REPLACES the cached row for each NPI it contains and leaves every other row untouched: it is authoritative for what it contains and says nothing about what it omits. Reuses `_write_nppes_parquet` (via its `src` parameter) so a weekly row and a monthly row can never be parsed by two slightly different readers, merges in DuckDB, and swaps in via `replace_with_retry` only once the merged file is complete. Refuses rather than half-applying: no cache to merge into, or a file yielding no NPI rows, both leave the existing cache intact. `mrfx enrich --weekly <path>`. |
 | `mrfx/leverage.py` | **Walk-away leverage** — the question that actually decides a negotiation: what happens to the PAYER if this practice leaves. Combines three things that sat on three tabs and were never joined: the payer's roster (its other contracted practices), the ZCTA centroids (how far away they are), and ACS seniors (the demand they'd absorb). `network_leverage` places every practice at the ZIP most of its NPIs share and counts the payer's alternatives inside a radius; `leverage_summary` ranks every payer thinnest-first, fault-isolated per payer. THE RAIL THAT MATTERS: a published rate is a CONTRACT, not proof a practice is open or taking patients, so the count is an UPPER bound on the payer's real fallback — the error runs toward understating the client's leverage, and the note says so in that direction. Explicitly not a network-adequacy finding. |
 | `mrfx/visit.py` | **One standard visit, priced per payer** (Rate card tab, `/api/schedule/visit`). A fixed basket of timed codes + minutes; units by the CMS 8-minute rule exactly as Pub. 100-04 ch. 5 sec. 20.2 writes it (total minutes fix the units, whole 15-minute units first, the rest by most minutes left — its five worked examples are tests), with the per-code "rule of eights" count beside it and flagged when it differs. Priced from `compute_fee_schedule` (the rate card's rates); a payer missing any code gets NO total (never $0-priced). Flags the 97140+97530 pair (NCCI ch. XI sec. P.2: different timed intervals + 59/XU). The default basket = the four most-billed timed codes on 2023 all-payer claims, one unit each; presets in `PRESETS`. The number is the CONTRACTED value per visit — the NRPV ceiling; no Medicare total (MPPR needs the PE RVU split the `mpfs` table does not keep). `tests/mrfx/test_standard_visit.py`. |
+| `mrfx/visit_market.py` | **Visit value in this market** (Rate card tab, `/api/schedule/visit/market`, `.csv`, `/api/report/visitvalue`, and inside the printable rate card / its CSV when State and Discipline are set). One visit basket priced at every practice (TIN) of ONE state and ONE discipline per payer: practices, mean, median, P25, P75; all payers = each practice's median of its own payer values; an optional subject placed in each spread. Reads the per-discipline materialised medians (`benchmark.DISC_PAYER_PRACTICE_MEDIANS`). Rules in "Round 12 additions"; known answer in `tests/mrfx/test_review12.py`. |
 | `mrfx/economics.py` | **Per-visit value + volume-weighted position.** `visit_economics` prices the practice's OWN Medicare code mix per payer, turning "$44 for 97110" into "an Aetna visit is worth $115.54" — the unit an owner's P&L speaks. The mix is RE-NORMALIZED over the codes each payer actually prices, so a payer that simply doesn't publish a code is never made to look cheap by pricing it at zero (`mix_coverage_pct` exposes a thin overlap). Medicare counts SERVICES, not visits, so a per-visit figure needs a units-per-visit divisor that is the USER's assumption, validated (0.5–20) and echoed as one; with none supplied, figures stay per-unit rather than being invented. `weighted_position` weights the headline percentile by the practice's own volumes — and REFUSES below `MIN_WEIGHT_COVERAGE_PCT` (50%) coverage, because weighting a fragment misrepresents the whole. |
 | `mrfx/dossier.py` | **Prospect dossier + market report.** Pure recombination: identity, Medicare size, rate position, weakest payer, leverage, referral sources and market demand on ONE branded page for a cold call; and the metro-level story (city rate map, concentration, payer posture, openings/closures, demand) as a document sellable before having a client there. Both are section-fault-isolated and LIST what they could not build with the reason — a branded page with a silently missing section reads as a complete picture when it is not. The dossier REFUSES a subject that is not really in the store (`resolve_subject_tins` falls through to the raw string, so a typo would otherwise render a fully-omitted page a user might send). |
 | Growth, service lines, cash anchors | `utilization.practice_growth` compares a practice's Medicare volume across two PUF years, counting ONLY codes present in BOTH — CMS suppression can create or destroy a code line with nothing changing in the practice, so those are listed apart and never booked as movement. `utilization.service_line_gaps` finds codes nearby therapy practices BILL that this one does not (billing behaviour, distinct from contract gaps' published-rate question). `hospital.cash_anchors` surfaces the discounted-cash and gross columns the importer already stored but nothing displayed — a local self-pay anchor for a practice setting its own cash rate, with the reminder that a hospital's facility price should sit ABOVE a private practice's. |
 | **Parameter-abuse class + weekly dedupe (second audit round)** | A follow-up audit asked "is everything actually audited" and answered it with a coverage sweep instead of a claim. It found a CLASS the 1,586-call malformed-body fuzzer structurally misses: WELL-FORMED bodies with count-like params at hostile values. Three live 500s (`min_practices<=0` indexed an empty list in `size_premium`; negative `limit` reached DuckDB as a binder error in `local_rate_map` and `steal_share`) plus the same latent bug masked in `hospital_parity`, and a fabrication path (`min_codes<=0` let a zero-rankable payer be verdicted "one rate for everyone"). Class fix: `_bounded_int` at every wire site in api.py AND clamps inside each compute function (CLI callers covered too); `scratchpad/adv_param_abuse.py` now sweeps every POST route from the app's own route table (2,964 calls, 0 5xx) so a new endpoint is attacked without editing the harness. Separately: `apply_weekly_update` trusted the weekly file to be internally unique — a duplicated NPI left TWO cache rows and every join double-counted that provider. The merge now dedupes the weekly side keeping the file's LATER occurrence (`file_row_number`, later row = later update), and the summary counts NPIs, not raw rows. Also `sparkline()` drops non-finite values before building the SVG path (NaN/inf wrote literal "nan" into `d=` — a broken picture in a client report). All regression-tested. |
 | **Gap closures against the original nine-item analysis** | Six items were delivered as engines but not at the surface the ask named, and one reversed it. **(2) Payer posture** — `quality.payer_posture` splits `negotiated` from `fee schedule` and badges each payer "negotiates" vs "one schedule for everyone". The first cut had folded both into `CONTRACTED_TYPES`, erasing the exact distinction: those two values are both contracted amounts but say OPPOSITE things about whether a negotiation is winnable. It reports the payer's CLAIM (the field) beside the OBSERVATION (does that payer actually price practices differently), and when they disagree it says so instead of picking one; under `min_codes` shared codes it refuses to judge at all. **(3) Freshness** now rides on the payer roster and, as `benchmark["stale_payers"]`, into the pitch report as a publication-age banner. **(5) Real-terms** reaches the pitch report (`_erosion_block`) and `compare_to_baseline`'s `real_terms` (a win restated in baseline dollars). **(6) Sparklines** reach the rate card and the packet's month page, not just the pitch report. **(7) `radius_rate_map`** answers the ask's actual question — same payer, same code, 30 miles apart — by placing each practice at its own ZIP's centroid (city names cannot: a metro's edge is 40 miles from its centre). Band edges are CLIPPED AND EXTENDED to the requested radius and `unbanded` is asserted to be 0, after a test caught practices inside the radius but past the last fixed edge silently vanishing from the table. **(9) `_add_miles`** puts distance on every steal-share row so a call list is a route, not just a ranking. |
 | `mrfx/territory.py` | Three market-structure answers below the state line. **`local_rate_map`** — one code's median by CITY inside ONE state (a state is REQUIRED: pooling cities across states buries the far larger state effect), same `MIN_CELL` suppression as the state map, and suppressed cities are COUNTED so a thin city doesn't read as "nothing there". **`payer_concentration`** — HHI over each payer's share of contracted practice relationships, with DOJ bands. The caveat outranks the number: this is the share of PUBLISHED RELATIONSHIPS IN THIS STORE, not covered lives, so it is only as complete as the files ingested — under 5 payers it returns `thin: true` and NO band, because with three payers the minimum possible HHI is 3333 and the index would call every market concentrated by construction. **`steal_share`** — physicians who send therapy patients to other practices in a client's own cities and little or nothing to the client, ranked by the gap; `already_a_partner` separates "sends you some" from "sends you none". Shared-patient counts are a proxy for referral, not a record of one, and every surface says so. |
-| `mrfx/quality.py` | Three questions a rate doesn't answer about itself. **`rate_type_mix`** — how much of a market is a contracted amount (`negotiated` / `fee schedule`) vs one the payer DERIVED where it has no contracted figure. Reported, never silently filtered: excluding derived rates by default would move every number the user has already seen, so composition is the finding and acting on it is their call; `code_type_flag` does the same for a client's OWN rates, where "the payer derived your rate" changes what the ask is. **`payer_freshness`** — per payer `last_updated_on` age, with three distinct states (fresh / stale / **unreadable-or-unstated**): a date we cannot parse must not pass as fresh and must not be called stale either. **`size_premium`** — answers the standard objection "the practices above me are bigger" by ranking each practice with `percent_rank()` WITHIN (payer, code) — so a payer's overall generosity can't masquerade as a size effect — then comparing coarse provider-count bands. A band under `min_practices` is marked `thin` with null figures rather than reported, and a subject with no rankable cell gets a "can't say" reason, distinguished from a typo (which refuses) by an explicit presence check. |
+| `mrfx/quality.py` | Three questions a rate doesn't answer about itself. **`rate_type_mix`** — how much of a market is a contracted amount (`negotiated` / `fee schedule`) vs one the payer DERIVED where it has no contracted figure. Reported, never silently filtered: excluding derived rates by default would move every number the user has already seen, so composition is the finding and acting on it is their call; `code_type_flag` does the same for a client's OWN rates, where "the payer derived your rate" changes what the ask is. **`payer_freshness`** — per payer `last_updated_on` age, with three distinct states (fresh / stale / **unreadable-or-unstated**): a date we cannot parse must not pass as fresh and must not be called stale either. **`size_premium`** — answers the standard objection "the practices above me are bigger" by ranking each practice with the mid-rank (`leads.midrank_pct_sql`, the one position rule) WITHIN (payer, code) — so a payer's overall generosity can't masquerade as a size effect — then comparing coarse provider-count bands. A band under `min_practices` is marked `thin` with null figures rather than reported, and a subject with no rankable cell gets a "can't say" reason, distinguished from a typo (which refuses) by an explicit presence check. |
 | `mrfx/hospital.py` | CMS hospital price-transparency import + parity. Reads both v2.x shapes — the tall CSV (2-line identity preamble above the real header, columns token-matched because vendor templates drift) and the JSON (streamed with ijson; these reach several GB). Keeps ONLY therapy codes, outpatient/both settings, and DOLLAR amounts: a percent-of-charges term or an algorithm description is not a price, $0 is a placeholder, and an `estimated_amount` is stored separately and labelled an estimate. **Hospital rates live in `hospital/*.parquet` behind the `hospital_rates` view — NEVER in `rates`**: a facility (HOPD) payment is a different product under a different mandate, and letting one into the spine would move every practice median in the app (regression-tested). `hospital_parity` matches on payer name AND billing code only — no fuzzy payer matching, because inventing a match invents the comparison — and reports a RATIO, never a subtraction presented as money owed. Every surface carries the facility-vs-professional caveat. A file we cannot read is refused with what was wrong; a valid file with no therapy line reports that and writes no part. |
 | `mrfx/inflation.py` | Real-terms erosion — the one place the app says that a rate held flat is a pay CUT. CPI-U annual averages (BLS CUUR0000SA0, 1982-84=100) ship in `DEFAULT_VALUES`; the user extends them per published year with `mrfx inflation --year --value` or `POST /api/inflation`, stored in `inflation_index` (user years win). **A year with no index value REFUSES with a reason and a fix — never an extrapolation**; an explicit `assume_inflation_pct` is allowed and is echoed as an ASSUMPTION everywhere it is used, and it is validated even when the index makes it unnecessary. Real change is the compounding ratio `(1+nominal)/(1+inflation)-1`, not `nominal - inflation` — subtraction drifts over multi-year spans and drifts in the direction that makes a cut look smaller. Every output carries the CPI-is-a-consumer-basket caveat. `compute_payer_trajectory` gains `real_cumulative_pct` / `erosion_line` per payer. |
 | Closure feed (`nppes.closures`) | The mirror of the new-clinic feed, off the same bulk cache: therapy NPIs DEACTIVATED recently and **not since reactivated** (NPPES deactivates for paperwork lapses as often as closures, so a reactivated NPI never closed). `NPI Deactivation Date` / `NPI Reactivation Date` joined `_NPPES_CACHE_COLS` and `_NPPES_CACHE_SCHEMA` went to 4, so an existing cache rebuilds once. Two consulting uses: a closed REFERRAL SOURCE is a hole in a client's inbound volume, and a closed COMPETITOR is room — `in_store` marks the ones that carried published rates. Packet section 6 intersects a client's own inbound referral partners with the feed. Every surface says a deactivated NPI is a call to make, never a fact to print. |
@@ -474,7 +475,9 @@ Two codebases live in this repo:
 - **Printing**: `rounding.signed_pct` for every signed %; footers use
   `benchmark.market_in_words`.
 - **Lanes are claim preferences only**: the downloader never hands a started
-  download back (one GET per file); slot 0 helps with big files; no lanes
+  download back (one body GET per file — since 0.7.5 a small-file slot may send
+  a 1-byte size probe first, so 1-2 requests per file; never "restore" one
+  GET); slot 0 helps with big files; no lanes
   with <= 2 slots. User actions and parks clear `waiting_on`.
 
 ### Audit 8 additions (Nov 10, 2026) — rules a change must keep
@@ -683,6 +686,99 @@ reproducing scripts are under `docs/review11_repros/`.
   downloads" frees the slot at once; a refused range-ignoring 200 does not
   spend the retry budget.
 
+### Round 12 additions (Nov 11, 2026, v0.7.6) — rules a change must keep
+
+Pinned by `tests/mrfx/test_review12.py` (every Group 1-3 and 4.1 a-f case
+fails on 68d9bc7); the reproducing scripts are under `docs/review12_repros/`.
+
+- **Several files of one payer and one month are POOLED, never superseded**
+  (item 2.5, decided with real files). The spine groups by (payer, TIN, code,
+  modifiers, class, POS, month) and pools every file of that month: a practice
+  priced in two of them gets the median of the rates they give. Measured:
+  Tufts' 2026-11 subsidized and non-subsidized books are two files with the
+  same date; 43,810 of 46,149 contract lines are in both, 1,350 at different
+  rates — two plan books, not a correction, and no file is "newer". A newest-
+  file-per-contract rule would drop one book at random. What the app does
+  instead is SAY it, with numbers: `quality.pooled_month_files` (one spine
+  aggregate per data generation) feeds the Files tab ("Pooled months: …") and
+  every methodology (`api.methodology_text`, `benchmark.methodology_footer`).
+  A payer that republishes a corrected file under a new name in the same month
+  is pooled with the file it corrects — the user removes the old one. The plan
+  dimension (`plan_index`, `spine_relation`) is the tool that separates books.
+- **The dashboard opens first; a stored-row update never sits in front of
+  it** (item 2.9, decided). `_migrate_row_rules(budget_s)`: `mrfx serve` opens
+  the store with `migrate_budget_s=MIGRATION_BUDGET_S` (30 s), checked between
+  slices of 200 files / between parts; the files not reached are returned and
+  `Store.finish_row_rules_in_background` updates them one at a time under the
+  per-file claim an ingest takes (`ingest._claim_ingest`; a file being loaded
+  is skipped — its new part is written under the current rules), then runs the
+  incremental rollup; `Store.rows_update` feeds the Files tab line "Updating
+  stored rows … k of N files — numbers from the files not yet updated can still
+  change". Every CLI command opens without a budget (an export or a report
+  must never mix rule versions). A new stored-row rule bumps
+  `ROW_RULES_VERSION` and inherits this.
+- **Visit value in this market** (item 3.2; `mrfx/visit_market.py`):
+  confined to one state and one discipline, both required (a sentence, never
+  an empty table, without them); payers optional; population = the
+  Benchmark's market on the house basis, a practice = a TIN located in the
+  state; a practice x payer pair counts only when the payer prices EVERY code
+  of the basket (partial pairs excluded and counted); visit value = units x
+  rate rounded as the visit calculator rounds (rate, line, total to the cent);
+  all payers = each practice's median of its own payer values, never a
+  cross-payer sum; a cell under 5 practices (`market._MIN_CELL`) prints no
+  number and no count; the subject's value is `price_visit`'s (the rate card's
+  rates, round 9's subject rule), its percentile the mid-rank among the payer's
+  practices with the subject counted once in place of its own TINs ("this
+  practice included"), its $ / % from the unrounded mean and median rounded
+  once, its quartile from the printed P25 / median / P75; every printed number
+  through `half_up`; rows by payer, all payers last; screen, printable and CSV
+  render one dict (`block_html`, `to_csv`, the JSON); generation-cached; no
+  per-request scan — the per-discipline table `practice_medians_disc_payer_v1`
+  (built once per spine generation; `practice_base_sql` routes any per-payer
+  house market with a discipline through it, and `test_round7`'s both-ways
+  test covers it).
+- **A `.val` records its validator's KIND** (item 1.2): `{"validator",
+  "kind": "etag"|"last_modified", "total"}`; an older `.val` is classified by
+  shape (quoted / `W/` = ETag, an HTTP date = Last-Modified, anything else an
+  unquoted ETag). A resume compares like with like (`_same_validator(started,
+  resp)`); a response with no header of that kind proves nothing. Every path
+  that drops the `.part` also clears `splices` and counts a restart; the
+  set-aside sentence reads what is kept from disk.
+- **An 'ingesting' url row is an owner only while THIS process holds it**
+  (item 1.3): `Store._live_url_ingests` (processor claims and won content
+  claims). An inbox copy never waits on an orphan; its wait also ends on the
+  Files tab's stop and on shutdown. Every entry point that opens the store
+  with no server (`serve`, `ingest`, `add`) runs `recover_stuck_urls` beside
+  `recover_stuck_files`.
+- **A re-expanded index works with the links it hands over NOW** (item 1.4):
+  probes and re-downloads use the current child link (keyed by `dedup_key`);
+  `_enqueue_one` keeps the newest link on any row not in flight (also a
+  re-pasted queued / paused row, item 2.4); `_server_now` retries a 403 as a
+  browser and repairs an incomplete chain (never weakened), 20 s timeout, and
+  the whole re-check stops after `RECHECK_BUDGET_S` (300 s). A child loaded
+  without a server record is compared by the size its load recorded
+  (`content_fingerprints.size`, item 2.3).
+- **Nothing an index does after "Clear queue" sticks** (item 1.5): the
+  re-check stops asking, `requeue_republished(parent_id=…)` and the final
+  done / failed / skipped writes (`update_url(only_if_status="expanding")`)
+  happen only while the index is still 'expanding', in the same locked step.
+- **One automatic memory rule** (item 2.6): `store.auto_pool_gb` = 40 % of RAM,
+  2-12 GB, never more than RAM - 3 GB (OS) - 2 x 2 GB (parser workers); the
+  shipped config leaves `duckdb_memory_gb` unset, and `fetch._ram_worker_cap`
+  sizes the workers from the same pool. Every config key a guide tells the
+  user to set is in `config/mrfx.yaml`, at least commented (tested).
+- **Feeds filter on distance before the limit** (item 2.7, `nppes._feed_page`).
+  **A proven-identical inbox twin is deleted** when its original is kept
+  unchanged in `data/processed` (item 2.8). **A Medicare anchor is a dollar
+  amount above zero** (item 2.1: refused at upload; a stored non-finite rate
+  is no anchor).
+- **`serve` treats SIGTERM as Ctrl-C** on POSIX (item 4.1h): the `finally`
+  runs, the pool is shut before the URL worker is stopped, and its queues are
+  closed (`ingest._release_pool_resources`) — no "leaked semaphore" line.
+  `/api/stats` and `/api/boot` log any call over 5 s (`api._log_if_slow`).
+  httpx2 stays out of `requirements.txt` with starlette pinned (decided,
+  item 4.1j; `test_review12` fails if starlette moves without it).
+
 ## Step 4 — Know the URL pipeline states
 
 The whole machine, derived by instrumenting every status-changing store
@@ -711,7 +807,8 @@ ingesting ──ingest failed / unknown shape / preflight error─────�
 ingesting ──ingest pending_confirmation────────────────────────────────────► oversize
 ingesting ──ingest "requeued" (pool restart / shutdown)───────────────────► fetched
 expanding ──expansion ok, row still 'expanding'────────────────────────────► done (kind toc; children queued)
-expanding ──the user cleared it meanwhile─────────────────────────────────► (stays skipped; no child queued)
+expanding ──the user cleared it meanwhile (enqueue, re-check, or the final
+          write — each checks 'expanding' in its locked step)─────────────► (stays skipped; nothing queued)
 expanding ──no in-network files / parse error─────────────────────────────► failed | skipped
 paused ──wake_paused_urls (timer, 60 s coordinator, start) / wake_parked_urls
        (idle downloader) / user retry ("try now") / requeue_failed─────────► queued
@@ -721,7 +818,9 @@ failed ──user retry / requeue_failed / re-paste / re-expand / force_size /
 failed ──user skip─────────────────────────────────────────────────────────► skipped
 skipped ──user retry / force_size / direct re-paste (never a re-expand) /
         resume_canceled (kind canceled) / revive_skipped_duplicates (kind
-        duplicate; a link or INBOX twin failed) / record_identity──────────► queued
+        duplicate; a link or INBOX twin failed) / record_identity /
+        recover_stuck_urls (kind duplicate deferred to an inbox file whose
+        load did not finish, no live part under its name)─────────────────► queued
 oversize ──user retry / force_size / re-paste / requeue_oversize_within
          (size known and now fits) / re-expand (only if it now fits)───────► queued
 oversize ──user skip───────────────────────────────────────────────────────► skipped
@@ -946,7 +1045,8 @@ inbox, `inbox/.held/` or `inbox/.replacing/`.
 
 ## Step 7 — Test and verify like the history did
 
-- `.venv/bin/python -m pytest tests/ -q -m quick` — the ~3-min inner loop
+- `.venv/bin/python -m pytest tests/ -q -m quick` — the ~3.5-min inner loop (CLAUDE.md
+  has the current count and time)
   (497 of 866 tests, 2 min 48 s on Nov 6 2026; the >= 0.5 s ones are listed in
   `tests/slow_tests.txt` — regenerate it from a `--durations=0` run).
   Run the full suite before every commit that touches numbers.
@@ -970,8 +1070,8 @@ inbox, `inbox/.held/` or `inbox/.replacing/`.
 
 ## Step 7b — The source catalog is the map
 
-`config/known_sources.yaml` holds 38 auto-queueable sources + 34 probed
-portals, each with verified dates and real row counts — treat it as ground
+`config/known_sources.yaml` holds 150 entries — 109 auto-queueable sources +
+41 probed portals (README's counts are tested against the file), each with verified dates and real row counts — treat it as ground
 truth for "does this source work and what should it yield". The largest
 verified single-file ingests: Cigna CHLIC 243.4M rows, Aetna CA 83.7M, UHC
 Charter 617 64.0M (8.85 GB gz), NC PPO 23.7M, upper-midwest zip 19.8M.
@@ -994,7 +1094,8 @@ condition that isn't an equality between the two sides
 (`test_no_grain_relation_plans_a_nested_loop_join` pins the grain relations).
 `docs/NEXT_STEPS_PROMPT_4.md` was the output-speed plan (executed; status block);
 `docs/NEXT_STEPS_PROMPT_5.md` was the round-5 plan (install robustness, idle
-polling, the DuckDB visibility bug, the Explorer's pooled default, joined-column
+polling, the DuckDB visibility bug, the Explorer's then-pooled default (round 10
+made "latest" the default), joined-column
 filters — executed; status block at its top). `docs/NEXT_STEPS_PROMPT_6.md` was
 the round-6 audit of every output (executed; status block at its top): each
 payer's own months for packets, digest, rate changes and new-to-network; the
@@ -1114,8 +1215,10 @@ lists the full audit plan; these are what it left open):
   at the bulk NPPES file for big books, and Ctrl-C skips the rest cleanly
   (`tests/mrfx/test_cli_enrich.py`).
 - Month semantics (round 2, pinned by `tests/mrfx/test_known_answer.py`):
-  the Explorer shows EVERY ingested month (each row carries its Month; the
-  sidecar says "ALL months pooled" — round 5 kept this default and made its
+  the Explorer's default is "latest" since round 10 (each contract's newest
+  month; picking "all months" shows every ingested month, each row carrying
+  its Month, and the sidecar says "ALL months pooled" — round 5 had kept that
+  as the default and made its
   strip cost once per data generation instead); Code comparison and its export use each
   contract's NEWEST month (`FilterSet.latest_only`, `latest=1`), as do the
   report tabs. A payer republishing a byte-identical file under a new name is
@@ -1254,7 +1357,8 @@ not yet built — pick these up before adding features):
     delta`, because parts aren't sorted by TIN (~8 s/slice at 306M); sorting
     parts by (payer, tin_value) at write time would let stats prune it.
   - NPI and entity views are live aggregations: on stores over
-    `api.NARROW_REQUIRED_ROWS` (40M) they need a full NPI/TIN search (NPI view)
+    `api.NARROW_REQUIRED_ROWS` (min(40M, duckdb memory GB x 2.5M) since 0.7.4 —
+    NPI_ROWS_PER_GB) they need a full NPI/TIN search (NPI view)
     or payer AND code (both), else a 422 says what to type. Measured: payer-
     only/code-only NPI view 30-51 s; name search in the NPI view, entity
     code-only and entity TIN search ran out of temp disk. The TIN view (the

@@ -1,8 +1,119 @@
 # Prompt for the next session, round 12 — the 0.7.5 zip audited end to end; what is wrong, what is stale, and one new deliverable (written for Claude Opus 5.5)
 
-> **STATUS: not started.** Baseline for every number and line reference below is
-> commit 68d9bc7 (version 0.7.5), the zip the user was handed. When you are
-> done, replace this block with what closed, in which commit, with the numbers.
+> **STATUS (Nov 11, 2026, v0.7.6): Groups 1–3 closed (every item); Group 4
+> closed except the round-11 carry-overs listed below with the reason.**
+> Commits: group 1 5ce7cfa, group 2 ca6d865, group 3 ef4a45f, group 4 + docs +
+> release + this block: the commit after ef4a45f. The groups share
+> fetch/store hunk by hunk; each commit was built by staging only that group's
+> hunks on the previous commit (and its quick tier run on the staged tree:
+> 568 / 577 / 585 passed), so a few items landed with an earlier group because
+> they live on the same lines — 2.3 and 2.4 and 4.1(b) with group 1, serve's
+> recover_stuck_urls with group 2 — each commit message says which.
+> `tests/mrfx/test_review12.py`: **27 cases; the 26 for Groups 1–3 and
+> 4.1 a–f all fail on 68d9bc7** (run there from a `git archive` of it; the
+> value each got is in its docstring); the 27th is 4.1(j)'s guard, which
+> passes on 68d9bc7's code. Full suite **1194 passed, 0 failed, 30:28** on a
+> quiet box after the last code change; quick tier 465 tests, 465 passed, 3:38; ruff 0; pip-audit
+> clean. `tests/slow_tests.txt` regenerated from that quiet full run
+> (>= 0.5 s: 740 of 1189 timed tests; the quick tier is therefore smaller
+> than 0.7.5's 562 — the box timed slower overall, 30:28 vs 28:34).
+> Existing tests changed on purpose, each with the reason in the test:
+> `test_round7` — the both-ways materialised-medians test now also runs a
+> discipline market and requires the new per-discipline table (it pinned the
+> set of two tables), and the version pin 0.7.5 -> 0.7.6;
+> `test_determinism` gained the visit-value routes (no old assertion
+> changed); `test_audit8_ui`'s starter-links test now also checks README's
+> catalog counts.
+>
+> **Decisions.**
+> - **2.5: pool, and say so.** Measured on the real files here: Tufts
+>   2026-11 publishes its subsidized and non-subsidized books as two files of
+>   one date; 43,810 of 46,149 contract lines (payer, TIN, code, modifiers,
+>   class) are in both, 1,350 at different rates (97110: $15.00 vs $22.51) —
+>   two plan books, not a correction, and neither file is newer (the six other
+>   real files in that run were one per payer and month). A newest-file rule
+>   would drop one book at random. Rule: pooled (median), stated with numbers
+>   on the Files tab and in every methodology ("Pooled months — <payer> <month>:
+>   N files, M practices priced in more than one (K lines at different
+>   rates)"; on the Tufts pair the evidence query counted 5,525 practices in
+>   both files); a corrected re-publication is the user's to remove. AI_HANDOFF
+>   "Round 12 additions".
+> - **2.9: dashboard first.** `serve` gives the stored-row update 30 s
+>   (`MIGRATION_BUDGET_S`), checked between slices of 200 files / parts; the
+>   rest runs behind the dashboard under the per-file ingest claim with a
+>   Files-tab line; CLI commands still finish it first. Evidence: round 9
+>   measured the update at 0.3–0.6 s on SSD for 32 M / 99 M rows but ~1 min
+>   (32 M) to several minutes (300 M) of reads on a spinning USB drive — the
+>   budget leaves a normal start unchanged and caps the silent wait.
+> - **4.1(j): httpx2 stays out** of requirements.txt (it installs on the
+>   user's PC; the app needs httpx only), starlette stays pinned, the test
+>   client's notice is filtered, and a test fails the day starlette moves
+>   without httpx2.
+> - **3.3's "three practices" became six**: the house minimum is five
+>   practices per printed statistic, so a three-practice market prints
+>   nothing by rule (that refusal is asserted too). The hand-worked case (six
+>   practices, two shown payers, one suppressed payer, one partial pair, a
+>   subject at p40 / p50) is written out above its fixture.
+>
+> **Rows: nothing loaded changed.** BCBS-MS 25 MB (2,660,356 rows), UHC-NY
+> 35 MB (20,741), Tufts zip 11 MB (118,895), through the inbox AND through
+> links (local server): each part's row count and the sha256 of its sorted
+> rows IDENTICAL on 68d9bc7 and on the final code (`r12exec/rowid.py`).
+> `fastcheck` 3/3 IDENTICAL (ND HMHS 22 MB, UHC-NY 35 MB, BCBS-MS 25 MB).
+>
+> **Kill harnesses on the final code** (copies under the scratchpad, paths
+> retargeted; s4_kill's own `os.kill` of late orphans replaced by a report):
+> queue `s5_crash.py` seed 4242 × 20: no row left in flight in 20/20, every
+> file its rows, files == parts 9/9 in 19 (trial 2 is killed before
+> `add_urls`, as in round 11), downloads left: none in 20/20 (the "PROBLEM"
+> tag is the harness counting `.verified_parts.json`, as in round 11);
+> download `c10_kill.py` × 12 seed 39616: **12/12 OK** (resume from the
+> `.part`, 0.13 MB re-downloaded, sha == truth, 600 rates); ingest
+> `s4_kill.py` (BCBS-MS + UHC-NY through a 2-worker pool, 20 random + 5 window kills, seed 29258): **25/25 trials correct** and **0/25 left pool workers alive 45 s after the kill**.
+>
+> **Repro scripts after the fixes** (68d9bc7 -> now): `npi_drawer_latest`
+> NPI chart 41.0 -> 42.0 (TIN drawer / Explorer / Code page 42.0);
+> `s1_unquoted_etag` 20 requests, 5.9 MB, FAILED -> OK, 5 requests, 4.1 s;
+> `s2_cli_ingest_wait` scan never returned -> done in 0.5 s; `s4_refresh_old_url`
+> A [index, sig=S1 403] still 2026-05 / 50 -> [index, sig=S2 206, sig=S2 200]
+> 2026-06 / 80, B unchanged-correct, C 206 + 200 + re-parse -> one 1-byte probe,
+> nothing downloaded; `s5_crash_inbox_claim` recover_stuck_urls 0 -> 1, B
+> queued "the inbox load of A.json.gz this deferred to did not finish";
+> `s7_clear_during_recheck` 'done' + six children reloaded -> stays
+> 'skipped/canceled', children 2026-05; `s8_stale_splices` 5 requests -> 3;
+> `mpfs_probe` upload 200 then summary / code / benchmark 422 -> upload 422
+> with the line, all three 200; `s3_probe_bytes` and `s6_probe_escape`
+> unchanged (probed-and-held); `check_rules`, `checks2`, `checks3`,
+> `roundscan` unchanged (0 Python round() in the output modules);
+> `agent_6_8/checks1.py` stops at its own SQL (`_mask_tin_sql('?')` binds one
+> value for two placeholders) on 68d9bc7 and now alike; `agent_9_10/ae_check`
+> puts one practice under AE, below the 5-practice minimum, so it never
+> showed AE on either build — `test_review12` puts five there (was listed,
+> now not). Browser: the Rate card's new block in Chromium on a 12-practice
+> scratch store — refusal without State, the market table, the subject
+> columns, the printable page; 0 console errors, 0 responses >= 400.
+> `serve_stop.py` (4.1h): SIGTERM exit -15 + "5 leaked semaphore objects" ->
+> exit 0, no warning.
+>
+> **Left open, with the reason:**
+> - **Round 11's 3.1 single-pass rollup (COPY … PARTITION_BY).** Not built:
+>   it rewrites the rate spine's build and needs a byte-identical equivalence
+>   run on the 32 M and 99 M stores, which are not on this box (about 4 GB
+>   free). Cost unchanged since round 11: ~85–89 s per 32 M rows (not
+>   re-measured here).
+> - **3.6 segment map, 4.3 one rollup per idle gap, 4.4(h) monotonic clock
+>   through sleep, 4.4(c) filename cap** (the Windows long-path option stays
+>   documented), **round 10's 1.5 / 1.9 residue** (past ~30 M rows only):
+>   not started; none moves a number.
+> - **Windows**: still never run by an agent — no Windows box here. The
+>   install → Start → paste a link → update → Ctrl-C hour remains the most
+>   valuable next step.
+> - 4.2: BCBS South Carolina 403, Western Health Advantage 429 and Jefferson
+>   502 are this box's address / the proxy — left unchanged as the prompt
+>   asked; to be re-checked from the user's network.
+>
+> Baseline for every number and line reference below is commit 68d9bc7
+> (version 0.7.5), the zip the user was handed.
 
 ## How this round was audited (so you can trust, and re-run, the evidence)
 

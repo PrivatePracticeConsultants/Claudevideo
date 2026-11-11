@@ -249,7 +249,7 @@ clean even if you paste every state's index.
   headless browser, which the app downloads for itself on first use. Anthem's
   index is 11.5 GB and asks for "download anyway" unless confirm_over_gb is
   15 or more. Each big index is capped at 2,000 files unless you raise
-  max_toc_files.
+  max_toc_files (in `config/mrfx.yaml`, shown there with a `#` in front).
   The same file lists the remaining browser-only portals (Humana, HCSC, HAP…)
   with instructions in the comments. Click **"Show tested
 sources"** on the Files tab to browse it, or **"Queue tested payer indexes"**
@@ -761,7 +761,8 @@ the time it goes back in line; **try now** sends it back at once. If a server
 sends nothing at all six times in a row, it is treated as down: the file is
 paused for 24 hours (the longer pause above) and then tries again by itself.
 All of this is in `config/mrfx.yaml` (`download_park_seconds: 240`,
-`download_park_minutes: 10`, `download_park_limit: 6`; `0` turns parking off).
+`download_park_minutes: 10`, `download_park_limit: 6`; `download_park_seconds: 0`
+turns parking off).
 
 ---
 
@@ -807,8 +808,9 @@ prompt). They're an alternative to the dashboard buttons.
 - `data/inbox/` — drop MRF files here.
 - `data/downloads/` — where pasted links download to while processing. Each
   file is deleted automatically once its rates are extracted (turn that off
-  with `delete_raw_after_ingest: false` in `config/mrfx.yaml` if you want to
-  keep the raw files).
+  with `delete_raw_after_ingest: false` in `config/mrfx.yaml` — the line is
+  there with a `#` in front; remove the `#` — if you want to keep the raw
+  files).
 - `data/processed/` — files that finished (if `move_processed` is on).
 - `data/failed/` — files that couldn't be read, with a reason in the Files tab.
 - `data/mrfx_store/` — the analyzed database. Delete this folder (or run
@@ -1027,6 +1029,80 @@ Downloads and files:
 - **"fee for service" / "fee_schedule"** spelled differently by a payer no
   longer drop rates.
 
+## What changed in version 0.7.6 (review 12)
+
+**New: what a visit is worth in a market.** On the **Rate card** tab, under
+"One visit, by payer", there is a new box: **Visit value in this market**.
+Pick a **State** and a **Discipline** above (both are needed — a visit's value
+is a market figure, and a market is one state and one discipline), choose the
+visit in the visit box (the default is one 15-minute unit each of 97110,
+97530, 97140 and 97112), and press **Show visit value in this market**. For
+every payer you see how many practices in that state it pays for the whole
+visit, the **average (mean)**, the **median**, and the middle half (**P25** to
+**P75**) of what one visit is worth to those practices — and the same over
+**all payers**, where each practice counts once, at the middle of its own
+payers' values (payers are never added together). Picking a practice is
+optional; when you do, its own visit value with each payer is placed in that
+payer's spread: its percentile, its quartile, and how many dollars and percent
+it sits above or below the average and the median. **An example:** a
+Missouri PT clinic paid $30 by Payer A on all four codes has a $120.00 visit
+with A; if A's six Missouri practices are worth $80, $100, $120, $140, $160
+and $180 a visit, the box shows 6 practices, average $130.00, median $130.00,
+P25 $105.00, P75 $155.00, and the clinic at p40, second quartile, $10.00
+(7.7%) below both the average and the median. A practice counts for a payer
+only if that payer has a rate for **every** code of the visit (a half-priced
+visit is left out, and the box says how many were); a payer with fewer than 5
+practices is not shown. **Open printable** and **Download CSV** give the same
+numbers, and the printable rate card and its CSV include the box when State
+and Discipline are set.
+
+The rest of this round fixed what an end-to-end check of the 0.7.5 zip found:
+
+- **The current-rate chart in an NPI's drawer** now shows the same number as
+  the Explorer and the Code page when a payer changed how it spelled the base
+  modifier between months (it showed an average of the old and new rates).
+- **A download from a server that sends an unusual "ETag"** (without quotes)
+  no longer starts over after every dropped connection; and when a download
+  is set aside, the message now says truthfully how much of it is kept.
+- **`mrfx ingest` no longer waits forever** for a link the program was
+  loading when it was last closed; that link goes back in the queue.
+- **A monthly refresh of an index whose links carry a signature** (a long
+  `?sig=…` part) now finds a republished file, and pressing **Clear queue**
+  while an index is being checked now sticks.
+- **Re-pasting a list of links** with fresh signatures now updates the links
+  still waiting in the queue, so they no longer fail with an expired link.
+- **The first monthly refresh after updating** no longer downloads every file
+  again when nothing changed.
+- **A Medicare fee schedule with a "nan" or a zero rate** is refused with the
+  line number, instead of breaking every screen that shows % of Medicare.
+- **A link that waited for the same file in the inbox** retries by itself if
+  the program was closed before that file finished loading.
+- **Two files of one payer for the same month** (for example two plan books,
+  or a corrected file under a new name) are **pooled**: a practice priced in
+  both gets the middle of the two rates. The Files tab and every methodology
+  now say so, with how many practices are priced in more than one file. If a
+  payer re-posts a corrected file under a new name, remove the old one on the
+  Files tab.
+- **The memory setting is now automatic** (`duckdb_memory_gb` is left out of
+  `config/mrfx.yaml`, leaving room for the file readers). The settings the
+  guides mention (`max_toc_files`, `delete_raw_after_ingest`,
+  `monthly_refresh`, …) are now in `config/mrfx.yaml` with a `#` in front —
+  remove the `#` to change one. Your own `config/mrfx.yaml` is kept by
+  `mrfx update`; the new one arrives beside it as `mrfx.yaml.new`.
+- **New clinics / closures within a radius** now list the nearest ones even
+  when many newer ones exist far away.
+- **A second copy of a file you already loaded** is deleted from the inbox
+  (its original stays in `data/processed`), instead of being kept twice.
+- **After an update that has to adjust stored rates**, the dashboard opens
+  within about 30 seconds and the rest of the adjustment continues behind it;
+  the Files tab shows how far it is.
+- Smaller things: the Markets state list no longer shows military mail codes
+  as states; `mrfx status` prints its memory line once; a big file dropped in
+  the inbox shows "reading the file once …, N of M MB" while it is first
+  read; stopping the server on Mac/Linux no longer prints a "leaked
+  semaphore" warning; Mass General Brigham Health Plan's address in the
+  catalog was updated.
+
 ## What changed in version 0.7.5 (review 11)
 
 This round went over how links are downloaded, how files are loaded and when
@@ -1208,8 +1284,10 @@ arrives (instant on the second click) and has a State box; the outreach
 export is about twice as fast; the medians behind Benchmark and Leads are kept
 across restarts instead of being rebuilt each time.
 
-**Downloads.** Each file is requested once (a big file found by a
-small-file slot keeps downloading instead of being started again), so a queue
+**Downloads.** Each file's body is downloaded once (a big file found by a
+small-file slot keeps downloading instead of being started again; since
+0.7.5 a small-file slot may first ask for 1 byte to learn the file's size),
+so a queue
 of big files finishes sooner and asks the insurer's server for less.
 
 **Safer input.** A wrong value sent to the dashboard gets a plain sentence

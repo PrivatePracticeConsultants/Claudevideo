@@ -160,7 +160,7 @@ https://fallon.sapphiremrfhub.com/
 https://files.nhpri.org/mrf/nhp/TOC/
 
 # Mass General Brigham Health Plan (formerly AllWays)
-https://massgeneralbrighamhealthplan.org/pricetransparency/MRF/Base
+https://awhpmrfeptprod-hqfydsghh6gzcpae.z01.azurefd.net/pricetransparency/MRF/Base/TOC/{FIRST_OF_MONTH}_AHP_index.json
 
 # CDPHP (New York)
 https://www.cdphp.com/interoperability/machine-readable-pricing-data-files
