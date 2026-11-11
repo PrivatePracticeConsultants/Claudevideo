@@ -643,28 +643,66 @@ def _read_val(val_p: Path) -> dict:
     return {"validator": txt}
 
 
-def _write_val(val_p: Path, validator: str, total: int | None) -> None:
+def _write_val(val_p: Path, validator: str, total: int | None, kind: str = "") -> None:
     if not validator and not total:
         unlink_with_retry(val_p)
         return
     tmp = Path(str(val_p) + ".tmp")
-    tmp.write_text(json.dumps({"validator": validator or "", "total": total}))
+    tmp.write_text(json.dumps({"validator": validator or "", "kind": kind if validator else "",
+                               "total": total}))
     replace_with_retry(tmp, val_p)
 
 
-def _same_validator(stored: str, resp) -> bool:
+def _val_kind(started: dict) -> str:
+    """WHICH header the stored validator came from: "etag" or "last_modified".
+    Recorded in .val since 0.7.6; an older .val is classified by its shape — a
+    quoted / W/ value is an ETag, an HTTP date is a Last-Modified, anything
+    else is an ETag sent without quotes (IIS-style `5d8c72a5edda8d6a:0`;
+    review 12 item 1.2: comparing that with the 206's Last-Modified rejected
+    every resume and restarted the file from byte 0 on each reconnect)."""
+    k = started.get("kind")
+    if k in ("etag", "last_modified"):
+        return k
+    v = (started.get("validator") or "").strip()
+    if not v:
+        return ""
+    if v.startswith('"') or v[:2].upper() == "W/":
+        return "etag"
+    try:
+        from email.utils import parsedate_to_datetime
+        if parsedate_to_datetime(v) is not None:
+            return "last_modified"
+    except (TypeError, ValueError, IndexError):
+        pass
+    return "etag"
+
+
+def _resp_validator(resp, kind: str) -> str:
+    """The response's own header of the stored validator's KIND ('' if absent)."""
+    if kind == "etag":
+        return (resp.headers.get("ETag") or "").strip()
+    if kind == "last_modified":
+        return (resp.headers.get("Last-Modified") or "").strip()
+    return ""
+
+
+def _same_validator(started: dict, resp) -> bool:
     """Does a response's own ETag / Last-Modified agree with the validator the
-    download started with? A missing header proves nothing either way (True)."""
+    download started with? Like is compared with like (an ETag with the
+    response's ETag, a date with its Last-Modified); a response carrying no
+    header of the stored kind proves nothing either way (True)."""
+    stored = (started.get("validator") or "").strip()
     if not stored:
         return True
-    if stored.startswith('"') or stored[:2].upper() == "W/":
-        got = (resp.headers.get("ETag") or "").strip()
-
+    kind = _val_kind(started)
+    got = _resp_validator(resp, kind)
+    if not got:
+        return True
+    if kind == "etag":
         def opaque(t: str) -> str:
             return t[2:] if t[:2].upper() == "W/" else t
-        return not got or opaque(got) == opaque(stored)
-    got = (resp.headers.get("Last-Modified") or "").strip()
-    return not got or got == stored
+        return opaque(got) == opaque(stored)
+    return got == stored
 
 
 _SPLICE_SAMPLE = 64 << 10
@@ -869,6 +907,7 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
     # byte offsets where this download joined a resume the server did NOT
     # vouch for with a validator (see _splice_agrees)
     splices: list[int] = []
+    restarts = 0     # times this call threw the .part away and began again
     while attempt <= cfg.download_retries and connections < _MAX_DOWNLOAD_CONNECTIONS:
         if _canceled():
             raise DownloadError("download canceled", retryable=False, canceled=True)
@@ -912,7 +951,7 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                     m416 = re.match(r"\s*bytes\s+\*/(\d+)", resp.headers.get("Content-Range", ""))
                     if (started.get("total") and resume_from == int(started["total"])
                             and (not m416 or int(m416.group(1)) == resume_from)
-                            and _same_validator(started.get("validator") or "", resp)):
+                            and _same_validator(started, resp)):
                         sha = ContentHasher()
                         with open(part, "rb") as f:
                             for blk in iter(lambda: f.read(1 << 20), b""):
@@ -935,6 +974,8 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                     highwater = 0  # the .part is gone — don't claim bytes kept
                     stall_anchor_hw = 0
                     last_progress_t = time.monotonic()
+                    splices = []
+                    restarts += 1
                     raise DownloadError("stale partial download discarded", retryable=True)
                 if resp.status_code in RETRYABLE_STATUS:
                     e_rs = DownloadError(
@@ -991,12 +1032,10 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                     else:
                         total = None
                         bad = "the server's resume answer did not say which bytes it sent"
-                    if not bad and not _same_validator(started.get("validator") or "", resp):
+                    if not bad and not _same_validator(started, resp):
                         bad = "the server's file changed since the download started"
-                    sv = started.get("validator") or ""
-                    vouched = bool(sv) and bool(
-                        resp.headers.get("ETag") if (sv.startswith('"') or sv[:2].upper() == "W/")
-                        else resp.headers.get("Last-Modified"))
+                    vouched = bool(started.get("validator")) and bool(
+                        _resp_validator(resp, _val_kind(started)))
                     if bad:
                         part.unlink(missing_ok=True)
                         val_p.unlink(missing_ok=True)
@@ -1004,6 +1043,8 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                         stall_anchor_hw = 0
                         last_progress_t = time.monotonic()
                         sha_carry = None
+                        splices = []     # they belonged to the discarded bytes
+                        restarts += 1
                         raise DownloadError(f"{bad} — starting this file again from the "
                                             "beginning", retryable=True)
                     if not vouched:
@@ -1050,6 +1091,7 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                         # restarting from 0 forever.
                         val_p.unlink(missing_ok=True)
                     resume_from = 0  # server sent the whole file (or fresh start)
+                    splices = []     # a fresh body: no join from an earlier attempt
                     total = int(resp.headers.get("Content-Length") or 0) or None
                 if max_bytes and total and total > max_bytes:
                     raise too_big(total)
@@ -1099,8 +1141,11 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                     strong = etag if etag and not etag.upper().startswith("W/") else ""
                     validator = strong or (resp.headers.get("Last-Modified") or "").strip()
                     # ...and the SIZE it announced: a resume is held to both
-                    # (review 11 items 1.2 / 1.5)
-                    _write_val(val_p, validator, total)
+                    # (review 11 items 1.2 / 1.5) — and WHICH header the
+                    # validator came from, so a resume compares like with like
+                    # (review 12 item 1.2)
+                    _write_val(val_p, validator, total,
+                               "etag" if strong else ("last_modified" if validator else ""))
                 raw_body = (resp.headers.get("Content-Encoding") or "").strip().lower() in (
                     "", "identity", "gzip", "x-gzip")
                 done = resume_from
@@ -1219,6 +1264,8 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                     val_p.unlink(missing_ok=True)
                     highwater = stall_anchor_hw = 0
                     sha_carry = None
+                    splices = []
+                    restarts += 1
                     raise DownloadError(
                         f"the server sent {done:,} bytes for a {total:,}-byte file — "
                         "starting this file again from the beginning", retryable=True)
@@ -1232,6 +1279,7 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                     highwater = stall_anchor_hw = 0
                     sha_carry = None
                     splices = []
+                    restarts += 1
                     log.warning("%s: the server's file changed while it was being "
                                 "downloaded — starting it again from the beginning", url)
                     raise DownloadError(
@@ -1373,8 +1421,8 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                + (f"its last answer was HTTP {last_exc.status}. "
                   if getattr(last_exc, "status", None) else
                   "this server keeps closing the connection early and won't resume. ")
-               + "The bytes so far "
-               "are kept, so pressing retry later (or on a better connection) "
+               + ("The bytes so far " if part.exists() else "Whatever arrives next ")
+               + "are kept, so pressing retry later (or on a better connection) "
                "picks up where it stopped; or open the link in your browser and "
                "drop the downloaded file into data/inbox/. Other files keep "
                "downloading in the meantime.")
@@ -1383,12 +1431,24 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
         # yielded its slot on purpose so other files get a turn — that is the
         # cap doing its job, not a failure, and it must resume BY ITSELF.
         # (set_aside below requeues it; see fetch_url_record.)
-        got = f"{highwater / 1e6:.0f} MB" if highwater else "no data"
+        # what is KEPT is read from disk now, after any path that threw the
+        # .part away: "nothing is re-downloaded" over a deleted .part was false
+        # twice (review 12 item 1.2 — 5.9 MB served, all of it re-downloaded)
+        kept = part.stat().st_size if part.exists() else 0
         span = f"{max_budget / 60:.0f} min" if max_budget >= 60 else f"{int(max_budget)} s"
-        msg = (f"paused after {span} and {got} downloaded so other files get a "
-               "turn — it goes back in the queue and resumes from here "
-               "automatically, nothing is re-downloaded. If one huge file is all "
-               "you need, raise download_max_seconds in config/mrfx.yaml so it "
+        if restarts:
+            how = (f"the server's answers made it start over {restarts} time"
+                   f"{'s' if restarts != 1 else ''}, "
+                   + (f"{kept / 1e6:.0f} MB of it is kept" if kept >= 1e6 else
+                      f"{kept:,} bytes of it are kept" if kept else "nothing of it is kept yet")
+                   + " — it goes back in the queue and continues automatically.")
+        elif kept:
+            how = (f"{kept / 1e6:.0f} MB downloaded — it goes back in the queue and resumes "
+                   "from here automatically, nothing is re-downloaded.")
+        else:
+            how = "before any of it could be kept — it goes back in the queue and starts again automatically."
+        msg = (f"paused after {span} so other files get a turn; {how} If one huge file "
+               "is all you need, raise download_max_seconds in config/mrfx.yaml so it "
                "gets a longer run at a time.")
         raise DownloadError(msg, retryable=True, set_aside=True)
     else:
@@ -2491,13 +2551,16 @@ def _kept_meta(dest: Path, url: str) -> dict | None:
             "validator": old.get("validator"), "server_size": old.get("server_size")}
 
 
-def _server_now(cfg: MrfxConfig, url: str) -> dict | None:
-    """What the server says about the file NOW, from ONE tiny request (a
-    ranged GET of byte 0 — presigned links often refuse HEAD): {"validator",
-    "total"}; None when it can't be asked (refused, expired, offline)."""
-    try:
-        with _client(cfg) as client, \
-                client.stream("GET", url, headers={"Range": "bytes=0-0"}) as resp:
+def _server_now_once(cfg: MrfxConfig, url: str, ua: str | None, verify,
+                     timeout: float | None) -> dict | int | None:
+    """One ranged GET of byte 0: the dict, an HTTP status the caller may act
+    on (403), or None."""
+    with _client(cfg, verify=verify, ua=ua) as client:
+        if timeout:
+            client.timeout = httpx.Timeout(timeout, connect=min(30.0, timeout))
+        with client.stream("GET", url, headers={"Range": "bytes=0-0"}) as resp:
+            if resp.status_code == 403:
+                return 403
             if resp.status_code not in (200, 206):
                 return None
             etag = (resp.headers.get("ETag") or "").strip()
@@ -2511,8 +2574,35 @@ def _server_now(cfg: MrfxConfig, url: str) -> dict | None:
                     "", "identity", "gzip", "x-gzip"):
                 total = int(resp.headers.get("Content-Length") or 0) or None
             return {"validator": validator or None, "total": total}
-    except (httpx.HTTPError, ValueError, OSError):
-        return None
+
+
+def _server_now(cfg: MrfxConfig, url: str) -> dict | None:
+    """What the server says about the file NOW, from ONE tiny request (a
+    ranged GET of byte 0 — presigned links often refuse HEAD): {"validator",
+    "total"}; None when it can't be asked (refused, expired, offline).
+    With the two levers a download has (review 12 item 1.4): a 403 is asked
+    again as a browser, an incomplete certificate chain is repaired like a
+    browser does (never weakened). A short timeout (RECHECK_TIMEOUT_S): one
+    byte is asked for, so a host that does not answer in that time is "can't
+    be told", not a slot held for minutes."""
+    ua = verify = None
+    timeout = RECHECK_TIMEOUT_S
+    for _ in range(3):
+        try:
+            got = _server_now_once(cfg, url, ua, verify, timeout)
+        except (httpx.TransportError, httpx.TimeoutException) as e:
+            if "CERTIFICATE_VERIFY_FAILED" in str(e) and verify is None:
+                verify = _repair_incomplete_chain(url)
+                if verify is not None:
+                    continue
+            return None
+        except (httpx.HTTPError, ValueError, OSError):
+            return None
+        if got == 403 and ua is None:
+            ua = BROWSER_UA
+            continue
+        return got if isinstance(got, dict) else None
+    return None
 
 
 def _republished(then: dict, now: dict | None) -> bool | None:
@@ -2764,42 +2854,84 @@ def _mentions_allowed_amounts(dest: Path) -> bool:
         return False
 
 
+# The whole re-check of an index's loaded children is bounded: one request
+# per child, 8 at a time, each with a short timeout, and no new request after
+# RECHECK_BUDGET_S. 1,000 children against a host that black-holes
+# connections held a processor thread ~1 h (connect=30 s x 1,000 / 8 —
+# review 12 item 1.4). A child not asked in time is left as it is (loaded,
+# not re-queued) and asked again at the next refresh.
+RECHECK_BUDGET_S = 300.0
+RECHECK_TIMEOUT_S = 20.0
+
+
 def _refresh_loaded_children(cfg: MrfxConfig, store: Store, urls: list[str],
-                             parent_reval: int) -> int:
+                             parent_reval: int, parent_id: int | None = None) -> int | None:
     """An index expanded AGAIN (the monthly refresh of a static index, a
     retried capped index): its children that are already LOADED were left
     alone whatever the server now held, so a payer republishing a file in
     place under a stable address never loaded the new month (review 11 item
     1.7 / seam M-4). Ask the server once per loaded child; a changed one is
     queued again. A child with nothing recorded to compare (loaded by an
-    older version) is downloaded again only on the monthly refresh."""
-    rows = store.done_rate_rows([dedup_key(u) for u in urls])
+    older version) is compared by the size its load recorded; only a child
+    with no size either is downloaded again, and only on the monthly refresh.
+
+    Every probe and re-download uses the link the index handed over NOW
+    (review 12 item 1.4: a signed child's stored link is dead by next month —
+    the probe met a 403 and a republished June never loaded). Nothing is
+    queued when the index is no longer 'expanding' (the user cleared it while
+    the children were being asked about — review 12 item 1.5): returns None."""
+    current = {dedup_key(u): u for u in urls}
+    rows = store.done_rate_rows(list(current))
     if not rows:
         return 0
+    for r in rows:
+        r["url"] = current.get(r["dedup_key"], r["url"])
+    deadline = time.monotonic() + RECHECK_BUDGET_S
+
+    def ask(r):
+        if time.monotonic() > deadline:
+            return None
+        if parent_id is not None and store.url_status(parent_id) != "expanding":
+            return None      # cleared meanwhile: stop asking
+        return _server_now(cfg, r["url"])
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=8, thread_name_prefix="mrfx-recheck") as ex:
-        nows = list(ex.map(lambda r: _server_now(cfg, r["url"]), rows))
+        nows = list(ex.map(ask, rows))
+    skipped_late = sum(1 for n in nows if n is None) if time.monotonic() > deadline else 0
+    if skipped_late:
+        log.info("index re-check: %d loaded file(s) not asked within %d s — they are asked "
+                 "again at the next refresh", skipped_late, int(RECHECK_BUDGET_S))
     changed, unknown = [], []
     for r, now in zip(rows, nows):
+        then_size = r["server_size"] or r.get("loaded_size")
         verdict = _republished({"validator": r["server_validator"],
-                                "server_size": r["server_size"]}, now)
+                                "server_size": then_size}, now)
         if verdict:
             changed.append(r["id"])
         elif verdict is None and parent_reval == 1 and now is not None \
-                and not r["server_validator"] and not r["server_size"]:
+                and not r["server_validator"] and not then_size:
             unknown.append(r["id"])
+    if parent_id is not None and store.url_status(parent_id) != "expanding":
+        return None
     for r in rows:
         if r["id"] in changed or r["id"] in unknown:
             # a kept raw copy is the OLD version: never reuse it
             kept = cfg.downloads_dir / filename_for(r["url"])
             unlink_with_retry(kept)
             unlink_with_retry(_meta_path(kept))
+    urls_by_id = {r["id"]: r["url"] for r in rows}
     n = store.requeue_republished(
         changed, 0, "the payer republished this file under the same address — "
-                    "downloading the new version")
-    n += store.requeue_republished(
+                    "downloading the new version", parent_id=parent_id, urls=urls_by_id)
+    if n is None:
+        return None
+    m = store.requeue_republished(
         unknown, 0, "the monthly refresh downloads this file again: nothing was "
-                    "recorded to tell whether the payer changed it")
+                    "recorded to tell whether the payer changed it",
+        parent_id=parent_id, urls=urls_by_id)
+    if m is None:
+        return None
+    n += m
     if n:
         log.info("index re-check: %d loaded file(s) changed on the server — queued again", n)
     return n
@@ -2974,7 +3106,18 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
             unlink_with_retry(dest)
             unlink_with_retry(_meta_path(dest))
             return False
-        added += _refresh_loaded_children(cfg, store, child_urls, int(rec.get("revalidate") or 0))
+        rechecked = _refresh_loaded_children(cfg, store, child_urls,
+                                             int(rec.get("revalidate") or 0), parent_id=url_id)
+        if rechecked is None:
+            # "Clear queue" pressed while the loaded children were being asked
+            # about: nothing re-queued, the row keeps the user's status
+            # (review 12 item 1.5 — it flipped back to 'done' and every
+            # republished child was downloaded and loaded)
+            log.info("%s — cleared while its files were being checked; nothing re-queued", url)
+            unlink_with_retry(dest)
+            unlink_with_retry(_meta_path(dest))
+            return False
+        added += rechecked
         # which PLANS each queued file serves — the dimension that stops a
         # payer's narrow-network and broad-PPO books blending into one median.
         # Cosmetic-tier: a failure here must never cost the expansion.
@@ -2996,19 +3139,23 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
             if _mentions_allowed_amounts(dest):
                 store.update_url(url_id, status="skipped", kind="toc",
                                  error="this TOC lists only out-of-network allowed-amounts "
-                                       "files — no negotiated-rate files to ingest")
+                                       "files — no negotiated-rate files to ingest",
+                                 only_if_status="expanding")
             else:
                 store.update_url(url_id, status="failed", kind="toc",
-                                 error="this index/TOC lists no in-network file URLs")
+                                 error="this index/TOC lists no in-network file URLs",
+                                 only_if_status="expanding")
         else:
             log.info("%s — %s", url, msg)
             # child_count on a done TOC row is how the dashboard says
             # "found N files inside": the number LISTED — after a monthly
             # re-fetch every child is already queued, and "found 0 files
             # inside" read as an empty index (round 7 P1.6)
+            # only while still 'expanding': a "Clear queue" pressed at any
+            # point of the expansion keeps the user's status (review 12 1.5)
             store.update_url(url_id, status="done", kind="toc", child_count=len(child_urls),
                              error=cap_note(cfg.max_toc_files) if truncated else None,
-                             revalidate=0)
+                             revalidate=0, only_if_status="expanding")
         unlink_with_retry(dest)  # the index itself carries no rates
         unlink_with_retry(_meta_path(dest))  # its sidecar too (review 11 2.15)
         return False

@@ -986,6 +986,12 @@ class Store:
         # link and an inbox copy of the same bytes can never both win. In
         # memory on purpose: a crash ends every load it could describe.
         self._inbox_claims: dict[str, str] = {}
+        # url_queue ids THIS process set to 'ingesting' (a processor claim or a
+        # won content claim). A row 'ingesting' that is not here was left by a
+        # process that died: no load is running for it, so an inbox copy of
+        # its bytes must not wait on it (review 12 item 1.3 — `mrfx ingest`
+        # waited forever). Read/written under write_lock.
+        self._live_url_ingests: set[int] = set()
         # Rollup rebuilds serialize against EACH OTHER here — NOT against the
         # write_lock. Holding write_lock for a rebuild froze the whole
         # pipeline: claiming a queue row (downloaders AND parsers) needs
@@ -2661,6 +2667,14 @@ class Store:
                     [url, exists[0]],
                 )
                 return exists[0]
+            if exists[1] not in ("downloading", "fetched", "ingesting", "expanding"):
+                # the same file under a FRESH link (a new signature, a re-pasted
+                # list, the index's current child link): keep the newest one so
+                # a queued / paused row and a loaded row's next re-check use a
+                # link that still works (review 12 items 1.4 and 2.4). A row in
+                # flight finishes with the link it started with.
+                con.execute("UPDATE url_queue SET url = ? WHERE id = ? AND url IS DISTINCT FROM ?",
+                            [url, exists[0], url])
             return None  # already queued / in flight / done
         nid = (con.execute("SELECT coalesce(max(id), 0) + 1 FROM url_queue").fetchone()[0])
         con.execute(
@@ -2727,6 +2741,8 @@ class Store:
             cols = [d[0] for d in con.description]
             rec = dict(zip(cols, row[0]))
             con.execute("UPDATE url_queue SET status = ? WHERE id = ?", [to_status, rec["id"]])
+            if to_status == "ingesting":
+                self._live_url_ingests.add(rec["id"])
             return rec
 
     def url_of(self, url_id: int | None) -> str | None:
@@ -2737,7 +2753,11 @@ class Store:
             row = con.execute("SELECT url FROM url_queue WHERE id = ?", [url_id]).fetchone()
         return row[0] if row else None
 
-    def update_url(self, url_id: int, **fields) -> None:
+    def update_url(self, url_id: int, only_if_status: str | None = None, **fields) -> bool:
+        """Write these fields on one queue row. `only_if_status`: only while
+        the row still has that status, checked in the same locked step (an
+        index's final 'done' must not overwrite a "Clear queue" pressed during
+        its expansion — review 12 item 1.5). True when the row was written."""
         allowed = {"kind", "status", "filename", "bytes_total", "bytes_done",
                    "progress", "rows_emitted", "child_count", "error", "parent_id",
                    "content_sha", "park_count", "duplicate_of", "big_lane",
@@ -2747,13 +2767,22 @@ class Store:
         if terminal:
             fields["finished_at"] = _utcnow()
         if not fields:
-            return
+            return False
         sets = ", ".join(f"{k} = ?" for k in fields)
+        cond = " AND status = ?" if only_if_status else ""
+        args = [*fields.values(), url_id] + ([only_if_status] if only_if_status else [])
         with self.write_lock, self.connect() as con:
-            con.execute(f"UPDATE url_queue SET {sets} WHERE id = ?", [*fields.values(), url_id])
-            if terminal:
+            hit = con.execute(f"UPDATE url_queue SET {sets} WHERE id = ?{cond} RETURNING id",
+                              args).fetchall()
+            if terminal and hit:
                 # its in-flight fingerprint has done its job (audit 8 F10)
                 con.execute("DELETE FROM inflight_fingerprints WHERE url_id = ?", [url_id])
+        return bool(hit)
+
+    def url_status(self, url_id: int) -> str | None:
+        with self.connect() as con:
+            r = con.execute("SELECT status FROM url_queue WHERE id = ?", [url_id]).fetchone()
+        return r[0] if r else None
 
     def url_progress(self, url_id: int, bytes_done: int, bytes_total: int | None) -> None:
         """BEST-EFFORT by contract: called from inside download stream loops —
@@ -3183,6 +3212,7 @@ class Store:
                 "UPDATE url_queue SET status = 'ingesting', kind = ?, filename = ? WHERE id = ?",
                 [kind, filename, url_id],
             )
+            self._live_url_ingests.add(url_id)
         return None
 
     def _loaded_or_claimed_locked(self, con, content_sha: str,
@@ -3214,14 +3244,17 @@ class Store:
         if not content_sha:
             return None
         with self.write_lock, self.connect() as con:
-            row = con.execute(
-                "SELECT coalesce(filename, url), status FROM url_queue WHERE content_sha = ? "
-                "AND status IN ('done', 'ingesting') AND filename IS DISTINCT FROM ? "
-                "ORDER BY (status = 'done') DESC, id LIMIT 1",
-                [content_sha, filename]).fetchone()
-            if row:
-                # the loaded file's name (what the Files tab lists), else its link
-                return (row[0].split("?", 1)[0], row[1])
+            for uid, nm, st in con.execute(
+                    "SELECT id, coalesce(filename, url), status FROM url_queue "
+                    "WHERE content_sha = ? AND status IN ('done', 'ingesting') "
+                    "AND filename IS DISTINCT FROM ? "
+                    "ORDER BY (status = 'done') DESC, id", [content_sha, filename]).fetchall():
+                # an 'ingesting' row no thread of THIS process holds is an
+                # orphan of a killed run: nothing is loading it, so it is no
+                # owner (review 12 item 1.3)
+                if st == "done" or uid in self._live_url_ingests:
+                    # the loaded file's name (what the Files tab lists), else its link
+                    return (nm.split("?", 1)[0], st)
             other = self._loaded_or_claimed_locked(con, content_sha, filename)
             if other:
                 return other
@@ -3337,6 +3370,7 @@ class Store:
                 return False
             con.execute("UPDATE url_queue SET status = 'queued', progress = 0, bytes_done = 0 "
                         "WHERE id = ?", [url_id])
+            self._live_url_ingests.discard(url_id)
             return True
 
     def recover_stuck_urls(self) -> int:
@@ -3437,19 +3471,40 @@ class Store:
         if not dedup_keys:
             return []
         with self.connect() as con:
+            # loaded_size: the size the LOAD recorded (content_fingerprints,
+            # written for every load): the "then" size of a row a 0.7.4 load
+            # left without server_validator / server_size (review 12 item 2.3)
             cur = con.execute(
-                "SELECT id, url, server_validator, server_size, filename FROM url_queue "
-                "WHERE dedup_key IN (SELECT unnest(?::VARCHAR[])) AND status = 'done' "
-                "AND kind IN ('in_network', 'provider_reference')", [list(dedup_keys)])
+                "SELECT q.id, q.url, q.dedup_key, q.server_validator, q.server_size, q.filename, "
+                "c.size AS loaded_size FROM url_queue q "
+                "LEFT JOIN content_fingerprints c ON c.filename = q.filename "
+                "WHERE q.dedup_key IN (SELECT unnest(?::VARCHAR[])) AND q.status = 'done' "
+                "AND q.kind IN ('in_network', 'provider_reference') ORDER BY q.id",
+                [list(dedup_keys)])
             cols = [d[0] for d in cur.description]
             return [dict(zip(cols, r)) for r in cur.fetchall()]
 
-    def requeue_republished(self, ids: list[int], revalidate: int, reason: str) -> int:
+    def requeue_republished(self, ids: list[int], revalidate: int, reason: str,
+                            parent_id: int | None = None,
+                            urls: dict | None = None) -> int | None:
         """Loaded rows whose server now serves something else (or can't say):
-        back in the queue to be downloaded and loaded again (review 11 1.7)."""
+        back in the queue to be downloaded and loaded again (review 11 1.7).
+        With `parent_id`: only while that index is still 'expanding', checked
+        in the same locked step (None when it no longer is — the user cleared
+        it; review 12 item 1.5). `urls`: id -> the link the index handed over
+        now, which the re-download uses (review 12 item 1.4)."""
         if not ids:
             return 0
         with self.write_lock, self.connect() as con:
+            if parent_id is not None:
+                st = con.execute("SELECT status FROM url_queue WHERE id = ?",
+                                 [parent_id]).fetchone()
+                if not st or st[0] != "expanding":
+                    return None
+            for i in ids:
+                if urls and urls.get(i):
+                    con.execute("UPDATE url_queue SET url = ? WHERE id = ? AND status = 'done'",
+                                [urls[i], i])
             n = con.execute(
                 "UPDATE url_queue SET status = 'queued', error = ?, force_size = false, "
                 f"revalidate = ?, {REQUEUE_RESET} "

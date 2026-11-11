@@ -1692,6 +1692,15 @@ def _content_claim(cfg: MrfxConfig, store: Store, path: Path, name: str,
             log.info("%s: the same bytes are being loaded right now (%s) — waiting for "
                      "that load instead of loading them twice", name, twin)
             told = True
+        # the wait ends when the twin ends (Store.claim_inbox_content counts
+        # only a load THIS process runs), when the user presses stop on this
+        # file, or when the program is shutting down (review 12 item 1.3)
+        if store.is_parse_stopped(name):
+            store.clear_parse_stop(name)
+            raise ParseStopped()
+        pool = get_parse_pool()
+        if pool is not None and getattr(pool, "shutting_down", False):
+            raise PoolRestarted("the program is stopping — this file loads at the next start")
         time.sleep(2.0)
 
 

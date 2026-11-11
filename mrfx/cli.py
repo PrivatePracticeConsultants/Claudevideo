@@ -418,6 +418,7 @@ def cmd_add(cfg: MrfxConfig, args) -> int:
     store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir,
                   auto_spill=True, keep_warm=True)  # drains/rebuilds rollups
     store.recover_stuck_files()  # no server owns the store — safe to recover
+    store.recover_stuck_urls()
     counts = add_urls(store, urls)
     print(f"queued {counts['added']} URL(s) "
           f"({counts['skipped']} already known, {counts['invalid']} not URLs)")
@@ -621,6 +622,9 @@ def cmd_ingest(cfg: MrfxConfig, args) -> int:
     store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir,
                   auto_spill=True, keep_warm=True)   # pinned, like serve (review 11 3.4)
     store.recover_stuck_files()  # crashed 'processing' rows re-ingest this pass
+    # a link row a killed server left 'ingesting' is no load in progress: an
+    # inbox copy of its bytes must not wait for it forever (review 12 item 1.3)
+    store.recover_stuck_urls()
     path = Path(args.path) if args.path else cfg.inbox_dir
     bar = _make_cli_progress()
     if path.is_dir():

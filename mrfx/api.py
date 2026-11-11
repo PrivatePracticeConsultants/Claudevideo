@@ -2036,10 +2036,15 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             # was a median over every month, modifier, class and POS: "$50.00"
             # above a table whose current row is $55.00 (two superseded
             # months outvoted it — review 10 item 2.5)
+            # The NPI grain takes the SAME contract window as the Explorer
+            # (_NPI_LATEST_QUALIFY: payer x NPI x TIN x code, tin_is_really_npi
+            # in the identity) and only THEN the house-basis filter below — the
+            # order rel_sql uses. A per-modifier window kept May's bare row
+            # beside June's GP row of the same contract (review 12 item 1.1:
+            # $41 here vs $42 on the TIN drawer, the Explorer and the Code page).
             if grain == "npi":
                 chart_rel = (f"SELECT * FROM ({GRAIN_REL['npi']}) WHERE unit_id = ? "
-                             "QUALIFY file_month = max(file_month) OVER (PARTITION BY payer, "
-                             "tin_value, billing_code, modifier_set, billing_class, service_code_set)")
+                             f"{_NPI_LATEST_QUALIFY}")
             elif grain == "entity":
                 chart_rel = f"SELECT * FROM ({_entity_rel(_TIN_REL_LATEST, True)}) WHERE unit_id = ?"
             else:
