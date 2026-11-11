@@ -319,6 +319,26 @@ def _detect_refs_deep(path: Path, pf: Preflight) -> None:
         pass
 
 
+def _unknown_reason(path: Path, size: int) -> str:
+    """Why a file is not a recognised MRF, in words (review 11 items 4.5 /
+    4.6: an empty download and a Windows "Unicode" save both read "no
+    in_network / provider_references / reporting_structure key found")."""
+    if not size:
+        return "the file is empty (0 bytes) — the download or copy did not finish"
+    try:
+        with open_stream(path) as s:
+            head = s.read(4)
+    except Exception:  # noqa: BLE001
+        head = b""
+    if head[:2] in (b"\xff\xfe", b"\xfe\xff") or (len(head) >= 4 and (
+            head[1:2] == b"\x00" and head[3:4] == b"\x00")):
+        return ("the file is saved as UTF-16 (Windows \"Unicode\") — open it and save it "
+                "as UTF-8, then drop it in again")
+    if not head.strip():
+        return "the file holds no data (only blank space)"
+    return "no in_network / provider_references / reporting_structure key found"
+
+
 def preflight(path: Path, cfg: MrfxConfig, store: Store | None = None) -> Preflight:
     pf = Preflight(filename=path.name)
     try:
@@ -334,7 +354,16 @@ def preflight(path: Path, cfg: MrfxConfig, store: Store | None = None) -> Prefli
         with open_stream(path) as stream:
             _scan_header(stream, pf)
     except Exception as e:  # noqa: BLE001 — preflight must never blow up on a bad file
-        pf.messages.append(f"unreadable: {type(e).__name__}: {e}")
+        low = str(e).lower()
+        if isinstance(e, EOFError) or "not a gzipped file" in low or "crc check" in low \
+                or "not a zip file" in low:
+            # a damaged / cut-off file: say so before the library's words
+            # (review 11 items 4.5 / 4.6)
+            pf.messages.append(
+                "the file is damaged or incomplete (a cut-off download, or extra bytes "
+                f"after its end) — drop in a fresh copy ({type(e).__name__}: {e})")
+        else:
+            pf.messages.append(f"unreadable: {type(e).__name__}: {e}")
         pf.verdict = "UNREADABLE"
         return pf
 
@@ -377,7 +406,7 @@ def preflight(path: Path, cfg: MrfxConfig, store: Store | None = None) -> Prefli
         return pf
     if pf.file_type == "unknown":
         pf.verdict = "UNREADABLE"
-        pf.messages.append("no in_network / provider_references / reporting_structure key found")
+        pf.messages.append(_unknown_reason(path, pf.compressed_bytes))
         return pf
 
     # in-network file: companion check

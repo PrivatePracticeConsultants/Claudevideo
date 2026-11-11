@@ -877,3 +877,120 @@ def test_a_fresh_store_goes_straight_to_the_full_rollup(cfg, store, srv, monkeyp
     drain(cfg, store)
     assert calls == [] and store.rollups_ever_built()
 
+
+# ------------------------------------------- Group 4: hygiene and sentences --
+
+def test_a_row_the_user_skipped_is_never_revived_as_a_duplicate(cfg, store):
+    """4.1 (queue/s6_counters B): a once-'duplicate' row the user skipped kept
+    kind 'duplicate' and was revived behind their back. was: 1 revived."""
+    fetch.add_urls(store, ["http://127.0.0.1:9/a.json.gz"])
+    uid = q(store, "SELECT id FROM url_queue")[0][0]
+    with store.connect() as con:
+        con.execute("UPDATE url_queue SET status = 'queued', kind = 'duplicate', "
+                    "content_sha = 'abc' WHERE id = ?", [uid])
+    assert store.set_url_status_by_id(uid, "skipped")
+    assert store.revive_skipped_duplicates("abc", -1) == 0
+
+
+def test_a_vanished_download_is_downloaded_again_as_a_download(cfg, store, srv, monkeypatch):
+    """4.2 (queue/s8_processor A): the re-download ran under 'ingesting' —
+    invisible to "stop downloads". was: status 'ingesting' during it."""
+    body = gz(rate_doc())
+    s = srv({"/f.json.gz": lambda req: ranged(body, req)})
+    fetch.add_urls(store, [s.base + "/f.json.gz"])
+    rec = store.next_queued_url()
+    store.update_url(rec["id"], status="fetched", content_sha="x")
+    rec = store.next_fetched_url()            # its download is not on disk
+    seen = []
+    real = fetch.download
+
+    def spy(*a, **k):
+        seen.append(q(store, "SELECT status FROM url_queue")[0][0])
+        return real(*a, **k)
+    monkeypatch.setattr(fetch, "download", spy)
+    fetch.process_url_record(cfg, store, rec)
+    assert seen == ["downloading"]
+    assert q(store, "SELECT status FROM url_queue")[0][0] == "done"
+
+
+def test_a_finished_part_is_flushed_to_disk_before_it_goes_live(cfg, store, monkeypatch):
+    """4.4b: no fsync anywhere — a power loss could leave a truncated part
+    under a 'done' row. was: os.fsync never called."""
+    import os
+    calls = []
+    real = os.fsync
+    monkeypatch.setattr(os, "fsync", lambda fd: calls.append(fd) or real(fd))
+    (cfg.inbox_dir / "a.json.gz").write_bytes(gz(rate_doc(n=3)))
+    scan_inbox(cfg, store)
+    assert calls
+
+
+def test_outreach_csv_rows_end_once_on_windows(cfg, store, monkeypatch):
+    """4.4d: the CSV ends rows with \\r\\n and Path.write_text translated each
+    \\n again on Windows. was: b'\\r\\r\\n' (a blank line between rows)."""
+    real = Path.write_text
+
+    def windows_text(self, data, *a, **k):         # what text mode does on Windows
+        return real(self, data.replace("\n", "\r\n"), *a, **k)
+    monkeypatch.setattr(Path, "write_text", windows_text)
+    c = TestClient(create_app(cfg, store))
+    r = c.get("/api/export/outreach.csv")
+    assert r.status_code == 200 and b"\r\r\n" not in r.content
+
+
+def test_cli_output_redirected_without_utf8_does_not_crash(tmp_path):
+    """4.4g: `mrfx … > log.txt` on a non-UTF-8 console raised
+    UnicodeEncodeError on the first "—". was: exit 1."""
+    import os
+    import subprocess
+    import sys
+    env = dict(os.environ, PYTHONIOENCODING="ascii")
+    env.pop("PYTHONUTF8", None)
+    r = subprocess.run([sys.executable, "-m", "mrfx", "--help"], capture_output=True,
+                       env=env, cwd=str(Path(__file__).resolve().parents[2]), timeout=120)
+    assert r.returncode == 0, r.stderr[-300:]
+
+
+def test_a_damaged_download_reads_as_a_sentence():
+    """4.5 (download/c04): raw library text was the user's sentence.
+    was: "BadGzipFile: CRC check failed 0x36bafc05 != 0xc94503fa"."""
+    import gzip as _gz
+
+    from mrfx.ingest import plain_parse_error
+    msg = plain_parse_error(_gz.BadGzipFile("CRC check failed 0x36bafc05 != 0xc94503fa"))
+    assert msg.startswith("the file is damaged or incomplete") and "press retry" in msg
+    msg = plain_parse_error(EOFError("Compressed file ended before the end-of-stream "
+                                     "marker was reached"))
+    assert msg.startswith("the file is damaged or incomplete")
+
+
+def test_empty_and_utf16_files_say_what_they_are(cfg, store):
+    """4.5 / 4.6 (download/c05 zero_byte, ingest/s1 l_utf16): both read "no
+    in_network / provider_references / reporting_structure key found"."""
+    (cfg.inbox_dir / "empty.json").write_bytes(b"")
+    (cfg.inbox_dir / "u16.json").write_bytes(json.dumps({"in_network": []}).encode("utf-16"))
+    scan_inbox(cfg, store)
+    err = dict(q(store, "SELECT filename, error FROM files"))
+    assert "the file is empty" in err["empty.json"]
+    assert "UTF-16" in err["u16.json"]
+
+
+def test_a_small_file_with_none_of_the_codes_says_so(cfg, store):
+    """4.6 (ingest/s10_honesty): only the big-file short-circuit wrote the
+    sentence. was: 'done', 0 rows, qa.messages NULL."""
+    d = json.loads(rate_doc(n=2))
+    d["in_network"][0]["billing_code"] = "99213"
+    (cfg.inbox_dir / "office.json").write_text(json.dumps(d))
+    scan_inbox(cfg, store)
+    qa = json.loads(q(store, "SELECT qa FROM files")[0][0])
+    assert any("none of the target billing codes" in m for m in qa.get("messages") or [])
+
+
+def test_unquoted_off_in_the_config_means_off():
+    """4.6: `mode: off` (the shipped comment's spelling) is YAML False.
+    was: ConfigFileError "Input should be 'api', 'bulk' or 'off'"."""
+    import yaml
+
+    from mrfx.config import MrfxConfig
+    c = MrfxConfig(enrichment=yaml.safe_load("mode: off"))
+    assert c.enrichment.mode == "off"

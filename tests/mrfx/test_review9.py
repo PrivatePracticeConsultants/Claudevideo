@@ -909,7 +909,12 @@ def test_a_queue_of_big_files_costs_one_request_per_file(cfg, store):
             s.nolen.add(p)                      # unsized until the headers
         add_urls(store, [s.base + p for p in files])
         run_queue(cfg, store, drain=True)
-        assert all(n == 1 for n in s.hits.values()), s.hits
+        # one BODY per file; the only other request a file may cost is the
+        # small-file slot's 1-byte size probe (review 11 item 2.8), which
+        # this server (no length, no ranges) cannot answer
+        assert all(1 <= n <= 2 for n in s.hits.values()), s.hits
+        assert sum(s.hits.values()) - len(files) == s.ranges.count("bytes=0-0"), \
+            (s.hits, s.ranges)
     assert {u["status"] for u in store.list_urls()} <= {"done", "skipped"}
     # every small slot, slot 0 included, helps with big files when nothing
     # small or unsized waits

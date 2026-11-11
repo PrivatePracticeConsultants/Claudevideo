@@ -1185,7 +1185,7 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                             raise DownloadError(
                                 "no meaningful progress mid-stream", retryable=True)
                         # user pressed "stop downloads" — abort NOW to free the
-                        # slot (checked per streamed chunk, throttled by the 1 MB
+                        # slot (checked per streamed chunk, throttled by the 64 KB
                         # chunk size so it's cheap)
                         if _canceled():
                             raise DownloadError("download canceled", retryable=False,
@@ -2846,8 +2846,11 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
         local = _local_duplicate_verdict(cfg, store, url_id, dest)
         if local:
             return _apply_verdict(cfg, store, url_id, url, dest, local)
+        # the download vanished after it was fetched: downloading it again is
+        # a DOWNLOAD — shown as one and stoppable by "stop downloads" (it ran
+        # hidden under 'ingesting', review 11 item 4.2)
+        store.update_url(url_id, status="downloading")
         try:
-            # (row already marked 'downloading' by next_queued_url when claimed)
             content_sha, final_url = download(
                 cfg, url, dest,
                 progress_cb=lambda d, t: store.url_progress(url_id, d, t),

@@ -3782,7 +3782,10 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         csv_text, _method = _outreach_parts(request)
         stamp = dt.datetime.now().strftime("%Y-%m-%d_%H%M")
         out = _mktemp(".csv")
-        out.write_text(csv_text, encoding="utf-8")
+        # bytes, not write_text: the CSV already ends rows with \r\n and
+        # Windows' text mode made every row \r\r\n — a blank line between
+        # rows in Excel and a mail merge (review 11 item 4.4d)
+        out.write_bytes(csv_text.encode("utf-8"))
         background.add_task(out.unlink, missing_ok=True)
         return FileResponse(out, filename=f"mrfx_outreach_{stamp}.csv", media_type="text/csv")
 

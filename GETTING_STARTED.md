@@ -586,7 +586,9 @@ the NPPES provider data loaded before it can tell therapists apart.
 Here's what moves the queue's total time, in order of impact:
 
 1. **Use more of your CPU (if you have it).** Auto mode uses your core count
-   minus one, but stops at **8** workers to stay safe on RAM. If Task Manager →
+   minus one, stops at **8**, and also stops where your memory runs out at
+   about 2 GB per worker next to the database: an 8 GB PC gets **1** worker,
+   a 16 GB PC **3**, a 32 GB 8-core PC 7. If Task Manager →
    Performance → CPU shows more logical processors than the banner is using
    AND you have plenty of memory, set it explicitly in `config/mrfx.yaml`:
 
@@ -1024,6 +1026,63 @@ Downloads and files:
   factor that doesn't match the file's own is refused.
 - **"fee for service" / "fee_schedule"** spelled differently by a payer no
   longer drop rates.
+
+## What changed in version 0.7.5 (review 11)
+
+This round went over how links are downloaded, how files are loaded and when
+a file is skipped — with real files, a deliberately badly behaved test
+server and the program killed at random moments. What you would have seen
+before, and what happens now:
+
+- **A file dropped in twice no longer counts twice.** The browser's second
+  download (`rates (1).json.gz`), a copy, or a file you downloaded in your
+  browser after its link had already loaded, used to be loaded again — every
+  contract line was then held twice and every count that adds files up was
+  inflated. The same bytes under a second name are now recognised and shown
+  as **skipped — "identical to …, which is already loaded"**. The upload
+  button says the same right away.
+- **A capped index now loads the rest.** An index with more files than
+  `max_toc_files` says so; raise the setting and press **retry** on that
+  index's row — the button is there now — and the files past the cap are
+  queued (files already loaded are not downloaded again).
+- **An over-size file re-queues when the limit is raised.** Raising
+  `confirm_over_gb` and restarting now picks up the "too big" rows whose size
+  is known; "download anyway" still works per row.
+- **"Clear queue" sticks.** Pressed while an index was being read, the index
+  used to finish, queue all its files and load them anyway.
+- **"Keep both" can no longer get stuck.** If the program stopped before a
+  file you chose to keep was loaded, it sat "queued" for good and could not be
+  removed. It now loads at the next start or scan, and such a row can be
+  removed.
+- **A resumed download is checked.** When a download is interrupted and
+  resumed, the server's answer is now compared with what was asked; if the
+  insurer replaced the file in the meantime, the download starts over instead
+  of joining two versions into one file. (One case no program can detect: a
+  server that gives no version information AND replaces a file with a
+  different one of exactly the same size between two connections — the app
+  then checks a sample of the beginning, where the file's date lives.)
+- **A re-checked link asks the server first.** The monthly refresh (and a
+  provider list arriving later) used to reuse a kept download or skip a
+  loaded file without asking whether the insurer had published a new version
+  under the same address. It now asks once; unchanged files are not
+  downloaded again, changed ones are.
+- **Plain sentences instead of program errors.** A link that redirects in a
+  loop, a damaged or cut-off download, an empty file, a file saved as UTF-16,
+  a parser that ran out of memory twice, an insurer's "come back later"
+  answer, and a file with none of your billing codes now each say what
+  happened and what to do. A dashboard question that coincides with a file
+  finishing is asked again instead of failing.
+- **Small files no longer wait behind big ones to start downloading**, and stopping downloads
+  during a retry pause frees the slot at once. A program that is closed hard
+  no longer leaves its helper processes running in the background.
+- **Less reading of each file**: a file dropped in the inbox is read twice
+  instead of two and a half times; outreach CSVs no longer get a blank line
+  between rows in Excel on Windows.
+- **Settings:** `mode: off` for name lookups works as written (it used to stop
+  every command with a config error unless written `"off"`).
+
+Nothing in this round changes a number: three real insurer files load to
+exactly the same rows as in 0.7.4.
 
 ## What changed in version 0.7.4 (review 10)
 

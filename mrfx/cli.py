@@ -846,7 +846,9 @@ def cmd_outreach(cfg: MrfxConfig, args) -> int:
     headers, rows = build_outreach_rows(store, rel_sql(grain, fs), fs.params,
                                         fs.described.get("codes"), market=market)
     out = Path(args.out)
-    out.write_text(outreach_csv(headers, rows), encoding="utf-8")
+    # bytes: the CSV ends rows with \r\n already (text mode doubled them on
+    # Windows — review 11 item 4.4d)
+    out.write_bytes(outreach_csv(headers, rows).encode("utf-8"))
     sidecar = out.with_name(out.stem + "_methodology.txt")
     sidecar.write_text(methodology_text(cfg, store, grain, fs, "display_name", "asc", "outreach")
                        + "\n\n" + OUTREACH_COLUMNS_NOTE)
@@ -1912,6 +1914,14 @@ def _supervise_serve(config_path: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # output redirected to a file on Windows (cp1252, no PYTHONUTF8) crashed
+    # on the first "→" or "—" AFTER the store was open (review 11 item 4.4g):
+    # an unprintable character prints as "?" instead
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
     ap = argparse.ArgumentParser(prog="mrfx", description="MRF Explorer — drop-in payer rate dashboard")
     ap.add_argument("--config", default="config/mrfx.yaml")
     ap.add_argument("-v", "--verbose", action="store_true")

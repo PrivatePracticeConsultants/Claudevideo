@@ -1,7 +1,130 @@
 # Prompt for the next session, round 11 — the link → download → ingest → skip protocol, made bulletproof (written for Claude Opus 5.5)
 
-> **STATUS: not started.** Replace this block with what you closed, the
-> numbers, and what you left (with the reason), as rounds 7–10 did.
+> **STATUS (Nov 11, 2026, v0.7.5): Group 1 closed (all ten items); Groups
+> 2–4 closed except 3.1's single-pass rollup, 3.6's segment map, 4.3 and a
+> few P3 wordings — listed below with the reason.** Commits: group 1
+> 19adcb0, group 2 c4715ba, group 3 9591ed7, group 4 + docs + this block:
+> the commit after 9591ed7. The groups share fetch/store/ingest hunk by hunk; each commit was
+> built by replaying that group's patches on the previous one, so a few
+> items landed with an earlier group because they live on the same lines —
+> 2.4, 2.12–2.15 and 3.2/3.6(cap)/3.9 with group 1, 4.1's reset fragment
+> with group 2 — each commit message says which.
+> `tests/mrfx/test_review11.py`: **49 cases, all 49 fail on 1064203** (the
+> value each failed with is in its docstring and its commit message). Full
+> suite 1164 tests (the last full run: 1162 passed; the two failures were pins of the old behaviour — review 9's one-request-per-file count now allows the 1-byte size probe, and a test fake of qa_report — fixed and their files re-run green); quick tier 562 tests, 4.7 min; ruff 0; `tests/slow_tests.txt`
+> regenerated (the 0.7.4 list plus the new slow cases: the last full run
+> shared the box with the kill harnesses, so its timings would have moved
+> ~130 quick tests to slow). Eight existing tests pinned the old behaviour
+> and were updated with the reason: the byte-identical inbox twin in
+> test_known_answer (2) / test_ingest is now `skipped`; a 0.7.4 sidecar's sha
+> is re-named from the bytes (test_hardening); two resume tests' servers meet
+> the new splice sample (test_download_park, test_fetch); the
+> concurrent-ingest fake takes the claim argument (test_correctness); review
+> 9's one-request-per-file count allows the small slot's 1-byte probe.
+>
+> **Rows: nothing loaded changed.** BCBS-MS 25 MB (2,660,356 rows), UHC-NY
+> 35 MB (20,741), Tufts zip 11 MB (118,895), through the inbox AND through
+> links (local server): each part's row count and the sha256 of its sorted
+> rows (every column but ingested_at) IDENTICAL before (1064203) and after
+> group 1 and after group 4 (`r11exec/rowid.py`). The parser was not
+> touched; `fastcheck` 3/3 IDENTICAL (ND HMHS 22 MB, UHC-NY 35 MB, BCBS-MS 25 MB, single-pass, via `ingest/s10_honesty.py`).
+>
+> **Kill harnesses after the fixes** (all on the final code):
+> - queue `s5_crash.py` seed 4242, 20 kills: no row left in flight, every
+>   file its expected rows (6 ×6, 9, 9, twin 6 once), files == parts 9/9,
+>   **downloads left: none in 20/20** (1064203: the index's `.fetchmeta` in
+>   every trial — 2.15). Trial 2 is killed before `add_urls` (harness
+>   artifact, as in the review). The harness prints "PROBLEM" for every
+>   trial on 1064203 and now alike: it counts the store's own
+>   `.verified_parts.json` as a temp file (checked on 1064203: same verdict).
+> - queue `s4k_twin_kill.py` (kill at the claim instant, A and B): A done, B
+>   skipped/duplicate, 6 rows once, downloads cleaned.
+> - download `c10_kill.py` seed 39616 × 12 (0.3–9 s) **12/12 OK**, seed
+>   4242 × 8 (6.0–8.5 s) **8/8 OK**: resume from the exact `.part` size,
+>   0.13 MB re-downloaded, sha == truth, rates 600.
+> - ingest `s4_kill.py` (BCBS-MS + UHC-NY through a 2-worker pool, 15
+>   random + 5 window kills) **25/25 trials correct** (one done row per file with the clean counts, no leftovers, 416,826 repeated lines as clean, rollups not stale; seed 84654) and **0/25 left pool workers alive 45 s after the kill** (1064203: 2/2 alive in every trial — item 3.3).
+>
+> **Throughput** (`throughput/queue_timeline.py default_warm`, the same 27
+> files, 753 MB gz, 32.0 M rows; the box drifts ±15 %, so each pair below
+> ran back to back on the same box):
+>
+> | run | wall | ingests end | sum ingest | rollup | main process reads |
+> |---|---|---|---|---|---|
+> | 1064203, first | 156.8 s | 80.6 s | 227.6 s | full 75.7 s (after the incremental raised) | 6,169 MB |
+> | 0.7.5, first | 176.5 s | 89.1 s | 249.2 s | full 87.4 s (straight to the full build) | 5,783 MB |
+> | 0.7.5, second | 196.0 s | 90.4 s | 278.0 s | full 89.1 s + incr 16.0 s | 6,161 MB |
+> | 1064203, second (right after) | 190.0 s | 90.5 s | 268.8 s | full 84.8 s + incr 14.2 s | 6,547 MB |
+>
+> Within the box's noise the queue's wall time is unchanged (the paired
+> second runs: +3 %), the fresh store no longer raises through the
+> incremental, and the main process reads ~390 MB less (the fingerprint is
+> no longer re-read after each ingest). The rollup is still ~half the wall
+> on a fresh store — 3.1's single-pass build is the open lever (below).
+> Per file (`ingest/s9b_opens.py`, the 35.5 MB real UHC file, inbox):
+> **88.6 MB = 2.49× the file, 10 opens → 71.3 MB = 2.01×, 7 opens** (one
+> identity pass + the parse).
+>
+> **Repro scripts re-run after the fixes** (what they print now):
+> ingest `s2_samename` A/A2/G 0 lines held twice (was 3, then 3×), C Keep
+> both after a restart loads (was `[]` forever); `s2b_keep_stuck` scan →
+> done 5 rows; `s3_claims` A/B2 0 duplicate lines (was 300 each), C/C2/D
+> unchanged-correct; `s1_containers` blob listing quarantined with the Links
+> sentence, 0-byte / UTF-16 named; `s10_honesty` fastcheck 3/3 identical; `s6_companion` B' the rate file's row now says "drop this file in again to pick up …" (was ''); `s7_pool` with the review's worker-killing shim: exit -> "the parser process for this file was ended by the system twice …" (was "BrokenProcessPool: …"), hang -> the wedge sentence (its "RuntimeError: " prefix removed after this run), the retry loads 20 rows; a truncated / trailing-garbage gzip in the inbox reads "the file is damaged or incomplete …" (changed after this run);
+> download `c02b_json_splice` rows 55.0 ×20 = v2, sha == v2 (was 40/55 mixed);
+> `c02_range_odd` every variant sha == v2, the gz queue variant done 300 (was
+> a raw CRC failure); `c01_truncate_resume` cr_start_wrong 911,726 B sha ok
+> (was 1,173,870 B), cr_absent_short sha ok (was 364,544 B accepted);
+> `c08b` true sha, 300 rows (was 000…, 600); `c05` redirect loop and bad
+> deflate in words, 429 Retry-After honoured; `c04` no sidecar left;
+> `c05b` plain sentence; `c07_segments` seg_fails / start_only / holey_restart_200 sha ok — start_only no longer doubles the bytes (segment cap), holey_restart_200 finishes with download_retries=1 (refused 200s no longer spend the budget); seg_fails still re-downloads the good segments (segment map not built, below);
+> queue `s3_toc` retry on the capped index True → files missing [];
+> `s11b_oversize_raise` sized: bytes_total 1,709,631, re-queued → done
+> (chunked keeps 0 — its size is unknown, "download anyway" per row);
+> `s11_oversize_reexpand` 1 GET over 3 re-expansions; `s9_actions` B rows 1–5
+> listed, C cleared index stays skipped (rates {}); `s6_counters` A user retry
+> → paused (pause 1 of 1) again, B every requeue path resets; `s2_dedup`
+> token/st/policy/x-amz-meta distinct, signed shapes still dedup; `s7_lanes`
+> small files claimed at 12–17 s (were 24–31 s of the drain);
+> seams `stale_reuse` 2026-06 / 80 rows (was 0 requests, 2026-05),
+> `refresh_static_children` child 2026-06, `dest_no_sidecar` 0 requests
+> (was a full GET), `setaside_order` a, b, a, b (was a, a, b, b).
+>
+> **Left open, with the reason:**
+> - **3.1 single-pass rollup (COPY … PARTITION_BY).** Not built: it rewrites
+>   the rate spine's build — the numbers path — and needs its own
+>   equivalence run (byte-identical spine and directory on the 32 M and 99 M
+>   stores, the OOM ladder, the slice transaction) that did not fit beside
+>   this round's protocol fixes. Only the cheap half shipped (a never-built
+>   store goes straight to the full build). Measured cost unchanged: ~85 s
+>   for 32 M rows on this box (≈2.6 s per M rows).
+> - **1.8 is fixed at the reader** (the dashboard asks once more; a second
+>   miss is a 503 sentence), not by generation-named parts: every reader of a
+>   part path (verification, migration, backup, the parked/doomed lists)
+>   would change. `ingest/s5_reingest.py`'s raw DuckDB loop still meets the
+>   transient error — by design; no app reader does now.
+> - **1.2 residual**: a server with no validator that republishes a
+>   same-size file AND changes only bytes outside the sampled 64 KB windows
+>   between two connections cannot be detected by any client; said in
+>   GETTING_STARTED. (The header with `last_updated_on` is in the first 64 KB
+>   of every real MRF, which is what c02b changes.)
+> - **3.6 segment map** (keep finished segments when one fails; segments on
+>   a restart after a kill): not done — only the cap at a segment's own
+>   length (start-only servers no longer double the bytes). Segments are off
+>   by default (`download_segments: 1`).
+> - **2.8** sizes rows with a 1-byte probe from the small-file slots and
+>   claims reference lists first by name; an index's own sizes are not read
+>   (TOCs carry none). The processor still parses fetched files in id order.
+> - **4.3** (one rollup per idle gap in serve), **4.4(h)** (monotonic clock
+>   through laptop sleep), **4.4(c)** filename cap (documented the
+>   installer's "Disable path length limit" instead: shortening `filename_for`
+>   would rename every link's local file and a refreshed link would load
+>   BESIDE its old part), and the 4.5/4.6 P3 wordings not listed in
+>   GETTING_STARTED (stall overshoot, slow-but-steady text, '' vs NULL after
+>   /confirm, content tag vs month tag) — cosmetic, left.
+> - 4.4(e): `mrfx update` already probes the port and says "close the MRF
+>   Explorer window" (the finding read updater.py alone); the pip failure
+>   text now also names an open window.
 
 Rounds 1–10 are `docs/NEXT_STEPS_PROMPT.md`, `_2.md` … `_10.md`. This memo
 comes from a review on Nov 10–11, 2026 at HEAD 1064203 (version 0.7.4).

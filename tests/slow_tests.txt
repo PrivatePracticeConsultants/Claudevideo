@@ -1,4 +1,4 @@
-# Tests that take >= 0.5 s each (measured with --durations=0, Nov 10 2026, round 10). They are
+# Tests that take >= 0.5 s each (measured with --durations=0, Nov 11 2026, round 11). They are
 # excluded from `pytest -m quick` (the inner-loop run, ~3.5 min); the DEFAULT run still
 # runs everything. The known-answer tests (test_known_answer*.py) are always quick. Regenerate after big
 # test changes; a renamed or new test simply counts as quick.
@@ -382,6 +382,42 @@ tests/mrfx/test_review10.py::test_rate_changes_rows_say_which_claim_line
 tests/mrfx/test_review10.py::test_size_panel_prints_the_one_overall_position
 tests/mrfx/test_review10.py::test_state_names_are_codes_and_foreign_places_are_not_states
 tests/mrfx/test_review10.py::test_wording_posture_and_floors
+tests/mrfx/test_review11.py::test_a_chunked_copy_of_a_loaded_file_is_skipped_early
+tests/mrfx/test_review11.py::test_a_finished_part_is_flushed_to_disk_before_it_goes_live
+tests/mrfx/test_review11.py::test_a_fresh_store_goes_straight_to_the_full_rollup
+tests/mrfx/test_review11.py::test_a_part_swap_held_open_parks_instead_of_holding_the_lock
+tests/mrfx/test_review11.py::test_a_provider_list_arriving_for_a_file_that_is_gone_says_so
+tests/mrfx/test_review11.py::test_a_queued_row_nobody_loads_can_be_removed
+tests/mrfx/test_review11.py::test_a_small_file_with_none_of_the_codes_says_so
+tests/mrfx/test_review11.py::test_a_vanished_download_is_downloaded_again_as_a_download
+tests/mrfx/test_review11.py::test_an_index_leaves_no_download_record_behind
+tests/mrfx/test_review11.py::test_blob_listing_dropped_in_the_inbox_is_quarantined_with_a_sentence
+tests/mrfx/test_review11.py::test_capped_index_can_be_retried_and_takes_the_rest
+tests/mrfx/test_review11.py::test_clear_queue_pressed_while_an_index_expands_sticks
+tests/mrfx/test_review11.py::test_complete_part_answered_416_is_finished_not_downloaded_again
+tests/mrfx/test_review11.py::test_download_rename_tolerates_a_transient_windows_lock
+tests/mrfx/test_review11.py::test_empty_and_utf16_files_say_what_they_are
+tests/mrfx/test_review11.py::test_failed_pasted_rows_stay_listed_past_500_links
+tests/mrfx/test_review11.py::test_inbox_identical_bytes_under_two_names_load_once
+tests/mrfx/test_review11.py::test_inbox_ingest_reads_the_file_about_twice_not_three_times
+tests/mrfx/test_review11.py::test_keep_both_then_restart_loads_the_kept_file
+tests/mrfx/test_review11.py::test_link_then_inbox_copy_of_the_same_bytes_loads_once
+tests/mrfx/test_review11.py::test_oversize_row_records_its_size_and_requeues_when_the_limit_rises
+tests/mrfx/test_review11.py::test_parser_workers_end_when_their_parent_is_killed
+tests/mrfx/test_review11.py::test_redirect_loop_is_a_plain_sentence
+tests/mrfx/test_review11.py::test_refused_range_ignoring_200s_do_not_spend_the_retry_budget
+tests/mrfx/test_review11.py::test_requeued_loaded_link_downloads_a_republished_file
+tests/mrfx/test_review11.py::test_resume_answered_with_another_etag_restarts
+tests/mrfx/test_review11.py::test_resume_from_a_republished_file_without_validator_restarts
+tests/mrfx/test_review11.py::test_resume_whose_body_starts_at_byte_zero_restarts
+tests/mrfx/test_review11.py::test_resume_without_content_range_and_short_body_is_not_complete
+tests/mrfx/test_review11.py::test_retry_after_is_honoured
+tests/mrfx/test_review11.py::test_small_file_slot_sizes_unsized_rows_and_takes_the_small_one
+tests/mrfx/test_review11.py::test_stale_sidecar_is_not_trusted
+tests/mrfx/test_review11.py::test_static_index_refresh_reloads_a_child_republished_in_place
+tests/mrfx/test_review11.py::test_stop_during_the_retry_back_off_frees_the_slot_at_once
+tests/mrfx/test_review11.py::test_unchanged_loaded_link_is_not_downloaded_again
+tests/mrfx/test_review11.py::test_upload_of_loaded_bytes_under_another_name_is_a_duplicate
 tests/mrfx/test_review9.py::test_a_big_reference_file_is_stored_on_the_two_pass_path[fast_scan_off]
 tests/mrfx/test_review9.py::test_a_big_reference_file_is_stored_on_the_two_pass_path[low_disk]
 tests/mrfx/test_review9.py::test_a_corrected_file_of_the_same_size_is_held_then_replaces

@@ -261,6 +261,21 @@ def replace_with_retry(src: Path, dst: Path, attempts: int = 12) -> None:
             time.sleep(min(0.2 * (2 ** i), 15.0))
 
 
+def _fsync_path(p: Path) -> None:
+    """Flush a finished file's bytes to the disk before a rename makes it
+    live: a power loss (not a process kill) could leave a truncated part under
+    a 'done' row — the app never fsynced anything (review 11 item 4.4b).
+    Best effort: a failure here never fails the file."""
+    try:
+        fd = os.open(str(p), os.O_RDWR | getattr(os, "O_BINARY", 0))
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
 def unlink_with_retry(p: Path, attempts: int = 4) -> bool:
     """missing_ok unlink with the same Windows transient-lock tolerance as
     replace_with_retry. Returns False when the file is STILL THERE after the
@@ -2398,6 +2413,7 @@ class Store:
         # version, and a 0-row outcome removes the part entirely — either way
         # the old payers' slices must be queued for the incremental rollup
         doomed = self._part_payers_for_removal(path)
+        _fsync_path(tmp)            # before the rename that makes it live (4.4b)
         with self.write_lock:
             with self.connect() as con:
                 self._queue_removed_payers(con, doomed)
@@ -2743,12 +2759,15 @@ class Store:
         """BEST-EFFORT by contract: called from inside download stream loops —
         a transient store error must never fail the download it decorates.
 
-        NON-BLOCKING on the write lock: a multi-minute rollup rebuild holds
-        write_lock the whole time, and this runs inside the socket read loop —
-        blocking here would stop the download reading bytes for the rebuild's
-        duration and let an idle-timeout server drop the connection (invariant
-        3: a cosmetic helper must never break real work). If the lock is busy we
-        just skip this tick; the next one repaints the bar."""
+        NON-BLOCKING on the write lock: this runs inside the socket read loop,
+        and anything holding write_lock for long (a part swap waiting on a
+        Windows lock; claims and status writes from many threads) would stop
+        the download reading bytes and let an idle-timeout server drop the
+        connection (invariant 3: a cosmetic helper must never break real work).
+        Rollups do NOT hold it — they serialize on rollup_lock and take
+        write_lock only around view DDL (measured 0.07-1.85 s per rebuild,
+        review 11 item 4.7). If the lock is busy we just skip this tick; the
+        next one repaints the bar."""
         pct = (100.0 * bytes_done / bytes_total) if bytes_total else 0.0
         if not self.write_lock.acquire(timeout=1.0):
             return  # lock busy (e.g. rollup rebuild) — drop this cosmetic update
@@ -5881,6 +5900,7 @@ class RatesPartWriter:
         # old-part payer scan outside the lock — same contract as
         # finalize_rates_part (replacement AND 0-row removal both queue)
         doomed = self.store._part_payers_for_removal(self.path)
+        _fsync_path(self.tmp)       # before the rename that makes it live (4.4b)
         with self.store.write_lock:
             with self.store.connect() as con:
                 self.store._queue_removed_payers(con, doomed)

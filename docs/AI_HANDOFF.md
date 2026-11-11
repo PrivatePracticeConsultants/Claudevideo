@@ -169,13 +169,16 @@ Two codebases live in this repo:
    states — the dashboard shows both so an incomplete state filter reads
    as "still identifying", not "broken".
 5. **Idempotency / crash-resume.** Kill anything at any time: `.part`
-   downloads resume via HTTP Range guarded by an If-Range validator (`.val`
-   sidecar — republished content restarts instead of splicing); in-flight
+   downloads resume via HTTP Range guarded by an If-Range validator AND a
+   check of every 206 against what was asked (`.val` = the first response's
+   validator + size; an unvouched join is sampled — Round 11 additions);
+   in-flight
    queue rows AND files-table 'processing' rows recover on restart
    (`recover_stuck_urls` / `recover_stuck_files` — the latter runs at CLI
    startup, before any worker thread, so it never races a live ingest);
    re-ingest atomically replaces that file's part — never duplicates rows.
-   Content-sha dedup skips byte-identical files from other domains. The
+   Content-sha dedup skips byte-identical files from other domains AND from
+   the inbox (one content claim for every path — Round 11 additions). The
    cheap pre-ingest check is a done-only FAST PATH (skip before wasting a
    preflight); ALL in-flight twin arbitration happens in
    `claim_content_ingest` — an atomic check-and-claim under the write lock
@@ -597,36 +600,163 @@ Pinned by `tests/mrfx/test_review10.py` (26 of its 30 cases fail on 2bb81b8).
 - **Clients**: `clients.add_client` refuses a name that matches no practice;
   `_save_client` is the raw writer.
 
+### Round 11 additions (Nov 11, 2026, v0.7.5) — rules a change must keep
+
+Pinned by `tests/mrfx/test_review11.py` (all 49 cases fail on 1064203); the
+reproducing scripts are under `docs/review11_repros/`.
+
+- **One content claim for every path.** The bytes a file holds are claimed
+  before they load, under ONE write_lock: a link's queue row
+  (`Store.claim_content_ingest`, url_queue `ingesting` + `content_sha`) and an
+  inbox / upload / "Keep both" file (`Store.claim_inbox_content`, the
+  in-memory `_inbox_claims`, called by `ingest_file` itself through
+  `ingest._content_claim`). Each sees the other's in-flight claims AND every
+  loaded file's `content_fingerprints.full_sha`. A copy is recorded `skipped`
+  ("identical to X … not loaded twice", `qa.duplicate_of` / `duplicate_sha`)
+  and moved out; a twin loading right now is waited for (inbox) or deferred
+  to and revived on failure (link). A re-load of a name with a live part is
+  not checked (it replaces its own part). Over 4 GB the fingerprint proof the
+  link path trusts (`_proves`) stands in for the sha. Never add an ingest
+  path that bypasses `ingest_file`.
+- **One identity read.** `fetch.file_identity` = full sha + gzip members +
+  the early-dedup fingerprint from one sequential read; `_IDENT_SEEN` keeps
+  it from the claim to `_finish_ok`; a link's fingerprint rides in
+  `DOWNLOAD_IDENTITY["fp"]`. A new consumer of a file's sha or fingerprint
+  reads the cache, not the file.
+- **A 206 is checked against what was asked.** `.val` is JSON `{validator,
+  total}` from the FIRST response (`_read_val` / `_write_val`; a 0.7.4 plain
+  validator still reads). A 206 must start at `resume_from`, describe the
+  remembered total and carry no other validator; `done != total` restarts
+  (raw bodies); `total` never becomes None once known. A resume no
+  validator vouched for (`vouched`) is proven by `_splice_agrees`: the kept
+  bytes before each join and the first 64 KB equal what the server serves now
+  (2 small range requests). The honest residual — no validator, same size,
+  and a change only inside unsampled bytes — is stated in GETTING_STARTED.
+- **A kept download is validated before reuse.** `_kept_meta`: a sidecar is
+  trusted only when it records the size and mtime of the file on disk (0.7.4
+  sidecars are re-checked); otherwise the file is named from its own bytes
+  (no request). Every path that removes or moves a download removes its
+  sidecar; `run_queue` sweeps sidecars without a download. A re-queued LOADED
+  row (`url_queue.revalidate`: 1 refresh, 2 reload) asks the server once
+  (`_server_now`, a 1-byte ranged GET) and compares with what was recorded at
+  download (`server_validator`, `server_size`); unchanged on a refresh -> done
+  again, nothing downloaded; changed -> the kept copy is dropped. A
+  re-expanded index asks about its loaded children
+  (`_refresh_loaded_children`).
+- **No live part is read across a swap without a second chance.** DuckDB
+  reads a part's footer at plan time and re-opens it to scan; a swap in
+  between raises "Parquet file is likely corrupted". The dashboard asks again
+  once (`api.SwapRetryMiddleware`, `_part_swap_race`; a second miss answers
+  503 in words). Generation-named parts (`<key>.<gen>.parquet`) would remove
+  the race at the source — not done (every part-path reader changes).
+- **Every requeue resets through one fragment.** `store.REQUEUE_RESET`
+  (progress, retry_after, park_count, waiting_on, auto_resumes, big_lane,
+  finished_at, duplicate_of, kind duplicate/canceled -> unknown) on every path
+  that puts a finished / stopped / paused row back in the queue; `error`,
+  `retries` and `force_size` are the caller's. A new requeue path uses it.
+  Crash recovery (`recover_stuck_urls`, `release_claim`) and the timer wakes
+  do not reset (the auto-resume budget is theirs).
+- **A worker dies with its parent.** `ingest._worker_watch_parent` is the
+  pool initializer: a thread polls the parent every `PARENT_WATCH_SECONDS` and
+  `os._exit(0)`s. Never PR_SET_PDEATHSIG (it fires when the spawning THREAD
+  ends). `ParsePoolManager.shutting_down` turns a BrokenProcessPool during
+  shutdown into `PoolRestarted` (no heal + resubmit).
+- **Children are queued only while their index is still expanding**
+  (`enqueue_urls(only_if_expanding=True)`, checked in the same locked step) —
+  a user's "Clear queue" is never undone by a finishing expansion. A done
+  toc/page row is re-fetchable (user retry, direct re-paste; never a
+  re-expansion — mutual indexes would loop). An oversize child is revived by
+  a re-expansion only when its recorded size fits.
+- **Lanes size before they claim.** A small-file slot sizes an unsized row
+  with one 1-byte request and hands a big one to a big slot (`big_lane`)
+  before any body is fetched; provider-reference names are claimed first.
+- **Locks on Windows.** Every rename/unlink of a download goes through
+  `replace_with_retry` / `unlink_with_retry`; a `.part` answered 416 whose size
+  is the remembered total is finished from disk. The part swap under
+  write_lock tries ~1.4 s then parks; the parked-part adoption tries briefly.
+  Parts are fsynced before the rename that makes them live.
+- **Sentences.** `plain_parse_error` maps a dead parser pool, damaged gzip /
+  zip data; `sniff._unknown_reason` names empty and UTF-16 files; httpx
+  `TooManyRedirects` / `DecodingError` are terminal plain text; a 429/503's
+  `Retry-After` (<= 10 min) replaces the generic back-off and the give-up text
+  names the last HTTP status; the back-off sleeps in 1 s slices so "stop
+  downloads" frees the slot at once; a refused range-ignoring 200 does not
+  spend the retry budget.
+
 ## Step 4 — Know the URL pipeline states
 
-`url_queue.status`: `queued → downloading → fetched → (expanding|ingesting) →
-done | failed | skipped | oversize`, plus `paused` off `downloading`. A
-`paused` row with `park_count > 0` is PARKED (round 6, user request): its
-server sent < 1 MB for `download_park_seconds` (240), so `download()` raised
-`DownloadError(parked=True)` straight out of the stream, the .part is kept,
-and `Store.park_url` set it aside for `download_park_minutes` (10).
-`wake_parked_urls(only_if_idle=True)` hands it back to a downloader that finds
-nothing fresh queued; the 60 s coordinator wake returns it when the cool-down
-ends; a CLI drain counts parked rows as in flight. A park after >= 1 MB of
-progress resets the count; `download_park_limit` (6) fruitless parks in a row
-fall through to the long pause (`pause_url`, `park_count = 0`,
-`download_pause_hours`, `auto_resumes`). The park only engages when it is
-shorter than `download_stall_seconds`. `tests/mrfx/test_download_park.py`
-(one slot, stalled file first in line: the next file still lands). `kind`: `toc / page / in_network /
-provider_reference / allowed_amounts / duplicate / unknown`.
-`oversize` is a distinct terminal state for files over confirm_over_gb — NOT
-'failed' (so one big payer's shards don't inflate the failure count or bury a
-real error); it shows amber "too big" in the UI with a "download anyway"
-button (`force_size_requeue` sets a one-shot `force_size` flag consumed by
-`_size_limit_for`; the flag is reset on every generic retry/re-queue so the
-override never silently carries into a later bulk retry). User actions are
-guarded: retry only from failed/skipped/oversize; skip only from
-queued/failed/oversize (a done row anchors content-sha dedup and is
-untouchable). `dedup_key` strips signature/expiry query params but keeps
-identity params. `list_urls` pins actionable rows into the window (top-level
-pastes first, then failed/skipped/oversize children, then newest others,
-deduped by id) — a file forgotten mid-grind on a 2,000-row queue keeps its
-retry button reachable.
+The whole machine, derived by instrumenting every status-changing store
+method (review 11, `docs/review11_repros/queue/FINDINGS.md` §1, re-checked
+after the round-11 fixes). Keep it written down ONCE, here.
+
+```
+<new> ──add_urls / _enqueue_children / _maybe_queue_prev_month─────────────► queued
+queued ──next_queued_url (downloader claim)────────────────────────────────► downloading
+queued ──small-file slot sized it big (1-byte probe) ─────────────────────► queued (big_lane)
+downloading ──fetch_url_record ok (or a validated kept download reused)───► fetched
+downloading ──re-queued loaded row, server unchanged (revalidate=1)───────► done
+downloading ──DownloadError terminal──────────────────────────────────────► failed | oversize (bytes_total kept)
+downloading ──disk full / set aside (retries+1) / handoff / park limit────► queued   (same row, no slot)
+downloading ──park_url (silence < stall) / pause_url (stall, auto_resumes)► paused   (park_count>0 = parked)
+downloading ──park_waiting (early-dedup "wait" on an EARLIER in-flight row)► paused  (waiting_on set)
+downloading ──early-dedup "skip" (_apply_verdict, checksum-equal)─────────► skipped/duplicate (duplicate_of)
+downloading ──cancel_all_downloading ("stop downloads")───────────────────► skipped/canceled
+fetched ──next_fetched_url (processor claim)──────────────────────────────► ingesting   (never fetched→expanding)
+ingesting ──the download vanished: downloaded again────────────────────────► downloading → (continues)
+ingesting ──TOC / blob listing─────────────────────────────────────────────► expanding
+ingesting ──done twin / claim lost (link OR inbox twin, loaded or loading)─► skipped/duplicate
+ingesting ──allowed_amounts / parse "stopped" by the user─────────────────► skipped
+ingesting ──ingest done / page links found─────────────────────────────────► done
+ingesting ──ingest failed / unknown shape / preflight error───────────────► failed
+ingesting ──ingest pending_confirmation────────────────────────────────────► oversize
+ingesting ──ingest "requeued" (pool restart / shutdown)───────────────────► fetched
+expanding ──expansion ok, row still 'expanding'────────────────────────────► done (kind toc; children queued)
+expanding ──the user cleared it meanwhile─────────────────────────────────► (stays skipped; no child queued)
+expanding ──no in-network files / parse error─────────────────────────────► failed | skipped
+paused ──wake_paused_urls (timer, 60 s coordinator, start) / wake_parked_urls
+       (idle downloader) / user retry ("try now") / requeue_failed─────────► queued
+paused ──user skip / clear_queued──────────────────────────────────────────► skipped
+failed ──user retry / requeue_failed / re-paste / re-expand / force_size /
+       requeue_urls / recover_stuck_urls revive (duplicates of a FAILED twin)► queued
+failed ──user skip─────────────────────────────────────────────────────────► skipped
+skipped ──user retry / force_size / direct re-paste (never a re-expand) /
+        resume_canceled (kind canceled) / revive_skipped_duplicates (kind
+        duplicate; a link or INBOX twin failed) / record_identity──────────► queued
+oversize ──user retry / force_size / re-paste / requeue_oversize_within
+         (size known and now fits) / re-expand (only if it now fits)───────► queued
+oversize ──user skip───────────────────────────────────────────────────────► skipped
+done ──requeue_urls (monthly refresh, revalidate=1) / requeue_url_for_file
+     (provider list arrived, revalidate=2) / a re-expanded index found it
+     republished (_refresh_loaded_children) / user retry or re-paste of a
+     done toc / page────────────────────────────────────────────────────────► queued
+done ──forget_file─────────────────────────────────────────────────────────► skipped (content_sha kept)
+downloading|fetched|expanding|ingesting ──recover_stuck_urls (start) /
+       release_claim (dead thread)─────────────────────────────────────────► queued
+queued|fetched|expanding|paused ──clear_queued────────────────────────────► skipped/canceled
+```
+
+`kind`: `toc / page / in_network / provider_reference / allowed_amounts /
+duplicate / canceled / unknown`. A `paused` row with `park_count > 0` is
+PARKED: its server sent < 1 MB for `download_park_seconds` (240); it rejoins
+when the cool-down (`download_park_minutes`, 10) ends or at once when nothing
+else is queued; `download_park_limit` (6) fruitless parks in a row fall
+through to the long pause (`pause_url`, `download_pause_hours`, one of
+`download_auto_resumes` — reset by every user / bulk requeue). `oversize` is a
+distinct terminal state ("too big", amber) with "download anyway"
+(`force_size_requeue`, a one-shot flag). User actions (`_USER_TRANSITIONS`):
+retry from failed / skipped / oversize / paused (+ done toc/page); skip from
+queued / failed / oversize / paused. A done rate row is touched only by the
+refresh / reload / republished paths above (it anchors content dedup).
+`list_urls` pins every in-progress row, every pasted link and every
+actionable row (failed / skipped / oversize / paused, whatever its parent).
+
+The `files` table (inbox side): `processing → done | failed | quarantined |
+stopped | skipped (a copy of a loaded file) | pending_confirmation |
+needs_choice (a different file under a loaded name)`; `queued` is a promise
+of a load in THIS process ("Keep both", Replace, "ingest anyway", a pool
+restart) — at start `recover_stuck_files` turns an unowned one into `failed`
+(or back to `done` when its rates are live) and the scan loads it from the
+inbox, `inbox/.held/` or `inbox/.replacing/`.
 
 ## Step 5 — Performance envelope (measured)
 
@@ -694,6 +824,18 @@ retry button reachable.
     have absolute golden expectations too. This caught a pre-existing bug:
     header-at-EOF rows could flush with the seed payer during deferred-ref
     emission (now restamped first).
+- **Peak memory scales with the largest `in_network` ITEM, not the file**
+  (review 11 `ingest/s6g_mem.py`): invariant 1 holds for file size, but one
+  item whose groups are all deferred (every group cites a companion) is held
+  whole — 5 items of 150k–300k groups: 100 MB raw -> 577 MB fast / 327 MB
+  classic, 200 MB raw -> 909 / 516 MB (baseline ~250); the same groups as
+  7,500–15,000 items of 100 -> ~300 MB flat. One code carrying every provider
+  of a national payer therefore costs ~0.6 GB per worker on the fast path,
+  x `parallel_ingests` — the sizing case beside Aetna's 1.92 GB.
+- **Per file, after round 11** (`ingest/s9b_opens.py`, 35.5 MB real UHC gz,
+  inbox): the file is read twice — one identity pass (sha + fingerprint) and
+  the parse — 71.3 MB = 2.01x, 7 opens (was 88.6 MB = 2.49x, 10 opens). A link
+  is hashed while it downloads; its fingerprint is carried to `_finish_ok`.
 - Big files (≥1.5 GB uncompressed, estimate = max(18x compressed, the size
   the gzip trailer / zip directory records)) — fast path: `run_big_file_fast`
   reads the file ONCE: non-target members skipped in bulk, TARGET in_network

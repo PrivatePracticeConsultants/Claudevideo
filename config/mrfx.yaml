@@ -229,7 +229,7 @@ enrichment:
   # specialty or address changed. Nothing to set up.
   #   mode: api  = the default; uses the local file whenever one is on hand and
   #                falls back to looking each NPI up online (slow) otherwise.
-  #   mode: bulk = local file only.   mode: off = don't identify names.
+  #   mode: bulk = local file only.   mode: "off" = don't identify names.
   mode: api                   # api | bulk | off
   # auto_download: false      # uncomment to manage the NPPES file yourself
   # nppes_dir: data/nppes     # where the automatic download is kept

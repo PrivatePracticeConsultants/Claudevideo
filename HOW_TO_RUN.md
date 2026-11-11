@@ -28,7 +28,11 @@ Everything stays on your computer. Nothing is uploaded anywhere.
 2. Open the file you downloaded.
 3. **Important (Windows):** on the first screen, tick the box
    **"Add python.exe to PATH"** at the bottom. Then click **Install Now**.
-4. When it says "Setup was successful", click **Close**.
+4. When it says "Setup was successful", **first click "Disable path length
+   limit"** if the installer offers it (it is on that last screen; it needs
+   your OK as administrator), then click **Close**. Insurer file names are
+   long, and in a deep folder (for example inside OneDrive\Documents) Windows
+   otherwise refuses to save some of them.
 
 ### Step 2. Unzip the project
 
@@ -323,6 +327,10 @@ two months; older ones are deleted for you).
   backup with `mrfx verify my_backup.zip`.
 - **Updating to a new version:** see Part 5 — drag the new zip onto
   `Update MRF Explorer.bat`; your data and settings are kept.
+- **Antivirus (Windows Defender) and big downloads:** Defender re-checks a
+  large download every time it is reopened. If downloads or loading feel slow,
+  ask whoever manages the PC to exclude the `data\downloads` and
+  `data\mrfx_store` folders from real-time scanning (only these two folders).
 - **Does a number look wrong?** Note the insurer, NPI/TIN, code and month,
   then run `mrfx fastcheck "path\to\that_file.json.gz"` on the insurer file.
   It processes the file two independent ways and tells you if they disagree.

@@ -28,6 +28,14 @@ class EnrichmentConfig(BaseModel):
     # Literal so a typo ("bulck") is a clear config error instead of silently
     # falling through to API mode and hammering NPPES
     mode: Literal["api", "bulk", "off"] = "api"
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _yaml_off(cls, v):
+        # `mode: off` unquoted is YAML's boolean False — the shipped comment
+        # recommended exactly that spelling and every command then refused to
+        # start (review 11 item 4.6)
+        return "off" if v is False else v
     # mode=bulk: point at the NPPES full monthly file — the raw .zip works
     # directly (the npidata_pfile CSV is streamed from inside it) or an unzipped
     # .csv. One local pass resolves the whole book in minutes. Get it from

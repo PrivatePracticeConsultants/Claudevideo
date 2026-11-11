@@ -163,8 +163,9 @@ def apply_update(zip_path: Path, root: Path, run_pip: bool = True, log=print,
             if r.returncode != 0:
                 raise UpdateError(
                     "pip could not install the new version's components (see the lines "
-                    "above — usually no internet connection). The program was NOT "
-                    "changed; run the update again once you are online.")
+                    "above — usually no internet connection, or an MRF Explorer window "
+                    "is still open and holds its files: close every MRF Explorer window). "
+                    "The program was NOT changed; run the update again.")
 
         stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
         backup = root / "data" / "update_backups" / f"before_update_{stamp}.zip"

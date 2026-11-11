@@ -190,6 +190,19 @@ class SingleReadProgress:
             self.emit(pct)
 
 
+NO_TARGET_MSG = ("scanned: none of the target billing codes appear in this file — "
+                 "0 rows is the honest answer, not an error")
+
+
+def _no_target_note(qa: dict, no_target: bool) -> dict:
+    """A 0-row file with none of the target codes says so on every path —
+    only the big-file short-circuit did; a small file showed a bare 0 on the
+    Files tab (review 11 item 4.6)."""
+    if no_target and not qa.get("rows"):
+        qa.setdefault("messages", []).append(NO_TARGET_MSG)
+    return qa
+
+
 def qa_report(store: Store, qa_counters: dict, source_file: str,
               agg: tuple[int, int, int] | None = None) -> dict:
     """Per-file data-quality summary (§7A.3). The incremental counters come from
@@ -405,6 +418,11 @@ def _finish_file(cfg: MrfxConfig, path: Path, ok: bool) -> None:
     Log it and leave the file in place (a re-scan sees status='done' and skips
     it)."""
     if not ok:
+        try:
+            from .fetch import DOWNLOAD_IDENTITY
+            DOWNLOAD_IDENTITY.pop(str(path), None)
+        except Exception:  # noqa: BLE001 — housekeeping
+            pass
         # a link's download record describes a file that is leaving: an
         # orphaned sidecar was later trusted for whatever arrived under the
         # name (review 11 item 1.6)
@@ -475,6 +493,7 @@ class ParsePoolManager:
 
         self._max_workers = max_workers
         self._lock = threading.Lock()
+        self.shutting_down = False
         self._pool = self._make()
 
     def _make(self):
@@ -532,6 +551,7 @@ class ParsePoolManager:
         Plain shutdown (and concurrent.futures' atexit hook) WAITS for
         running futures — a SIGTERM'd server would block for the rest of a
         multi-hour parse before exiting."""
+        self.shutting_down = True
         with self._lock:
             pool = self._pool
             if pool is None:
@@ -767,6 +787,7 @@ def _parse_worker(cfg: MrfxConfig, path_str: str, name: str, header_defaults: di
         "file_month": result.file_month,
         "published_month": published_month_of(name, result.ingest_month or result.file_month),
         "ref_groups_skipped": result.ref_groups_skipped,
+        "items_matched": result.items_matched,
         "qa": result.qa.to_dict(),
         "rows": result.qa.rows,
         "rows_written": rows_written,
@@ -916,7 +937,14 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
     try:
         try:
             payload = dispatch_and_wait()
-        except concurrent.futures.process.BrokenProcessPool:
+        except concurrent.futures.process.BrokenProcessPool as e:
+            if getattr(pool, "shutting_down", False):
+                # the server is stopping (Ctrl-C): the pool's workers were
+                # ended on purpose. Healing and resubmitting printed two
+                # tracebacks per file in flight (review 11 item 4.4f); the row
+                # is picked up again at the next start
+                raise PoolRestarted("stopped with the program — picked up again "
+                                    "at the next start") from e
             # a worker died mid-parse (crash / OOM kill). Heal the pool and
             # retry this file once — the download is still on disk.
             log.warning("%s: parser worker died mid-parse; restarting pool and retrying once", name)
@@ -985,7 +1013,8 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
         file_month=payload.get("file_month"),
         published_month=payload.get("published_month"),
         ref_groups_skipped=payload["ref_groups_skipped"],
-        qa=qa_report(store, payload["qa"], name, agg=payload.get("qa_agg")),
+        qa=_no_target_note(qa_report(store, payload["qa"], name, agg=payload.get("qa_agg")),
+                           payload.get("items_matched") == 0),
         finished_at=FINISHED_NOW,
     )
     # rollup AFTER the done-upsert: the incremental update finds its work by
@@ -1363,7 +1392,8 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
             file_month=result.file_month if result.qa.rows else None,
             published_month=published_month_of(name, result.ingest_month or result.file_month),
             ref_groups_skipped=result.ref_groups_skipped,
-            qa=qa_report(store, result.qa.to_dict(), name),
+            qa=_no_target_note(qa_report(store, result.qa.to_dict(), name),
+                               result.items_matched == 0),
             finished_at=FINISHED_NOW,
         )
         # rollup AFTER the done-upsert — same reason as the pooled path: the
@@ -1426,6 +1456,17 @@ def plain_parse_error(e: BaseException) -> str:
     the file with this sentence — never a silently wrong number."""
     text = f"{type(e).__name__}: {e}"
     low = str(e).lower()
+    if type(e).__name__ in ("BadGzipFile", "EOFError", "BadZipFile", "error") and (
+            "crc check failed" in low or "end-of-stream marker" in low
+            or "not a gzipped file" in low or "not a zip file" in low
+            or "incorrect length" in low or "invalid" in low and "zlib" in type(e).__module__):
+        # the raw library text was the whole sentence (review 11 items 4.5 / 4.6)
+        why = ("the file is damaged or incomplete — its compressed data ends early or "
+               "fails its own checksum (a cut-off download, or extra bytes after the end)")
+        return (f"{why}. Nothing from it was loaded; press retry (a link downloads again) "
+                f"or drop in a fresh copy ({text[:160]})")
+    if str(e).startswith("parser worker wedged"):
+        return str(e)            # already a sentence (no "RuntimeError: " prefix)
     if type(e).__name__ == "BrokenProcessPool":
         # the parser process died twice (the pool healed and retried once):
         # a sentence, not a Python exception (review 11 item 2.5)
