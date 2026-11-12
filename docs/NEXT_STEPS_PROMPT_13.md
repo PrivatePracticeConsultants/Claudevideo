@@ -371,10 +371,96 @@ rule. Either way one rule, written down, pinned.
   is not recognised and loads twice. Hash from the parse stream (above) and
   the limit disappears.
 
-### 5.2 Items from the review
+### 5.2 What the review found (17 decision points, D1–D17; every row has a repro under `skip/`)
 
-(see SKIP_REVIEW.md — insert here when filling the status block; each with
-its repro and the fix)
+The shipped pins (14 tests) pass; the early check, the content claims under
+concurrency and failure, the same-name hold, month-dated children, sniff by
+content and the catalog all held (`SKIP_REVIEW.md` §2 "RIGHT"). What is wrong:
+
+**P0 — data doubled or a real file silently stale**
+
+- **5.2.1 Re-encoded same content loads twice** (the 5.1 lead, now measured):
+  gz level 1 vs 9, `.json` vs `.json.gz`, a browser-decoded copy vs the raw
+  download, link then inbox — every pair ends with both rows `done`, 600 rates
+  for 300, no note (`skip/s3_identity.py` A1–A4, re-run by the session lead).
+  A decompressed-content sha costs **+0.8–1.0 s per GB inflated** (sha ≈ 1.3
+  GB/s; +4.2 s on the 262 MB → 5.5 GB UHC file; `s3b_shacost.py`): take it on
+  the download (inflate beside `ContentHasher`) and on the inbox identity /
+  parse stream, store it beside the raw sha in `content_fingerprints`, and
+  make the content claim check both. A content-twin is skipped with the
+  partner named. Pin A1–A4 → one `done`, one `skipped/duplicate`, 300 rates.
+- **5.2.2 A republished child is silently left at the old month** in three
+  shapes (`skip/s6_refresh.py`): (A) the 0.7.4-loaded child whose probe
+  returns no size and no validator (`fetch.py:2930-2936`, also 1.4 above);
+  (C) **new bytes and a new size behind an unchanged ETag** — `_republished`
+  returns on validators and never compares size (`fetch.py:2615`); (B/H/I)
+  same size, bytes changed, no or same validator → "unchanged". Rule to
+  write: compare EVERY signal the probe gives (validator, size, and the first
+  64 KB sample where available) and treat any disagreement as republished;
+  when nothing can be told, say so on the row ("could not tell whether the
+  payer changed this file — re-check next month / re-paste to force") instead
+  of silence; the child-requeue sentence "the payer still publishes the same
+  file" must not be printed on size alone.
+
+**P1 — the user must act and nothing tells them**
+
+- **5.2.3 Files above 4 GB in the inbox** (the 5.1 lead, proven with the
+  threshold lowered to 1 MB; `s3` C1/C3): inbox + inbox twin under a second
+  name loads twice; inbox then LINK loads twice; only link then inbox is
+  caught, because `_finish_ok` records `trailer_proves = None` and no sha for
+  a big inbox file. Closed by 5.2.1's stream hash (the limit disappears); a
+  same-name copy above 4 GB is today held as "a different file" — fix the
+  sentence too.
+- **5.2.4 After the user adds billing codes, nothing re-reads loaded files**
+  (`s9_zero.py`, `s7` C): re-pasting a done rate link → "0 added, 1 already
+  known", 0 requests; re-pasting the index or the monthly refresh → probe
+  only; re-dropping the file → 'same'. `GETTING_STARTED.md:688-690` and
+  `cli.py:717-719` ("re-add those links … re-downloads and re-extracts") are
+  **wrong**. What works today: forget + re-paste, or `mrfx ingest --force`.
+  Build the real thing: record the code set (a hash of the active CPT list)
+  per loaded file; when the active set gains codes, the Files tab offers
+  "re-read N files for the new codes" (a re-parse from the kept download or
+  the processed copy, a re-download only when neither exists), and `mrfx add`
+  / the refresh treat a done row whose code set is older as re-parseable.
+  Fix the two documents either way.
+- **5.2.5 The monthly refresh is opt-in and catalog-scoped** (`s10_known.py`):
+  a user-pasted static index is never re-checked, and no "last checked" is
+  shown anywhere. Extend the refresh to every done index the user pasted
+  (one probe per child per month, as 1.7 built), show "last checked / next
+  check" on the index row, and say in GETTING_STARTED that it is on.
+- **5.2.6 Pre-audit-8 files** (no identity row) whose processed copy is gone:
+  a corrected same-size file with an older mtime is silently 'same'
+  (`ingest.py:1887-1897`); `/api/files` has no field marking such files
+  (`s5` D). Mark them ("loaded before identities were kept — a same-size
+  re-drop cannot be told apart; use Replace") and prefer the full sha when
+  the file is on disk.
+
+**P2 — waste**
+
+- GCS V4 `X-Goog-*`, Akamai `__token__` and a lone JWT `token` are not
+  stripped by `dedup_key` → a new row per visit, an early-check download each
+  month, rows accumulate (`s1_dedupkey.py`, `s6` G); and `?token=<id ≥ 20
+  chars>&sig=` collapses two different files to one key (second reported
+  "already known"). Decide the rule per parameter from real indexes.
+- Re-pasting a skipped/duplicate link re-downloads it (the full file under
+  15 MB or plain `.json`; 15 MB + 1.5 MB of ranges for a big gz) though the
+  docs say it "costs nothing" (`s7_revive.py` A): a known duplicate by sha
+  should answer from the identity table without a byte.
+- The UHC/Optum listing name filter drops employers whose name contains
+  "allowed" as a substring or an `_NDC` / `-NDC` token ("Hallowed Health",
+  "NDC Corp"), log-only (`s8_sniff.py`): match whole words and say it on the
+  Files tab.
+- A child removed from a re-expanded index: nothing said (`s6` D).
+
+**P3** — the size-only "same file" sentence; no note on an unchanged or
+unknown probed child; the list of log-only skips in `SKIP_REVIEW.md` §2.
+
+### 5.3 Deliverable for this group
+
+`SKIP_REVIEW.md` §3 "the protocol in one page" (11 rules) goes into
+AI_HANDOFF, amended by what this group changes (rules 4, 7, 8, 9 change), and
+GETTING_STARTED gets a short "when is a file skipped, and when is it loaded
+again" box in the user's words. Every decision in the table keeps a test.
 
 ---
 
