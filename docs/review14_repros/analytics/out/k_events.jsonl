@@ -1,0 +1,13 @@
+{"t": 1794473654.7246563, "pid": 31718, "ev": "incr_enter"}
+{"t": 1794473654.819992, "pid": 31718, "ev": "delta_enter"}
+{"t": 1794473654.8204298, "pid": 31718, "ev": "sql", "s": "BEGIN TRANSACTION", "took": 0.0}
+{"t": 1794473654.8209722, "pid": 31718, "ev": "sql", "s": "DELETE FROM rates_by_tin_tbl WHERE payer IN ('Moda')", "took": 0.0}
+{"t": 1794473656.0249639, "pid": 31718, "ev": "sql", "s": "INSERT INTO rates_by_tin_tbl BY NAME WITH spine AS ( SELECT payer, tin_value, billing_code, min(tin_type) AS tin_type, tin_is_really_npi, mi", "took": 1.204}
+{"t": 1794473656.0271773, "pid": 31718, "ev": "sql", "s": "INSERT OR REPLACE INTO meta VALUES ('spine_token', ?)", "took": 0.002}
+{"t": 1794473656.0350983, "pid": 31718, "ev": "sql", "s": "COMMIT", "took": 0.008}
+{"t": 1794473656.0359175, "pid": 31718, "ev": "sql", "s": "BEGIN TRANSACTION", "took": 0.0}
+{"t": 1794473656.0528061, "pid": 31718, "ev": "sql", "s": "DELETE FROM tin_directory_tbl WHERE tin_value IN (SELECT tin_value FROM __delta_tins)", "took": 0.017}
+{"t": 1794473666.3349116, "pid": 31718, "ev": "sql", "s": "INSERT INTO tin_directory_tbl BY NAME WITH tin_npis AS ( SELECT DISTINCT tin_value, npi FROM rates WHERE tin_value IS NOT NULL AND NOT tin_i", "took": 10.282}
+{"t": 1794473666.3445492, "pid": 31718, "ev": "sql", "s": "COMMIT", "took": 0.01}
+{"t": 1794473666.345257, "pid": 31718, "ev": "delta_exit"}
+{"t": 1794473666.3524852, "pid": 31718, "ev": "incr_exit", "took": 11.627739191055298, "ret": 11.625856270999066}

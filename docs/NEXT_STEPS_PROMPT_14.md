@@ -56,9 +56,80 @@ misleading message; **P3** cosmetic.
 
 ## Group 1 — Do the analytics take in every newly loaded file? Prove it, fix it, and show it
 
-### 1.1 The answer today (from `analytics/ANALYTICS_REPORT.md`)
+### 1.1 The answer today (from `analytics/ANALYTICS_REPORT.md`, 20+ live scenarios)
 
-(FILLED FROM THE REPORT — see the section inserted below.)
+**Yes, every file that finished loading reached the analytics once,
+completely, with no stray rows** — pasted links, inbox drops, kills at five
+moments (before the fold-in, inside an incremental's open transaction, at 31 %
+and 71 % of a sliced full build), injected out-of-memory failures, remove /
+replace / forget, the 0.7.6 → 0.7.7 upgrade with a stale spine (3 of 7 payers
+→ all 7 on the first start, no clicks, 32 s), and a new payer dropped into the
+99,000,000-row store (done 5.0 s after the drop, covered at 17.5 s; the
+incremental 11.6 s = payer slice 1.2 s + name directory 10.3 s; peak RSS 1.46
+→ 2.01 GB; after `mrfx forget` the spine and directory hashes returned exactly).
+Once the header said "current" the spine always matched the raw data (0
+missing, 0 extra, every file's count equal to its part, payers equal); a
+resumed spine was byte-identical to an uninterrupted build; the header never
+said "current" while a file was missing. **No P0.**
+
+**What is not fine — fix all of it in this group:**
+
+- **1.1a (P1) Work with no queue credit waits for an idle queue, so one long
+  download starves it.** The idle check (`fetch.py` ~3741) needs `in_flight
+  == 0`, and a parked download is woken again at once. Repro `s_f.py` F3: the
+  failure cleared at t = 0, the part-way plan never resumed in 20 minutes
+  because one stalling download held the queue (spine 72,398 of 444,992 rows, 2
+  of 7 payers, header "failed … retries when the queue is idle"); `s_j3.py`:
+  an inbox file skipped during a name refresh went in 117 s after the refresh
+  ended, with an idle queue. On the user's queue of multi-GB files that is
+  hours. Fix: the fold-in is its own scheduled worker, not a side effect of
+  the queue going idle — it runs whenever analytics are behind and the store's
+  write lock is free between files, at a bounded cadence, with the "Pause
+  analytics" switch of 1.2 as the only way to hold it.
+- **1.1b (P1) Mid-grind cadence is 4 × the last fold-in (at least 90 s) and
+  the header says "added when the queue is idle" while files are being added
+  mid-grind.** `s_f.py` F1 (30 s fold-in emulated): refreshes at 88 s and
+  240 s, then at idle; file-done → covered up to 177 s; the next-refresh time
+  (`rollup_min_interval`) is never exposed. On 1.16 B rows that is gaps of an
+  hour or more. Fix with 1.1a; the panel and the header show "next update in
+  ~N min" from the scheduler's real state.
+- **1.1c (P2) During any full build over an existing spine, coverage reads "0
+  of N payers"** (`s_g1b.py`: header 0 of 7, `/api/payers` 6 covered, the Code
+  page priced 4; a Moda-only export's methodology "Analytics cover 0 of 7
+  payers … Every number here comes from those"; `s_h.py` the `rollup_needs_full`
+  upgrade path at the start of its rebuild — on the user's store "0 of 49" for
+  2–4 hours). Cause: `_analytics_coverage` drops every payer the plan has not
+  re-sliced yet, while `/api/payers` uses `payers_part_way()`. Same root as 2.7
+  — one coverage function; during a rebuild of rows that are still present the
+  words are "being rebuilt (k of n parts)".
+- **1.1d (P2) An out-of-memory failure in a one-file incremental escalates to
+  a whole-store full plan** (`s_g.py` G1: a 252-row file's incremental fell back
+  to a 14-slice plan over 6.77 M rows, which halving grew to 24; every later
+  retry must finish it — on the user's store 2–4 hours instead of minutes).
+  Fix: halve the incremental's own payer slice first; escalate to a full plan
+  only when the incremental's precondition truly fails, and say which.
+- **1.1e (P2) A new file of an existing payer rebuilds that payer's whole
+  slice plus a whole-store name-directory scan** (~2 minutes of the directory
+  on the 99M store's scale → 3–20 minutes on the user's store per file).
+  Scope the directory update to the TINs the new file touches (the store
+  already records `rollup_pending_tins`), and measure before/after on the 99M
+  store (`s_k.py`).
+- **1.1f (P3)** An incremental shows 0 % for its whole run (28 s at 0 % while
+  the log printed partition 1/7 … 7/7) — feed its partitions to the progress
+  object; the header says "Adding the newly loaded files" during removals and
+  scoped name refreshes — say what it is doing; one sample mid first build read
+  "2 of 2 payers (0 of 2 files)"; two false log lines ("the running one covers
+  it" when it did not; "built by an older version (or never built)" for a
+  part-way plan); the header polls every 15 s (the panel of 1.2 polls 2 s while
+  open).
+
+**What the panel needs that the code computes but does not expose** (the
+report's §4, field by field): computed but not in the API — the rollup job's
+slice / slices / rate, the plan's slice list, a per-file covered flag, the
+covered and loaded payer lists, the failure time; locked inside the queue loop
+— credits waiting, next refresh time, back-off time, failure count; not
+recorded anywhere — when each file was folded in, and the incremental's own
+progress. 1.2 exposes all of it.
 
 ### 1.2 The analytics activity screen (the user's "loading screen") — build it
 

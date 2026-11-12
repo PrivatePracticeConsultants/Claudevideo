@@ -1,0 +1,112 @@
+{
+ "end_s": 12.7,
+ "peak_rss_mb": 852,
+ "timeline": [
+  {
+   "dt": 0.0,
+   "state": "building",
+   "files": "0/8",
+   "payers": "0/7",
+   "sentence": "Analytics cover 0 of 7 payers (0 of 8 files). Rolling up the rest \u2014 26 %, less than 2 min left (Blue Cross Blue Shield of North Dakota \u00b7 92616\u201396125)",
+   "err": null
+  },
+  {
+   "dt": 3.7,
+   "state": "building",
+   "files": "1/8",
+   "payers": "1/7",
+   "sentence": "Analytics cover 1 of 7 payers (1 of 8 files). Rolling up the rest \u2014 51 %, less than 2 min left (Blue Cross Blue Shield of Wyoming \u00b7 92597\u201397024)",
+   "err": null
+  },
+  {
+   "dt": 6.7,
+   "state": "building",
+   "files": "5/8",
+   "payers": "4/7",
+   "sentence": "Analytics cover 4 of 7 payers (5 of 8 files). Rolling up the rest \u2014 70 %, less than 2 min left (Moda \u00b7 90912\u2013G0283)",
+   "err": null
+  },
+  {
+   "dt": 8.7,
+   "state": "building",
+   "files": "6/8",
+   "payers": "5/7",
+   "sentence": "Analytics cover 5 of 7 payers (6 of 8 files). Rolling up the rest \u2014 75 %, less than 2 min left (Security Health Plan of Wisconsin, Inc, \u00b7 90912\u201397024)",
+   "err": null
+  },
+  {
+   "dt": 11.7,
+   "state": "building",
+   "files": "7/8",
+   "payers": "6/7",
+   "sentence": "Analytics cover 6 of 7 payers (7 of 8 files). Rolling up the rest \u2014 98 %, less than 2 min left (Tufts Health Public Plans, Inc. \u00b7 92507\u2013G0283)",
+   "err": null
+  },
+  {
+   "dt": 12.2,
+   "state": "current",
+   "files": "8/8",
+   "payers": "7/7",
+   "sentence": "",
+   "err": null
+  }
+ ],
+ "log": [
+  "08:48:50 INFO    mrfx.cli: opening the store at /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/G2/store \u2026",
+  "08:48:50 INFO    mrfx.store: analytics memory budget: 1 GB (0.9 GiB, as DuckDB reports it) \u2014 set by duckdb_memory_gb; raise duckdb_memory_gb in config/mrfx.yaml if rebuilds run out",
+  "08:48:50 INFO    mrfx.cli: analytics are behind the ingested files \u2014 catching up in the background. Reason: 8 newly ingested file(s) not yet rolled up (incremental)",
+  "08:48:50 INFO    mrfx.cli: watching /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/G2/inbox",
+  "08:48:50 INFO    mrfx.cli: incremental analytics catch-up unavailable (rollup tables were built by an older version (or never built)) \u2014 running a full rebuild",
+  "08:48:50 INFO    mrfx.store: full analytics build: payer by payer, each part saved as it finishes \u2014 the dashboard shows each payer as it lands, and a stop or restart continues where it left off",
+  "08:48:50 INFO    mrfx.store: analytics build: planning (counting rows per payer and code)\u2026",
+  "  store: /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/G2/store  (8 file(s) ingested)",
+  "  inbox: /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/G2/inbox  (drop .json / .json.gz / .zip here)",
+  "  if the app ever freezes: open /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/G2/store/diagnostics/stacks_latest.txt",
+  "08:48:50 INFO    mrfx.store: analytics build planned: 14 slice(s) over 6,768,604 rows (7 payer(s))",
+  "08:48:52 INFO    mrfx.store: analytics build: part 1 of 14 done (practice names and places, 1s)",
+  "08:48:52 INFO    mrfx.store: analytics build: part 2 of 14 done (removing payers no longer loaded, 0s)",
+  "08:48:53 INFO    mrfx.store: analytics build: part 3 of 14 done (Blue Cross Blue Shield of North Dakota \u00b7 92612, 1s)",
+  "08:48:54 INFO    mrfx.store: analytics build: part 4 of 14 done (Blue Cross Blue Shield of North Dakota \u00b7 92616\u201396125, 1s)",
+  "08:48:55 INFO    mrfx.store: analytics build: part 5 of 14 done (Blue Cross Blue Shield of North Dakota \u00b7 97034\u201397530, 1s)",
+  "08:48:55 INFO    mrfx.store: analytics build: part 6 of 14 done (Blue Cross Blue Shield of North Dakota \u00b7 97755\u2013G0543, 1s)",
+  "08:48:57 INFO    mrfx.store: analytics build: part 7 of 14 done (Blue Cross Blue Shield of Wyoming \u00b7 92597\u201397024, 2s)",
+  "08:48:58 INFO    mrfx.store: analytics build: part 8 of 14 done (Blue Cross Blue Shield of Wyoming \u00b7 97033\u201397763, 1s)",
+  "08:48:58 INFO    mrfx.store: analytics build: part 9 of 14 done (HEALTHSCOPE BENEFITS \u00b7 90912\u201397763, 0s)",
+  "08:48:58 INFO    mrfx.store: analytics build: part 10 of 14 done (Highmark WV \u00b7 90912\u2013G0283, 0s)",
+  "08:49:00 INFO    mrfx.store: analytics build: part 11 of 14 done (Moda \u00b7 90912\u2013G0283, 2s)",
+  "08:49:02 INFO    mrfx.store: analytics build: part 12 of 14 done (Security Health Plan of Wisconsin, Inc, \u00b7 90912\u201397024, 2s)",
+  "08:49:03 INFO    mrfx.store: analytics build: part 13 of 14 done (Security Health Plan of Wisconsin, Inc, \u00b7 97026\u2013G0543, 2s)",
+  "08:49:04 INFO    mrfx.store: analytics build: part 14 of 14 done (Tufts Health Public Plans, Inc. \u00b7 92507\u2013G0283, 0s)",
+  "08:49:04 INFO    mrfx.store: analytics build finished in 14s"
+ ],
+ "truth": {
+  "done_files": 8,
+  "raw_rows": 6768604,
+  "spine_rows": 444992,
+  "expected_rows": 444992,
+  "missing": 0,
+  "extra": 0,
+  "files_fully_in_spine": 8,
+  "files_rowcount_mismatch": [],
+  "spine_payers": [
+   "Blue Cross Blue Shield of North Dakota",
+   "Blue Cross Blue Shield of Wyoming",
+   "HEALTHSCOPE BENEFITS",
+   "Highmark WV",
+   "Moda",
+   "Security Health Plan of Wisconsin, Inc,",
+   "Tufts Health Public Plans, Inc."
+  ],
+  "raw_payers": [
+   "Blue Cross Blue Shield of North Dakota",
+   "Blue Cross Blue Shield of Wyoming",
+   "HEALTHSCOPE BENEFITS",
+   "Highmark WV",
+   "Moda",
+   "Security Health Plan of Wisconsin, Inc,",
+   "Tufts Health Public Plans, Inc."
+  ],
+  "hash_spine": "444992:4505bcc2a1710b0cf935b2aa05232ca9",
+  "hash_dir": "12370:08b638c1ceea498574c3c99d9a321704"
+ }
+}

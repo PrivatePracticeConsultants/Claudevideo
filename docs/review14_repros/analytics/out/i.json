@@ -1,0 +1,551 @@
+{
+ "I1_remove_one_of_two": {
+  "action_out": {
+   "status": "forgotten",
+   "rows": 699174,
+   "bytes": 3297857
+  },
+  "to_current_s": 0.1,
+  "final": {
+   "state": "current",
+   "reason": "",
+   "pct": null,
+   "eta_text": "",
+   "covered_files": 6,
+   "done_files": 6,
+   "covered_payers": 6,
+   "loaded_payers": 6,
+   "covered_rows": 6069178,
+   "loaded_rows": 6069178,
+   "sentence": ""
+  },
+  "timeline": [
+   {
+    "dt": -0.0,
+    "state": "current",
+    "files": "7/7",
+    "payers": "6/6",
+    "sentence": "",
+    "err": null
+   },
+   {
+    "dt": 0.3,
+    "state": "building",
+    "files": "6/6",
+    "payers": "6/6",
+    "sentence": "Analytics cover 6 of 6 payers (6 of 6 files). Adding the newly loaded files to the analytics",
+    "err": null
+   },
+   {
+    "dt": 3.3,
+    "state": "current",
+    "files": "6/6",
+    "payers": "6/6",
+    "sentence": "",
+    "err": null
+   }
+  ],
+  "before": {
+   "rates_total": 385117,
+   "rates_by_payer": {
+    "Blue Cross Blue Shield of Wyoming": 133072
+   },
+   "payers": [
+    "Blue Cross Blue Shield of North Dakota",
+    "Blue Cross Blue Shield of Wyoming",
+    "Highmark WV",
+    "Moda",
+    "Security Health Plan of Wisconsin, Inc,",
+    "Tufts Health Public Plans, Inc."
+   ],
+   "covered": [
+    "Blue Cross Blue Shield of North Dakota",
+    "Blue Cross Blue Shield of Wyoming",
+    "Highmark WV",
+    "Moda",
+    "Security Health Plan of Wisconsin, Inc,",
+    "Tufts Health Public Plans, Inc."
+   ],
+   "code_payer_rank": {
+    "Security Health Plan of Wisconsin, Inc,": 82.7,
+    "Highmark WV": 28.21,
+    "Moda": 26.17,
+    "Tufts Health Public Plans, Inc.": 22.51
+   }
+  },
+  "after": {
+   "rates_total": 328140,
+   "rates_by_payer": {
+    "Blue Cross Blue Shield of Wyoming": 76095
+   },
+   "payers": [
+    "Blue Cross Blue Shield of North Dakota",
+    "Blue Cross Blue Shield of Wyoming",
+    "Highmark WV",
+    "Moda",
+    "Security Health Plan of Wisconsin, Inc,",
+    "Tufts Health Public Plans, Inc."
+   ],
+   "covered": [
+    "Blue Cross Blue Shield of North Dakota",
+    "Blue Cross Blue Shield of Wyoming",
+    "Highmark WV",
+    "Moda",
+    "Security Health Plan of Wisconsin, Inc,",
+    "Tufts Health Public Plans, Inc."
+   ],
+   "code_payer_rank": {
+    "Security Health Plan of Wisconsin, Inc,": 82.7,
+    "Highmark WV": 28.21,
+    "Moda": 26.17,
+    "Tufts Health Public Plans, Inc.": 22.51
+   }
+  },
+  "current_but_pickers_disagree": 0
+ },
+ "I2_remove_only_file": {
+  "action_out": {
+   "status": "forgotten",
+   "rows": 430768,
+   "bytes": 856350
+  },
+  "to_current_s": 0.1,
+  "final": {
+   "state": "current",
+   "reason": "",
+   "pct": null,
+   "eta_text": "",
+   "covered_files": 5,
+   "done_files": 5,
+   "covered_payers": 5,
+   "loaded_payers": 5,
+   "covered_rows": 5638410,
+   "loaded_rows": 5638410,
+   "sentence": ""
+  },
+  "timeline": [
+   {
+    "dt": -0.0,
+    "state": "current",
+    "files": "6/6",
+    "payers": "6/6",
+    "sentence": "",
+    "err": null
+   },
+   {
+    "dt": 0.3,
+    "state": "building",
+    "files": "5/5",
+    "payers": "5/5",
+    "sentence": "Analytics cover 5 of 5 payers (5 of 5 files). Adding the newly loaded files to the analytics",
+    "err": null
+   },
+   {
+    "dt": 0.9,
+    "state": "current",
+    "files": "5/5",
+    "payers": "5/5",
+    "sentence": "",
+    "err": null
+   }
+  ],
+  "before": {
+   "rates_total": 328140,
+   "rates_by_payer": {
+    "Moda": 82546
+   },
+   "payers": [
+    "Blue Cross Blue Shield of North Dakota",
+    "Blue Cross Blue Shield of Wyoming",
+    "Highmark WV",
+    "Moda",
+    "Security Health Plan of Wisconsin, Inc,",
+    "Tufts Health Public Plans, Inc."
+   ],
+   "covered": [
+    "Blue Cross Blue Shield of North Dakota",
+    "Blue Cross Blue Shield of Wyoming",
+    "Highmark WV",
+    "Moda",
+    "Security Health Plan of Wisconsin, Inc,",
+    "Tufts Health Public Plans, Inc."
+   ],
+   "code_payer_rank": {
+    "Security Health Plan of Wisconsin, Inc,": 82.7,
+    "Highmark WV": 28.21,
+    "Moda": 26.17,
+    "Tufts Health Public Plans, Inc.": 22.51
+   }
+  },
+  "after": {
+   "rates_total": 245594,
+   "rates_by_payer": {
+    "Moda": 0
+   },
+   "payers": [
+    "Blue Cross Blue Shield of North Dakota",
+    "Blue Cross Blue Shield of Wyoming",
+    "Highmark WV",
+    "Security Health Plan of Wisconsin, Inc,",
+    "Tufts Health Public Plans, Inc."
+   ],
+   "covered": [
+    "Blue Cross Blue Shield of North Dakota",
+    "Blue Cross Blue Shield of Wyoming",
+    "Highmark WV",
+    "Security Health Plan of Wisconsin, Inc,",
+    "Tufts Health Public Plans, Inc."
+   ],
+   "code_payer_rank": {
+    "Security Health Plan of Wisconsin, Inc,": 82.7,
+    "Highmark WV": 28.21,
+    "Tufts Health Public Plans, Inc.": 22.51
+   }
+  },
+  "current_but_pickers_disagree": 0
+ },
+ "I3a_add_zeta_v1": {
+  "action_out": "dropped",
+  "to_current_s": 4.6,
+  "final": {
+   "state": "current",
+   "reason": "",
+   "pct": null,
+   "eta_text": "",
+   "covered_files": 6,
+   "done_files": 6,
+   "covered_payers": 6,
+   "loaded_payers": 6,
+   "covered_rows": 5638810,
+   "loaded_rows": 5638810,
+   "sentence": ""
+  },
+  "timeline": [
+   {
+    "dt": -0.0,
+    "state": "current",
+    "files": "5/5",
+    "payers": "5/5",
+    "sentence": "",
+    "err": null
+   },
+   {
+    "dt": 3.0,
+    "state": "building",
+    "files": "5/6",
+    "payers": "5/6",
+    "sentence": "Analytics cover 5 of 6 payers (5 of 6 files). Adding the newly loaded files to the analytics",
+    "err": null
+   },
+   {
+    "dt": 4.5,
+    "state": "current",
+    "files": "6/6",
+    "payers": "6/6",
+    "sentence": "",
+    "err": null
+   }
+  ],
+  "before": {
+   "rates_total": 245594,
+   "rates_by_payer": {
+    "Zeta Mutual": 0
+   },
+   "payers": [
+    "Blue Cross Blue Shield of North Dakota",
+    "Blue Cross Blue Shield of Wyoming",
+    "Highmark WV",
+    "Security Health Plan of Wisconsin, Inc,",
+    "Tufts Health Public Plans, Inc."
+   ],
+   "covered": [
+    "Blue Cross Blue Shield of North Dakota",
+    "Blue Cross Blue Shield of Wyoming",
+    "Highmark WV",
+    "Security Health Plan of Wisconsin, Inc,",
+    "Tufts Health Public Plans, Inc."
+   ],
+   "code_payer_rank": {
+    "Security Health Plan of Wisconsin, Inc,": 82.7,
+    "Highmark WV": 28.21,
+    "Tufts Health Public Plans, Inc.": 22.51
+   }
+  },
+  "after": {
+   "rates_total": 245994,
+   "rates_by_payer": {
+    "Zeta Mutual": 400
+   },
+   "payers": [
+    "Blue Cross Blue Shield of North Dakota",
+    "Blue Cross Blue Shield of Wyoming",
+    "Highmark WV",
+    "Security Health Plan of Wisconsin, Inc,",
+    "Tufts Health Public Plans, Inc.",
+    "Zeta Mutual"
+   ],
+   "covered": [
+    "Blue Cross Blue Shield of North Dakota",
+    "Blue Cross Blue Shield of Wyoming",
+    "Highmark WV",
+    "Security Health Plan of Wisconsin, Inc,",
+    "Tufts Health Public Plans, Inc.",
+    "Zeta Mutual"
+   ],
+   "code_payer_rank": {
+    "Security Health Plan of Wisconsin, Inc,": 82.7,
+    "Zeta Mutual": 79.09,
+    "Highmark WV": 28.21,
+    "Tufts Health Public Plans, Inc.": 22.51
+   }
+  },
+  "current_but_pickers_disagree": 0
+ },
+ "I3b_replace_zeta": {
+  "action_out": {
+   "held": [
+    "zeta_rates-526e6e72.json.gz"
+   ],
+   "header_while_held": "current",
+   "choose": {
+    "status": "queued",
+    "action": "replace",
+    "filename": "zeta_rates.json.gz"
+   }
+  },
+  "to_current_s": 0.1,
+  "final": {
+   "state": "current",
+   "reason": "",
+   "pct": null,
+   "eta_text": "",
+   "covered_files": 6,
+   "done_files": 6,
+   "covered_payers": 6,
+   "loaded_payers": 6,
+   "covered_rows": 5638810,
+   "loaded_rows": 5638810,
+   "sentence": ""
+  },
+  "timeline": [
+   {
+    "dt": -0.0,
+    "state": "current",
+    "files": "6/6",
+    "payers": "6/6",
+    "sentence": "",
+    "err": null
+   },
+   {
+    "dt": 2.1,
+    "state": "building",
+    "files": "5/6",
+    "payers": "6/6",
+    "sentence": "Analytics cover 6 of 6 payers (5 of 6 files). Adding the newly loaded files to the analytics",
+    "err": null
+   }
+  ],
+  "before": {
+   "rates_total": 245994,
+   "rates_by_payer": {
+    "Zeta Mutual": 400
+   },
+   "payers": [
+    "Blue Cross Blue Shield of North Dakota",
+    "Blue Cross Blue Shield of Wyoming",
+    "Highmark WV",
+    "Security Health Plan of Wisconsin, Inc,",
+    "Tufts Health Public Plans, Inc.",
+    "Zeta Mutual"
+   ],
+   "covered": [
+    "Blue Cross Blue Shield of North Dakota",
+    "Blue Cross Blue Shield of Wyoming",
+    "Highmark WV",
+    "Security Health Plan of Wisconsin, Inc,",
+    "Tufts Health Public Plans, Inc.",
+    "Zeta Mutual"
+   ],
+   "code_payer_rank": {
+    "Security Health Plan of Wisconsin, Inc,": 82.7,
+    "Zeta Mutual": 79.09,
+    "Highmark WV": 28.21,
+    "Tufts Health Public Plans, Inc.": 22.51
+   }
+  },
+  "after": {
+   "rates_total": 245754,
+   "rates_by_payer": {
+    "Zeta Mutual": 160
+   },
+   "payers": [
+    "Blue Cross Blue Shield of North Dakota",
+    "Blue Cross Blue Shield of Wyoming",
+    "Highmark WV",
+    "Security Health Plan of Wisconsin, Inc,",
+    "Tufts Health Public Plans, Inc.",
+    "Zeta Mutual"
+   ],
+   "covered": [
+    "Blue Cross Blue Shield of North Dakota",
+    "Blue Cross Blue Shield of Wyoming",
+    "Highmark WV",
+    "Security Health Plan of Wisconsin, Inc,",
+    "Tufts Health Public Plans, Inc.",
+    "Zeta Mutual"
+   ],
+   "code_payer_rank": {
+    "Zeta Mutual": 148.60500000000002,
+    "Security Health Plan of Wisconsin, Inc,": 82.7,
+    "Highmark WV": 28.21,
+    "Tufts Health Public Plans, Inc.": 22.51
+   }
+  },
+  "current_but_pickers_disagree": 0
+ },
+ "truth_after_I3": {
+  "done_files": 6,
+  "raw_rows": 5638570,
+  "spine_rows": 254500,
+  "expected_rows": 254500,
+  "missing": 0,
+  "extra": 0,
+  "files_fully_in_spine": 6,
+  "files_rowcount_mismatch": [],
+  "spine_payers": [
+   "Blue Cross Blue Shield of North Dakota",
+   "Blue Cross Blue Shield of Wyoming",
+   "Highmark WV",
+   "Security Health Plan of Wisconsin, Inc,",
+   "Tufts Health Public Plans, Inc.",
+   "Zeta Mutual"
+  ],
+  "raw_payers": [
+   "Blue Cross Blue Shield of North Dakota",
+   "Blue Cross Blue Shield of Wyoming",
+   "Highmark WV",
+   "Security Health Plan of Wisconsin, Inc,",
+   "Tufts Health Public Plans, Inc.",
+   "Zeta Mutual"
+  ],
+  "hash_spine": null,
+  "hash_dir": null
+ },
+ "I4_forget_cli": [
+  0,
+  "security_networx_PRG000049.zip: removed 1,926,992 rows, freed 9.3 MB\n08:36:57 INFO    mrfx.store: analytics memory budget: 2 GB (1.9 GiB, as DuckDB reports it) \u2014 set by duckdb_memory_gb; raise duckdb_memory_gb in config/mrfx.yaml if rebuilds run out\n08:37:00 INFO    mrfx.store: analytics update: 0 new file(s), 1 queued slice(s) \u2014 recomputing 1 payer slice(s) instead of the whole store\n08:37:01 INFO    mrfx.store: analytics update finished in 1s (payer slice, not a full rebuild)\n08:37:01 INFO    mrfx.ingest: forgot security_networx_PRG000049.zip: 1926992 rows and 9.3 MB removed\n"
+ ],
+ "I4_truth_before_restart": {
+  "done_files": 5,
+  "raw_rows": 3711578,
+  "spine_rows": 200045,
+  "expected_rows": 200045,
+  "missing": 0,
+  "extra": 0,
+  "files_fully_in_spine": 5,
+  "files_rowcount_mismatch": [],
+  "spine_payers": [
+   "Blue Cross Blue Shield of North Dakota",
+   "Blue Cross Blue Shield of Wyoming",
+   "Highmark WV",
+   "Tufts Health Public Plans, Inc.",
+   "Zeta Mutual"
+  ],
+  "raw_payers": [
+   "Blue Cross Blue Shield of North Dakota",
+   "Blue Cross Blue Shield of Wyoming",
+   "Highmark WV",
+   "Tufts Health Public Plans, Inc.",
+   "Zeta Mutual"
+  ],
+  "hash_spine": null,
+  "hash_dir": null,
+  "meta": {
+   "rollup_schema_version": "2",
+   "rollup_covered_through": "2026-11-12 08:36:19.695254",
+   "rollup_covered_names": "[\"zeta_rates.json.gz\"]"
+  }
+ },
+ "I4_restart": {
+  "to_current_s": 0.1,
+  "final": {
+   "state": "current",
+   "reason": "",
+   "pct": null,
+   "eta_text": "",
+   "covered_files": 5,
+   "done_files": 5,
+   "covered_payers": 5,
+   "loaded_payers": 5,
+   "covered_rows": 3711578,
+   "loaded_rows": 3711578,
+   "sentence": ""
+  },
+  "payers": {
+   "payers": [
+    "Blue Cross Blue Shield of North Dakota",
+    "Blue Cross Blue Shield of Wyoming",
+    "Highmark WV",
+    "Tufts Health Public Plans, Inc.",
+    "Zeta Mutual"
+   ],
+   "covered": [
+    "Blue Cross Blue Shield of North Dakota",
+    "Blue Cross Blue Shield of Wyoming",
+    "Highmark WV",
+    "Tufts Health Public Plans, Inc.",
+    "Zeta Mutual"
+   ]
+  }
+ },
+ "truth_final": {
+  "done_files": 5,
+  "raw_rows": 3711578,
+  "spine_rows": 200045,
+  "expected_rows": 200045,
+  "missing": 0,
+  "extra": 0,
+  "files_fully_in_spine": 5,
+  "files_rowcount_mismatch": [],
+  "spine_payers": [
+   "Blue Cross Blue Shield of North Dakota",
+   "Blue Cross Blue Shield of Wyoming",
+   "Highmark WV",
+   "Tufts Health Public Plans, Inc.",
+   "Zeta Mutual"
+  ],
+  "raw_payers": [
+   "Blue Cross Blue Shield of North Dakota",
+   "Blue Cross Blue Shield of Wyoming",
+   "Highmark WV",
+   "Tufts Health Public Plans, Inc.",
+   "Zeta Mutual"
+  ],
+  "hash_spine": null,
+  "hash_dir": null
+ },
+ "log": [
+  "08:36:01 INFO    mrfx.cli: opening the store at /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/I/store \u2026",
+  "08:36:01 INFO    mrfx.store: analytics memory budget: 2 GB (1.9 GiB, as DuckDB reports it) \u2014 set by duckdb_memory_gb; raise duckdb_memory_gb in config/mrfx.yaml if rebuilds run out",
+  "08:36:01 INFO    mrfx.cli: watching /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/I/inbox",
+  "  store: /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/I/store  (7 file(s) ingested)",
+  "  inbox: /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/I/inbox  (drop .json / .json.gz / .zip here)",
+  "  if the app ever freezes: open /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/I/store/diagnostics/stacks_latest.txt",
+  "08:36:04 INFO    mrfx.store: analytics update: 0 new file(s), 1 queued slice(s) \u2014 recomputing 1 payer slice(s) instead of the whole store",
+  "08:36:07 INFO    mrfx.store: analytics update finished in 3s (payer slice, not a full rebuild)",
+  "08:36:07 INFO    mrfx.ingest: forgot wy_2026-10-27_000005300_in-network-rates_05_of_09.json.gz: 699174 rows and 3.3 MB removed",
+  "08:36:09 INFO    mrfx.store: analytics update: 0 new file(s), 1 queued slice(s) \u2014 recomputing 1 payer slice(s) instead of the whole store",
+  "08:36:09 INFO    mrfx.store: analytics update finished in 1s (payer slice, not a full rebuild)",
+  "08:36:09 INFO    mrfx.ingest: forgot moda_ModaTXPriceTrans_20261101.json.gz: 430768 rows and 0.9 MB removed",
+  "08:36:14 INFO    mrfx.store: analytics update: 1 new file(s), 0 queued slice(s) \u2014 recomputing 1 payer slice(s) instead of the whole store",
+  "08:36:15 INFO    mrfx.store: analytics update finished in 1s (payer slice, not a full rebuild)",
+  "08:36:19 INFO    mrfx.store: analytics update: 1 new file(s), 1 queued slice(s) \u2014 recomputing 1 payer slice(s) instead of the whole store",
+  "08:36:20 INFO    mrfx.store: analytics update finished in 1s (payer slice, not a full rebuild)",
+  "08:37:22 INFO    mrfx.cli: opening the store at /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/I/store \u2026",
+  "08:37:22 INFO    mrfx.store: analytics memory budget: 2 GB (1.9 GiB, as DuckDB reports it) \u2014 set by duckdb_memory_gb; raise duckdb_memory_gb in config/mrfx.yaml if rebuilds run out",
+  "08:37:23 INFO    mrfx.cli: watching /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/I/inbox",
+  "  store: /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/I/store  (5 file(s) ingested)",
+  "  inbox: /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/I/inbox  (drop .json / .json.gz / .zip here)",
+  "  if the app ever freezes: open /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/I/store/diagnostics/stacks_latest.txt"
+ ]
+}
