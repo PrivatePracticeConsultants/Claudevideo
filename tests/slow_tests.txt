@@ -881,3 +881,7 @@ tests/mrfx/test_v081.py::test_coverage_is_single_flight
 tests/mrfx/test_v081.py::test_a_small_update_stays_payer_scoped
 tests/mrfx/test_v081.py::test_store_stats_never_counts_distinct_over_the_raw_rates
 tests/mrfx/test_v081.py::test_a_new_plan_adds_payers_before_the_name_directory
+tests/mrfx/test_v082.py::test_the_source_is_built_in_memory_sized_pieces
+tests/mrfx/test_v082.py::test_a_piece_that_runs_out_of_memory_is_halved_not_abandoned
+tests/mrfx/test_v082.py::test_a_source_that_cannot_be_built_is_tried_once_per_plan
+tests/mrfx/test_v082.py::test_a_stop_mid_source_continues_from_the_last_piece

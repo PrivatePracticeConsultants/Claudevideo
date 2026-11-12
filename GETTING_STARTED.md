@@ -1055,6 +1055,27 @@ Downloads and files:
 - **"fee for service" / "fee_schedule"** spelled differently by a payer no
   longer drop rates.
 
+## What changed in version 0.8.2
+
+A fix to 0.8.1, found on the same real store (1.18 billion rates, memory set
+to 8 GB).
+
+- **"Practice names and places" no longer runs out of memory.** 0.8.1 read
+  the whole store for the practice names in one go; on that store it needed
+  more than the 8 GB it is allowed, stopped after about 11 minutes with
+  *"the one-pass name-directory source could not be built (Out of Memory
+  Error …)"*, and then **tried again before every remaining part** — so each
+  part took about 16 minutes instead of 5. The numbers were still right,
+  just slow. 0.8.2 reads the store in pieces sized to the memory limit
+  (one payer, or part of one, at a time), saves each piece as it finishes,
+  and splits a piece in two if it is still too big. If it ever cannot be
+  built at all, it says so once and the remaining parts read the store
+  directly — it is never tried again for the same build.
+- **A stop in the middle keeps the finished pieces**: the next start
+  continues with the next piece.
+- **If a build is running now**, stop it (Ctrl+C), install 0.8.2, and start
+  it again: it continues from its last saved part, nothing is redone.
+
 ## What changed in version 0.8.1
 
 A fix for very large stores, found on a real one (1.18 billion rates, 50

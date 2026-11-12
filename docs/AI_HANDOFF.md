@@ -972,6 +972,37 @@ Pinned by `tests/mrfx/test_review14.py` (every Group 1-3 case fails on
   paste is durable (`meta('pending_paste')`, `resume_pending_paste`). A
   hospital of an already-loaded name from another file is refused.
 
+### 0.8.2 additions (Nov 13, 2026) — the directory source in pieces
+
+Field log (the same 1.18 B-rate store, `duckdb_memory_gb: 8`, a 0.8.0 plan
+resumed by 0.8.1 at directory part 59 of 74): 0.8.1's `_dir_source` ran
+DIR_SOURCE_SELECT over the whole store as ONE statement — out of memory
+after ~11-13 min ("could not allocate block … 7.4 GiB/7.4 GiB used") — and,
+because a failure was not remembered, again before EVERY remaining
+directory part (~16 min per part instead of ~5). Pinned by
+`tests/mrfx/test_v082.py` (4 of 5 fail on d962004; the 5th is a
+no-step-backwards pin).
+
+- **Pieces** (`Store._dir_source_chunks`): payer x code ranges cut by
+  `rollplan.spine_slices` with a budget of `_rollup_partition_rows x
+  DIR_ROWS_FACTOR` rows, from the plan's own spine slices (deduped by
+  payer/lo/hi/null_code — hash copies share a range) or, for a names-only
+  plan, from a `payer, billing_code` count. Each piece is one INSERT
+  committed WITH the resume pointer, so a kill never doubles a count
+  (`sum(n)` must equal the rows exactly). An out-of-memory piece is replaced
+  by `rollplan.halve(piece)` and retried; `halve` returning None is a
+  failure. The union is the plan's snapshot (the same rule as the spine:
+  a later file is healed by the next update).
+- **`meta('rollup_dir_source')`**: the plan id alone = ready (0.8.1's
+  format, so a source 0.8.1 finished is reused); JSON `{plan, chunks, next}`
+  while building; JSON `{plan, failed: true}` after a failure — the plan's
+  directory parts then read the raw store and the source is NOT tried again.
+  A `duckdb.InterruptException` (Ctrl+C) is re-raised, never recorded as a
+  failure.
+- **Measured** on the 99M store at `memory_limit = 600MB` (the field ratio):
+  0.8.1 out of memory; 0.8.2 15 pieces, 28 s, 17,349,651 source rows,
+  sum(n) = 99,000,000 = every rate with a TIN.
+
 ### 0.8.1 additions (Nov 13, 2026) — the field store's analytics; rules a change must keep
 
 Found on the user's store (1.18 B rates, 50 payers, 465 files, a Windows

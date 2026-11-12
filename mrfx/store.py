@@ -5717,52 +5717,147 @@ class Store:
             log.info("analytics build finished in %.0fs", took)
             return took
 
+    def _dir_source_chunks(self, con: duckdb.DuckDBPyConnection, plan: dict) -> list[dict]:
+        """The pieces the one-pass source is built in (0.8.2): payer x code
+        ranges cut exactly like spine slices (`rollplan.spine_slices`), each
+        about DIR_ROWS_FACTOR spine slices of rows, so every piece's GROUP BY
+        fits the memory limit and Parquet's payer / code statistics let it
+        read only its own row groups. Their union is every row of the plan's
+        snapshot: each payer's ranges partition its WHOLE code space."""
+        from . import rollplan
+        units: dict = {}
+        for s in plan.get("slices", []):
+            if s.get("t") == "spine":
+                units.setdefault((s["payer"], s.get("lo"), s.get("hi"),
+                                  bool(s.get("null_code"))), s)
+        if units:
+            counts = [(s["payer"], c, n) for s in units.values()
+                      for c, n in (s.get("cc") or [])]
+        else:                       # a names-only plan carries no spine slices
+            counts = con.execute(
+                "SELECT payer, billing_code, count(*) FROM rates "
+                "WHERE tin_value IS NOT NULL GROUP BY payer, billing_code").fetchall()
+        try:
+            threads = max(1, int(con.execute(
+                "SELECT current_setting('threads')").fetchone()[0]))
+        except Exception:  # noqa: BLE001
+            threads = 1
+        budget = self._rollup_partition_rows(1, threads) * rollplan.DIR_ROWS_FACTOR
+        return rollplan.spine_slices(counts, budget)
+
     def _dir_source(self, con: duckdb.DuckDBPyConnection, plan: dict, log) -> str | None:
         """The plan's one-pass directory source (`DIR_SOURCE_SELECT`): built
         the first time one of its directory slices runs, kept across a kill
-        or restart (`meta('rollup_dir_source')` = the plan id), dropped when
-        the plan finishes. A file that lands after it was built reaches the
-        directory through the next update (the coverage snapshot rule — its
-        TINs are recomputed from every part that holds them). None when it
-        cannot be built: the slices then read the raw rates as before —
-        slower, never wrong. Never raises."""
+        or restart, dropped when the plan finishes. A file that lands after
+        it was built reaches the directory through the next update (the
+        coverage snapshot rule — its TINs are recomputed from every part that
+        holds them). None when it cannot be built: the slices then read the
+        raw rates as before — slower, never wrong. Never raises.
+
+        0.8.2: built in memory-sized PIECES (`_dir_source_chunks`), each
+        committed with the resume pointer — 0.8.1 aggregated the whole store
+        in one statement, which ran out of memory on a 1.18 B-rate store at
+        8 GB after ~11 minutes, and then tried again before EVERY directory
+        part. A piece that still runs out of memory is halved and retried
+        (rollplan.halve); a failure is remembered for the plan, so it is
+        tried once, never once per part.
+
+        `meta('rollup_dir_source')`: the plan id alone = ready (0.8.1's
+        format, so a source 0.8.1 finished is reused); JSON while building
+        ({plan, chunks, next}) or after a failure ({plan, failed})."""
+        from . import rollplan
         pid = str(plan.get("id") or "")
+        if not pid:
+            return None
         try:
-            if pid and self._meta_get(con, "rollup_dir_source") == pid and con.execute(
-                    "SELECT count(*) FROM information_schema.tables WHERE table_name = ?",
-                    [DIR_SOURCE_TABLE]).fetchone()[0]:
-                return DIR_SOURCE_TABLE
+            raw = self._meta_get(con, "rollup_dir_source")
+            exists = bool(con.execute(
+                "SELECT count(*) FROM information_schema.tables WHERE table_name = ?",
+                [DIR_SOURCE_TABLE]).fetchone()[0])
         except duckdb.Error:
             return None
-        log.info("analytics build: reading every practice's NPIs ONCE for the name "
-                 "directory (one pass over the store; the %s directory parts then "
-                 "read that, not the store)",
-                 sum(1 for s in plan.get("slices", []) if s.get("t") == "dir"))
-        job = getattr(self, "_rollup_job", None)
-        if isinstance(job, dict):
-            job["label"] = "practice names and places — one pass over the store"
-        t0 = time.monotonic()
-        try:
-            cols = con.execute("DESCRIBE " + DIR_SOURCE_SELECT.replace(
-                "WHERE tin_value IS NOT NULL", "WHERE FALSE")).fetchall()
-            ddl = ", ".join(f'"{name}" {typ}' for name, typ, *_ in cols)
-            with self.write_lock:       # catalog writes: never race _register_views
-                con.execute(f"DROP TABLE IF EXISTS {DIR_SOURCE_TABLE}")
-                con.execute("DELETE FROM meta WHERE key = 'rollup_dir_source'")
-                con.execute(f"CREATE TABLE {DIR_SOURCE_TABLE} ({ddl})")
-            # the long read runs OUTSIDE the write lock, like every slice
-            con.execute("BEGIN TRANSACTION")
+        if raw == pid and exists:
+            return DIR_SOURCE_TABLE
+        st = None
+        if raw and raw != pid:
             try:
-                con.execute(f"INSERT INTO {DIR_SOURCE_TABLE} {DIR_SOURCE_SELECT}")
-                con.execute("INSERT OR REPLACE INTO meta VALUES ('rollup_dir_source', ?)",
-                            [pid])
-                con.execute("COMMIT")
-            except Exception:
+                st = json.loads(raw)
+            except ValueError:
+                st = None
+            if not isinstance(st, dict) or st.get("plan") != pid:
+                st = None
+        if st and st.get("failed"):
+            return None
+        n_dir = sum(1 for s in plan.get("slices", []) if s.get("t") == "dir")
+        job = getattr(self, "_rollup_job", None)
+        t0 = time.monotonic()
+
+        def save(c, value):
+            c.execute("INSERT OR REPLACE INTO meta VALUES ('rollup_dir_source', ?)", [value])
+
+        try:
+            if not (st and exists and isinstance(st.get("chunks"), list)):
+                chunks = self._dir_source_chunks(con, plan)
+                cols = con.execute("DESCRIBE " + DIR_SOURCE_SELECT.replace(
+                    "WHERE tin_value IS NOT NULL", "WHERE FALSE")).fetchall()
+                ddl = ", ".join(f'"{name}" {typ}' for name, typ, *_ in cols)
+                st = {"plan": pid, "chunks": chunks, "next": 0}
+                with self.write_lock:   # catalog writes: never race _register_views
+                    con.execute("BEGIN TRANSACTION")
+                    try:
+                        con.execute(f"DROP TABLE IF EXISTS {DIR_SOURCE_TABLE}")
+                        con.execute(f"CREATE TABLE {DIR_SOURCE_TABLE} ({ddl})")
+                        save(con, json.dumps(st))
+                        con.execute("COMMIT")
+                    except Exception:
+                        try:
+                            con.execute("ROLLBACK")
+                        except duckdb.Error:
+                            pass
+                        raise
+                log.info("analytics build: reading every practice's NPIs ONCE for the name "
+                         "directory (one pass over the store in %d piece(s); the %d directory "
+                         "parts then read that, not the store)", len(chunks), n_dir)
+            else:
+                log.info("analytics build: continuing the one pass for the name directory "
+                         "at piece %d of %d", int(st["next"]) + 1, len(st["chunks"]))
+            while int(st["next"]) < len(st["chunks"]):
+                i = int(st["next"])
+                ch = st["chunks"][i]
+                if isinstance(job, dict):
+                    job["label"] = (f"practice names and places — one pass over the store, "
+                                    f"piece {i + 1} of {len(st['chunks'])}")
+                q = DIR_SOURCE_SELECT.replace(
+                    "WHERE tin_value IS NOT NULL",
+                    f"WHERE tin_value IS NOT NULL AND ({rollplan.slice_pred(ch)})")
+                nxt = dict(st, next=i + 1)
+                con.execute("BEGIN TRANSACTION")
                 try:
-                    con.execute("ROLLBACK")
-                except duckdb.Error:
-                    pass
-                raise
+                    con.execute(f"INSERT INTO {DIR_SOURCE_TABLE} {q}")
+                    save(con, json.dumps(nxt))
+                    con.execute("COMMIT")
+                except duckdb.OutOfMemoryException:
+                    try:
+                        con.execute("ROLLBACK")
+                    except duckdb.Error:
+                        pass
+                    halves = rollplan.halve(ch)
+                    if not halves:
+                        raise
+                    st["chunks"][i:i + 1] = halves
+                    save(con, json.dumps(st))
+                    log.info("analytics build: a name-directory piece needed more memory "
+                             "than the limit — split in two and retried (now %d pieces)",
+                             len(st["chunks"]))
+                    continue
+                except Exception:
+                    try:
+                        con.execute("ROLLBACK")
+                    except duckdb.Error:
+                        pass
+                    raise
+                st = nxt
+            save(con, pid)                      # ready: 0.8.1's format
             try:
                 con.execute("CHECKPOINT")
             except duckdb.Error:
@@ -5771,9 +5866,20 @@ class Store:
             log.info("analytics build: name-directory source ready — %s rows in %.0fs",
                      f"{n:,}", time.monotonic() - t0)
             return DIR_SOURCE_TABLE
+        except duckdb.InterruptException:
+            # Ctrl+C / a stop: the committed pieces stand, the next start
+            # continues from the pointer — never recorded as a failure
+            raise
         except Exception as e:  # noqa: BLE001 — the raw read is always right
             log.warning("analytics build: the one-pass name-directory source could not "
-                        "be built (%s) — the directory parts read the store directly", e)
+                        "be built (%s) — the directory parts read the store directly "
+                        "(not tried again for this build)", e)
+            try:
+                with self.write_lock:
+                    con.execute(f"DROP TABLE IF EXISTS {DIR_SOURCE_TABLE}")
+                    save(con, json.dumps({"plan": pid, "failed": True}))
+            except Exception:  # noqa: BLE001 — remembering is best effort
+                pass
             return None
 
     def _run_slice(self, con: duckdb.DuckDBPyConnection, plan: dict, idx: int, log) -> None:
