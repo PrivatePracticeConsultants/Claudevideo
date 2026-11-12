@@ -491,7 +491,16 @@ function closeAnalytics() {
 async function refreshAnalytics() {
   let d;
   try { d = await api("/api/analytics/activity"); }
-  catch (e) { const b = $("#an-body"); if (b) b.innerHTML = `<p class="warn-text">${esc(e.message)}</p>`; return; }
+  catch (e) {
+    const b = $("#an-body");
+    const down = /Failed to fetch|NetworkError|Load failed/.test(String(e && e.message));
+    if (b) b.insertAdjacentHTML("afterbegin", `<p class="warn-text" id="an-down">${down
+      ? "The app is not answering right now (restarting?) — this panel tries again every 2 seconds; nothing is lost."
+      : esc(e.message)}</p>`);
+    const old = document.querySelectorAll("#an-down");
+    for (let i = 1; i < old.length; i++) old[i].remove();
+    return;
+  }
   state.anLast = d;
   renderAnalytics(d);
   // the header line follows the panel's answer (one source)
@@ -521,8 +530,11 @@ function renderAnalytics(d) {
   } else if (a.state === "current") {
     html += `<p class="an-idle an-ok">✓ Every loaded file is in the analytics. ${head}</p>`;
   } else {
-    const nxt = d.scheduler && d.scheduler.why ? ` Next: ${esc(d.scheduler.why)}.` : "";
-    html += `<p class="an-idle">${head} ${esc(a.reason || "")}${nxt}</p>`;
+    const nxt = d.scheduler && d.scheduler.why && d.scheduler.code !== "next" && d.scheduler.code !== "settle"
+      ? ` Next: ${esc(d.scheduler.why)}.` : "";
+    // (the header's pointer "— Files tab" means this panel: not repeated here)
+    const why = String(a.reason || "").replace(/ — Files tab$/, "");
+    html += `<p class="an-idle">${head} ${esc(why)}${why && !/[.!]$/.test(why) ? "." : ""}${nxt}</p>`;
   }
   if (d.bar) html += `<p class="muted" style="margin:0">${head}</p>`;
   const w = d.waiting || { count: 0, rows: 0, files: [] };

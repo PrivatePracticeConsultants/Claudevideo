@@ -113,7 +113,10 @@ def build(store, recent: int = 50) -> dict:
 def _build(store, recent: int) -> dict:
     fold = getattr(store, "foldin", None)
     sched = fold.state() if fold is not None and fold.is_running() else None
-    cov = store.analytics_coverage()
+    # FRESH, and it refreshes the header's cache: the panel's "waiting"
+    # list and its headline numbers come from one moment (a 3-s-old
+    # coverage said "every file is in" beside "Waiting: 1 file" — 99M run)
+    cov = store.analytics_coverage(max_age_seconds=0)
     job = store.rollup_job()
     with store.connect() as con:
         facts = store._coverage_facts(con)

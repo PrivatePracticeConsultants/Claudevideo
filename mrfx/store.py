@@ -6865,7 +6865,10 @@ class Store:
         a broken header."""
         from . import rollplan
         held = getattr(self, "_coverage_cache", None)
-        if held is not None and time.monotonic() - held[0] < max_age_seconds \
+        # while a build runs its percentage moves: half a second at most, so
+        # the header and the panel's bar say the same number (review 14 1.2)
+        age = min(max_age_seconds, 0.5) if self._rollup_active else max_age_seconds
+        if held is not None and time.monotonic() - held[0] < age \
                 and held[2] == (self.data_generation, self._rollup_active):
             return held[1]
         try:

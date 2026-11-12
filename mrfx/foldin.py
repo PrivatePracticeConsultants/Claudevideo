@@ -344,6 +344,14 @@ class FoldIn:
 
     def _loop(self) -> None:
         stop = self._stop
+        try:
+            # the files the analytics hold NOW, before any fold-in: a store
+            # opened by 0.8.0 for the first time is seeded here, so the first
+            # update's files get their "added" events (found on the 99M store:
+            # the first update seeded the set after it, and recorded none)
+            self.store._note_fold_ins("an update while the app was stopped")
+        except Exception:  # noqa: BLE001 — cosmetic
+            pass
         while stop is not None and not stop.is_set():
             self._wake.wait(TICK_S)
             self._wake.clear()

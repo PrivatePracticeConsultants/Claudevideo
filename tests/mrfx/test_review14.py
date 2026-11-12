@@ -341,6 +341,40 @@ def test_1_2_the_panel_shows_a_file_waiting_then_added(cfg, store):
         f.stop()
 
 
+def test_1_2_the_first_update_after_an_upgrade_records_its_files(cfg, store):
+    """1.2 (found on the 99M store): a store opened by 0.8.0 for the first
+    time has no fold-in history; the scheduler seeds it at start, so the
+    first update's files are recorded under "Added". was (before the seed):
+    the first update seeded the history WITH its own file — "Added recently:
+    none". On 9617c59: ImportError (no mrfx.foldin)."""
+    from mrfx import foldin
+    cfg.enrichment.mode = "off"
+    _market(cfg, store, "Alpha Health", "71000", [40, 50, 60])
+    with store.connect() as con:                  # what an upgraded store holds
+        con.execute("DELETE FROM meta WHERE key IN ('analytics_known_covered', "
+                    "'analytics_events')")
+    store.set_analytics_paused(True)
+    f = foldin.ensure(store)
+    stop = threading.Event()
+    f.start(stop)
+    try:
+        assert _wait(lambda: store.analytics_events() == [] and _known(store), 10)
+        _no_rollup_load(cfg, store, "Beta Health", "72000", [41, 51, 61])
+        store.set_analytics_paused(False)
+        f.poke()
+        assert _wait(lambda: any(e["file"] == "72000_2026-06.json"
+                                 for e in store.analytics_events()), 20)
+    finally:
+        stop.set()
+        f.stop()
+
+
+def _known(store):
+    with store.connect() as con:
+        return con.execute("SELECT count(*) FROM meta WHERE key = 'analytics_known_covered'"
+                           ).fetchone()[0] == 1
+
+
 def test_1_2_run_now_folds_in_during_a_busy_queue(cfg, store):
     """1.2: Run now folds in at the next tick even while the cadence says
     wait (downloads running). was: ImportError: cannot import name
