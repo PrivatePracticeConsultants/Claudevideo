@@ -1056,7 +1056,8 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
         # store agree (the normal paths do this via finalize_rates_part)
         store.drop_rates_part(name)
         store.upsert_file(name, payer=pf.payer, status="done", rows_emitted=0,
-                          qa={"rows": 0, "messages": [msg]}, finished_at=FINISHED_NOW)
+                          qa={"rows": 0, "messages": [msg]}, finished_at=FINISHED_NOW,
+                          **_read_identity(path, cfg))
         _finish_ok(cfg, store, path)
         log.info("%s: %s", name, msg)
         return {"status": "done", "rows": 0, "payer": pf.payer, "note": msg}
@@ -1075,6 +1076,7 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
         qa=_no_target_note(qa_report(store, payload["qa"], name, agg=payload.get("qa_agg")),
                            payload.get("items_matched") == 0),
         finished_at=FINISHED_NOW,
+        **_read_identity(path, cfg),
     )
     # rollup AFTER the done-upsert: the incremental update finds its work by
     # "done files newer than the coverage marker" — called before the upsert
@@ -1093,6 +1095,28 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
             "ref_groups_skipped": payload["ref_groups_skipped"],
             "remote_ref_groups": qa.get("remote_ref_groups", 0),
             "ambiguous_ref_ids": qa.get("ambiguous_ref_ids", 0)}
+
+
+def _read_identity(path: Path, cfg: MrfxConfig | None = None) -> dict:
+    """Fields the 'done' commit carries about the bytes it read: their size,
+    mtime and sha (files.read_identity) and the code list they were read for
+    — so a kill before _finish_ok loses neither (the round-11 s4 harness's
+    after_commit window held the same file as "a different file")."""
+    out: dict = {}
+    try:
+        st = _INGEST_STAT.get(str(path))
+        now = path.stat()
+        # bytes that changed while being read are not "what was loaded"
+        # (_finish_ok's rule): such a commit carries no read identity
+        if st is not None and (now.st_size, now.st_mtime_ns) == st:
+            seen = _IDENT_SEEN.get((str(path), st[0], st[1])) or {}
+            out["read_identity"] = json.dumps({"size": st[0], "mtime_ns": st[1],
+                                               "sha": seen.get("sha")})
+        if cfg is not None:
+            out["code_set"] = code_set_key(cfg)
+    except Exception:  # noqa: BLE001 — bookkeeping never fails the commit
+        pass
+    return out
 
 
 def _commit_done(store: Store, name: str, **fields) -> None:
@@ -1517,6 +1541,7 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
             qa=_no_target_note(qa_report(store, result.qa.to_dict(), name),
                                result.items_matched == 0),
             finished_at=FINISHED_NOW,
+            **_read_identity(path, cfg),
         )
         # rollup AFTER the done-upsert — same reason as the pooled path: the
         # incremental update keys on done files newer than the coverage marker

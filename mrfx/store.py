@@ -2512,6 +2512,12 @@ class Store:
         # joined by ","): after the user ADDS codes, the files read without
         # them can be read again (review 13 item 5.2.4)
         con.execute("ALTER TABLE files ADD COLUMN IF NOT EXISTS code_set VARCHAR")
+        # the size / mtime / sha of the bytes read, written IN the 'done'
+        # commit: a kill after the commit and before the identity row (the
+        # rollup runs in between) must not turn the very file still in the
+        # inbox into "a different file with the same name" (round-11 kill
+        # harness s4, after_commit window, on 0.7.7 before this column)
+        con.execute("ALTER TABLE files ADD COLUMN IF NOT EXISTS read_identity VARCHAR")
         # the state a Medicare fee-schedule row prices (None: the file didn't say)
         con.execute("ALTER TABLE mpfs ADD COLUMN IF NOT EXISTS state VARCHAR")
         con.execute("ALTER TABLE files ADD COLUMN IF NOT EXISTS file_month VARCHAR")
@@ -3197,10 +3203,26 @@ class Store:
                 [filename, size, full_sha, mtime_ns, trailer_proves, content_sha, content_size])
 
     def loaded_identity(self, filename: str) -> dict | None:
+        """What was loaded under `filename`: the identity row, else — a kill
+        between the 'done' commit and the identity row — the read identity
+        the commit itself carried (files.read_identity)."""
         with self.connect() as con:
             row = con.execute(
                 "SELECT size, mtime_ns, full_sha, trailer_proves FROM content_fingerprints "
                 "WHERE filename = ?", [filename]).fetchone()
+            if not row:
+                try:
+                    ri = con.execute("SELECT read_identity FROM files WHERE filename = ? "
+                                     "AND status = 'done'", [filename]).fetchone()
+                except duckdb.Error:
+                    ri = None
+                if ri and ri[0]:
+                    try:
+                        d = json.loads(ri[0])
+                        return {"size": d.get("size"), "mtime_ns": d.get("mtime_ns"),
+                                "full_sha": d.get("sha"), "trailer_proves": None}
+                    except (ValueError, AttributeError):
+                        return None
         if not row:
             return None
         return dict(zip(("size", "mtime_ns", "full_sha", "trailer_proves"), row))
@@ -5645,7 +5667,7 @@ class Store:
             "size_bytes", "rows_emitted", "ref_groups_skipped", "error",
             "preflight", "qa", "progress", "chunks_done", "chunks_total",
             "started_at", "finished_at", "row_rules", "file_month", "published_month",
-            "code_set",
+            "code_set", "read_identity",
         }
         fields = {k: v for k, v in fields.items() if k in cols}
         if fields.get("status") == "done":

@@ -823,6 +823,34 @@ def test_5_2_6_a_legacy_file_is_never_same_on_size_and_age(cfg, store):
     assert "before file identities were kept" in row["identity_note"]
 
 
+def test_5_2_6_a_kill_after_the_commit_keeps_the_file_the_same_file(cfg, store):
+    """5.2.6 follow-up, found by the round-11 kill harness (ingest/s4_kill.py
+    after_commit and before_finish_ok windows, 2 of 25 trials) on this
+    round's code before the fix: killed after the 'done' commit and before
+    the identity row, the very file still in the inbox came back as "a
+    different file with the same name" (needs_choice) — the size-and-age
+    guess 5.2.6 removed had been covering that window. The commit now
+    carries the read identity (files.read_identity)."""
+    import shutil
+    p = cfg.inbox_dir / "k.json"
+    p.write_bytes(_rd(rate=40.0, n=10))
+    st0 = p.stat()
+    scan_inbox(cfg, store)
+    # the state a kill leaves: done, no identity row, the file still in place
+    with store.connect() as con:
+        con.execute("DELETE FROM content_fingerprints")
+    moved = next(cfg.processed_dir.glob("k.json*"))
+    shutil.copy2(moved, p)
+    moved.unlink()
+    assert (p.stat().st_size, p.stat().st_mtime_ns) == (st0.st_size, st0.st_mtime_ns)
+    rows_before = _q(store, "SELECT count(*) FROM rates")[0][0]
+    res = scan_inbox(cfg, store)
+    assert [r["status"] for r in res] != ["needs_choice"]
+    assert _q(store, "SELECT status FROM files WHERE filename = 'k.json'") == [("done",)]
+    assert _q(store, "SELECT count(*) FROM files WHERE status = 'needs_choice'") == [(0,)]
+    assert _q(store, "SELECT count(*) FROM rates")[0][0] == rows_before
+
+
 def test_5_2_p2_signed_links_and_file_ids_by_the_right_rule():
     """5.2 P2 (skip/s1_dedupkey): GCS V4, Akamai __token__ and a lone JWT
     token kept every link unique; a long ?token=<file id>&sig= collapsed two
