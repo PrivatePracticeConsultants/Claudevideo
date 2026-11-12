@@ -5124,6 +5124,23 @@ class Store:
             return None
         return plan if isinstance(plan, dict) and isinstance(plan.get("slices"), list) else None
 
+    def payers_part_way(self) -> set:
+        """Payers a part-way FULL build has started but not finished: some of
+        their rows are in the spine, not all. Never raises."""
+        plan = self.rollup_plan()
+        if not plan or plan.get("kind") != "full":
+            return set()
+        last: dict = {}
+        for i, sl in enumerate(plan["slices"]):
+            if sl.get("t") == "spine":
+                last[sl.get("payer")] = i
+        nxt = int(plan.get("next", 0))
+        first = {}
+        for i, sl in enumerate(plan["slices"]):
+            if sl.get("t") == "spine":
+                first.setdefault(sl.get("payer"), i)
+        return {p for p, i in last.items() if i >= nxt and first[p] < nxt}
+
     def rollup_plan(self) -> dict | None:
         """The outstanding analytics build plan, if one is part-way (None
         otherwise). Never raises."""
@@ -6514,6 +6531,11 @@ class Store:
         loaded = list(inv["payers"]) if inv.get("complete") else sorted(
             set(inv["payers"]) | set(spine_payers) | {f[3] for f in files if f[3]})
         covered_list = [p for p in spine_payers if p in set(loaded)]
+        if plan is not None and plan.get("kind") == "full":
+            # a payer whose slices are only part-way committed has SOME rows
+            # in the spine but is not covered: counting it said "1 of 15
+            # payers (0 of 45 files)" mid-build (the 99M UI check)
+            covered_list = [p for p in covered_list if p not in last or p in plan_done]
         stale = (needs_full or bool(pending) or plan is not None
                  or len(cov) < len(files))
         failure = self.rollup_failure()

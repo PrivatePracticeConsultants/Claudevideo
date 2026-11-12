@@ -2251,7 +2251,12 @@ function initPdfButtons() {
     const main = $(sel);
     if (!main || document.getElementById(main.id + "-pdf")) continue;
     const b = document.createElement("button");
-    b.className = "btn"; b.id = main.id + "-pdf"; b.type = "button";
+    b.className = "btn pdf-twin"; b.id = main.id + "-pdf"; b.type = "button";
+    // the twin must not squeeze its row into three-line buttons: the row
+    // wraps and both buttons keep their words on one line
+    const row = main.parentElement;
+    if (row && getComputedStyle(row).display === "flex") row.style.flexWrap = "wrap";
+    main.style.whiteSpace = "nowrap";
     b.textContent = "Save as PDF";
     b.title = "The same report as a PDF file (printed by the built-in browser)";
     b.disabled = main.disabled;

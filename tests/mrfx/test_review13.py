@@ -1,8 +1,11 @@
 """Review 13 (0.7.7): every item of Groups 1, 3, 4 and 5 and every feature of
 Group 6 of docs/NEXT_STEPS_PROMPT_13.md, pinned with a small hand-worked
 store. Each test FAILED on c8b80fc (0.7.6); the value it got there is in its
-docstring ("was: …"). The progress-bar tests of DESIGN §3.6.7 live in
-tests/mrfx/test_progress.py."""
+docstring ("was: …") — 37 of 38, run from a `git archive` of c8b80fc with the
+editable install's fall-through to this checkout's new modules removed. The
+38th, test_5_2_7_a_list_landing_first_or_last_still_works, is a guard: the
+two orderings that always worked must keep working. The progress-bar tests of
+DESIGN §3.6.7 live in tests/mrfx/test_progress.py."""
 
 from __future__ import annotations
 
@@ -211,8 +214,11 @@ def test_1_3_a_killed_build_resumes_and_ends_identical(cfg, store, monkeypatch):
         pass
 
     def dies_half_way(con, plan, idx, log):
+        # past half way, inside a payer (its previous slice is the same payer's)
         calls["n"] += 1
-        if calls["n"] > len(plan["slices"]) // 2:
+        sl, prev = plan["slices"][idx], plan["slices"][idx - 1] if idx else {}
+        if calls["n"] > len(plan["slices"]) // 2 and sl["t"] == "spine" \
+                and prev.get("t") == "spine" and prev.get("payer") == sl["payer"]:
             raise Killed("process killed")
         return real(con, plan, idx, log)
     monkeypatch.setattr(store, "_run_slice", dies_half_way)
@@ -224,7 +230,16 @@ def test_1_3_a_killed_build_resumes_and_ends_identical(cfg, store, monkeypatch):
     committed = {s["payer"] for s in plan["slices"][:plan["next"]] if s["t"] == "spine"}
     assert set(store.spine_payers()) == committed and committed
     assert store.rollups_stale()
-    assert store.analytics_coverage(max_age_seconds=0)["state"] == "failed"
+    cov = store.analytics_coverage(max_age_seconds=0)
+    assert cov["state"] == "failed"
+    # a payer only part-way through its slices is NOT counted as covered (the
+    # 99M UI check read "1 of 15 payers (0 of 45 files)" mid-build)
+    whole = {p for p in committed
+             if all(i < plan["next"] for i, s in enumerate(plan["slices"])
+                    if s["t"] == "spine" and s["payer"] == p)}
+    assert set(cov["covered"]) == whole
+    assert store.payers_part_way() == committed - whole and committed - whole
+    assert set(TestClient(create_app(cfg, store)).get("/api/payers").json()["covered"]) == whole
     done_before = plan["next"]
     redone = []
 

@@ -4976,9 +4976,10 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         # review 13 item 1.2: list what is LOADED; `covered` says which of them
         # the analytics hold (the page greys the others: "loaded, not yet in
         # analytics") — the chips offered 3 payers while the header said 49
-        covered = got["payers"]
+        part_way = store.payers_part_way()
+        covered = [p for p in got["payers"] if p not in part_way]
         inv = store.loaded_inventory()
-        return {"payers": sorted(set(covered) | set(inv.get("payers") or [])),
+        return {"payers": sorted(set(got["payers"]) | set(inv.get("payers") or [])),
                 "covered": covered}
 
     @app.get("/api/catalog")
