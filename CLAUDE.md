@@ -28,8 +28,8 @@ for correctness of the numbers.
 
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/pip install -e .
 .venv/bin/mrfx serve                       # dashboard http://localhost:8377 + inbox watcher + URL worker
-.venv/bin/python -m pytest tests/ -q       # the suite: real end-to-end drains against local HTTP servers (~48 min, 1336 tests)
-.venv/bin/python -m pytest tests/ -q -m quick   # inner loop, ~4 min (476 tests): skips tests/slow_tests.txt
+.venv/bin/python -m pytest tests/ -q       # the suite: real end-to-end drains against local HTTP servers (~48 min, 1346 tests)
+.venv/bin/python -m pytest tests/ -q -m quick   # inner loop, ~4 min (477 tests): skips tests/slow_tests.txt
 .venv/bin/ruff check mrfx/ tests/          # lint gate: narrow by design (see pyproject), stays at ZERO
 .venv/bin/pip-audit -r requirements.txt    # dependency CVEs: was 25 across 5 packages, now clean
 ```

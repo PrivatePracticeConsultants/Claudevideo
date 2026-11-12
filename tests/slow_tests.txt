@@ -872,3 +872,12 @@ tests/mrfx/test_v4.py::test_tin_late_join_matches_full_join
 tests/mrfx/test_v4.py::test_tin_type_npi_flagged_and_hideable
 tests/mrfx/test_v4.py::test_two_npis_one_tin_roll_up
 tests/mrfx/test_v4.py::test_verified_website_saves_and_flows_to_export
+tests/mrfx/test_v081.py::test_a_plan_stored_directory_first_resumes_identically
+tests/mrfx/test_v081.py::test_the_source_is_built_once_per_plan_and_survives_a_kill
+tests/mrfx/test_v081.py::test_directory_from_the_one_pass_source_is_byte_identical
+tests/mrfx/test_v081.py::test_the_header_poll_answers_while_its_counts_are_slow
+tests/mrfx/test_v081.py::test_a_large_update_goes_through_the_durable_build
+tests/mrfx/test_v081.py::test_coverage_is_single_flight
+tests/mrfx/test_v081.py::test_a_small_update_stays_payer_scoped
+tests/mrfx/test_v081.py::test_store_stats_never_counts_distinct_over_the_raw_rates
+tests/mrfx/test_v081.py::test_a_new_plan_adds_payers_before_the_name_directory
