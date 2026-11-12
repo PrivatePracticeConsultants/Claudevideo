@@ -45,6 +45,12 @@ _SLOW = {line.strip() for line in (Path(__file__).parent / "slow_tests.txt").rea
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "quick: fast inner-loop subset (see tests/slow_tests.txt)")
+    # review 14 Group 4: the evidence checks itself — tests/mrfx/test_repros.py
+    # (the repro scripts of rounds 11-14 against their recorded "after" lines)
+    # and the race tests under a CPU hog are always in the slow tier
+    config.addinivalue_line("markers", "slow: always outside the quick tier")
+    config.addinivalue_line("markers", "stress: a race test run N times beside a CPU hog "
+                                       "(MRFX_STRESS_N, default 3)")
     # review 12 item 4.1(j), decided: the app needs httpx only, so httpx2 stays
     # out of requirements.txt (it installs on the user's PC too) and starlette
     # stays pinned; its test client's "install httpx2" notice is silenced here,
@@ -56,5 +62,6 @@ def pytest_configure(config):
 
 def pytest_collection_modifyitems(config, items):
     for item in items:
-        if item.nodeid not in _SLOW:
+        if item.nodeid not in _SLOW and not item.get_closest_marker("slow") \
+                and not item.get_closest_marker("stress"):
             item.add_marker(pytest.mark.quick)

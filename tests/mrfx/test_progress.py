@@ -363,8 +363,15 @@ def test_t13_the_sampler_tolerates_connection_churn(cfg, store, mkt):
             assert r.status_code == 200
     finally:
         threading.excepthook = old
-    time.sleep(1.0)
+    # the samplers end within one sampling tick of their run; on a loaded box
+    # (the release check runs the race tests beside a CPU hog) that tick can
+    # take longer than the 1 s this waited — wait for them, up to 15 s
+    # (review 14 Group 4: no test may need a retry)
+    t_end = time.monotonic() + 15
     alive = [t for t in threading.enumerate() if t.name == "mrfx-progress"]
+    while alive and time.monotonic() < t_end:
+        time.sleep(0.2)
+        alive = [t for t in threading.enumerate() if t.name == "mrfx-progress"]
     assert leaked == [] and alive == [], (leaked, alive)
     assert sys.exc_info() == (None, None, None)
 
