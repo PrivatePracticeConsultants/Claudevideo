@@ -309,7 +309,7 @@ def build_prospect_dossier(cfg: MrfxConfig, store: Store, subject: str,
         from .medicare import org_referrals
         with store.connect() as con:
             npis = [n for (n,) in con.execute(
-                "SELECT DISTINCT npi FROM rates WHERE tin_value IN "
+                f"SELECT DISTINCT npi FROM {store.pairs_relation()} WHERE tin_value IN "
                 "(SELECT unnest(?::VARCHAR[])) AND npi IS NOT NULL",
                 [tins]).fetchall()]
         if not npis:

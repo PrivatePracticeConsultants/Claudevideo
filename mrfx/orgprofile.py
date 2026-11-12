@@ -58,7 +58,7 @@ def compute_org_profile(store: Store, subject: str, market: dict) -> dict:
         # The NPIs that actually bill under this practice's TIN(s) — the handle
         # the tracker works in. Includes the NPI-in-the-TIN-slot case.
         npis = [r[0] for r in con.execute(
-            "SELECT DISTINCT npi FROM rates WHERE tin_value IN "
+            f"SELECT DISTINCT npi FROM {store.pairs_relation()} WHERE tin_value IN "
             "(SELECT unnest(?::VARCHAR[])) AND npi IS NOT NULL ORDER BY npi",
             [tins]).fetchall()]
         ident = con.execute(

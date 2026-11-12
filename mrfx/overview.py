@@ -18,8 +18,7 @@ code on the Markets/Benchmark tabs instead of drifting on a looser basis.
 
 from __future__ import annotations
 
-from .benchmark import (BASIS_NOTE, _market_where, _rates_relation,
-                        normalize_market)
+from .benchmark import BASIS_NOTE, normalize_market
 from .catalog import code_info
 from .store import Store
 from .rounding import half_up
@@ -36,84 +35,60 @@ def market_overview(store: Store, state: str | None = None) -> dict:
     st = (state or "").strip().upper() or None
     # run on the report basis so the landing numbers match every analytical tab
     market = normalize_market({"month": "latest", **({"state": st} if st else {})})
-    where, params = _market_where(market, include_assistant=False, include_non_dollar=False)
-    rel = _rates_relation(market)
-    j = "LEFT JOIN tin_directory td USING (tin_value)"
-
+    from . import progress
+    from .benchmark import practice_base_sql
+    prog = progress.current()
+    # review 13 item 3.4: every section is a per-practice median, and the
+    # materialised practice medians (practice_medians_v1 / _payer_v1, built once
+    # per spine generation for the Benchmark) already hold them — the same
+    # rows to the last bit (test_round7's both-ways test). The overview built
+    # a temp table of the market's spine rows and recomputed them three times:
+    # 26.9 s on a fresh start of the 99M-rate store.
+    prog.stage("Reading this market's rows")
+    pq, pparams = practice_base_sql(store, market, per_payer=True)    # payer, code, TIN, rate
+    cq, cparams = practice_base_sql(store, market)                    # code, TIN, rate
     with store.connect() as con:
-        # ONE pass over the spine: the market's rows (the five columns every
-        # section below reads) into a per-request temp table, then four small
-        # aggregates over it — the four sections used to each scan, filter and
-        # join the whole spine. Same rows, so the same numbers. (Temp tables
-        # are private to this connection and dropped with it.)
-        con.execute(
-            f"""CREATE OR REPLACE TEMP TABLE __overview AS
-                SELECT t.payer, t.billing_code, t.tin_value, t.discipline, t.negotiated_rate
-                FROM {rel} t {j} WHERE {where}""", params)
-        rel, j, where, params = "__overview", "", "TRUE", []
+        prog.stage("Counting payers, codes and practices")
         counts = con.execute(
-            f"""SELECT count(DISTINCT t.payer)        AS payers,
-                       count(DISTINCT t.billing_code) AS codes,
-                       count(DISTINCT t.tin_value)    AS practices
-                FROM {rel} t {j} WHERE {where}""", params).fetchone()
+            f"""SELECT count(DISTINCT payer), count(DISTINCT billing_code),
+                       count(DISTINCT tin_value) FROM ({pq})""", pparams).fetchone()
 
         # ONE comparable service per discipline — its moderate-complexity
         # evaluation — per-TIN median first, then across TINs. A median over
         # each discipline's own code mix read "OT $95.45 vs PT $32.23": the OT
         # rows were only its four evaluation codes, the 42 shared codes (97110,
         # 97530 …) were in neither (review 10 item 3.5)
+        prog.stage("Typical evaluation rate per discipline")
         by_discipline = con.execute(
-            f"""WITH per_tin AS (
-                    SELECT CASE t.billing_code WHEN '97162' THEN 'pt' WHEN '97166' THEN 'ot'
-                                ELSE 'slp' END AS discipline, t.tin_value,
-                           median(t.negotiated_rate) AS rate
-                    FROM {rel} t {j}
-                    WHERE {where} AND t.billing_code IN ('97162', '97166', '92523')
-                    GROUP BY 1, t.tin_value)
-                SELECT discipline, median(rate) AS median,
-                       count(DISTINCT tin_value) AS practices
-                FROM per_tin GROUP BY discipline ORDER BY discipline""", params).fetchall()
+            f"""SELECT CASE billing_code WHEN '97162' THEN 'pt' WHEN '97166' THEN 'ot'
+                            ELSE 'slp' END AS discipline,
+                       median(rate) AS median, count(DISTINCT tin_value) AS practices
+                FROM ({cq}) WHERE billing_code IN ('97162', '97166', '92523')
+                GROUP BY 1 ORDER BY 1""", cparams).fetchall()
 
+        prog.stage("Best-covered codes")
         top_codes = con.execute(
-            f"""WITH per_tin AS (
-                    SELECT t.billing_code, t.tin_value, median(t.negotiated_rate) AS rate
-                    FROM {rel} t {j} WHERE {where}
-                    GROUP BY t.billing_code, t.tin_value)
-                SELECT billing_code, count(DISTINCT tin_value) AS practices,
+            f"""SELECT billing_code, count(DISTINCT tin_value) AS practices,
                        median(rate) AS median
-                FROM per_tin GROUP BY billing_code
-                ORDER BY practices DESC, billing_code LIMIT 15""", params).fetchall()
+                FROM ({cq}) GROUP BY billing_code
+                ORDER BY practices DESC, billing_code LIMIT 15""", cparams).fetchall()
 
         # payer index: payer_median / market_median per code, then median over
-        # codes — all on the per-TIN grain. `per_tin` collapses each practice to
-        # one rate first; `pcnt` counts DISTINCT practices per payer (summing the
-        # per-code counts would double-count a practice priced on >1 code).
-        # The denominator is the code's MARKET median — one rate per practice
-        # across all its payers, then the median across practices: the same
-        # number this page prints under "Most-priced codes". It was the median
-        # of PAYER medians, so a payer pricing one practice at $100 dragged
-        # the "market" to $75 and a payer paying ten practices exactly the
-        # market's $50 read 0.667, "~33 % below market" (round 7 P1.15). A
-        # payer's code counts only with _MIN_INDEX_PRACTICES practices.
+        # codes — all on the per-TIN grain. The denominator is the code's
+        # MARKET median — one rate per practice across all its payers, then
+        # the median across practices: the same number this page prints under
+        # "Most-priced codes" (round 7 P1.15). A payer's code counts only with
+        # _MIN_INDEX_PRACTICES practices; `pcnt` counts DISTINCT practices.
+        prog.stage("Payer index")
         payer_index = con.execute(
-            f"""WITH per_tin AS (
-                    SELECT t.payer, t.billing_code, t.tin_value,
-                           median(t.negotiated_rate) AS rate
-                    FROM {rel} t {j} WHERE {where}
-                    GROUP BY t.payer, t.billing_code, t.tin_value
-                ),
+            f"""WITH per_tin AS ({pq}),
                 base AS (
                     SELECT payer, billing_code, median(rate) AS payer_med
                     FROM per_tin GROUP BY payer, billing_code
                     HAVING count(DISTINCT tin_value) >= {_MIN_INDEX_PRACTICES}
                 ),
-                practice AS (
-                    SELECT billing_code, tin_value, median(t.negotiated_rate) AS rate
-                    FROM {rel} t {j} WHERE {where}
-                    GROUP BY billing_code, tin_value
-                ),
                 mkt AS (SELECT billing_code, median(rate) AS mkt_med
-                        FROM practice GROUP BY billing_code),
+                        FROM ({cq}) GROUP BY billing_code),
                 pcnt AS (SELECT payer, count(DISTINCT tin_value) AS practices
                          FROM per_tin GROUP BY payer)
                 SELECT b.payer,
@@ -125,8 +100,7 @@ def market_overview(store: Store, state: str | None = None) -> dict:
                 WHERE m.mkt_med > 0
                 GROUP BY b.payer
                 HAVING count(DISTINCT b.billing_code) >= {_MIN_INDEX_CODES}
-                ORDER BY idx DESC, b.payer""", params).fetchall()
-        con.execute("DROP TABLE IF EXISTS __overview")
+                ORDER BY idx DESC, b.payer""", [*pparams, *cparams]).fetchall()
 
     disc_label = {"pt": "Physical therapy evaluation (97162)",
                   "ot": "Occupational therapy evaluation (97166)",

@@ -21,12 +21,34 @@ import csv
 import io
 import logging
 
+from . import progress
 from .store import Store, mask_tin
-from .rounding import half_up
+from .rounding import half_up as _half_up
 
 log = logging.getLogger(__name__)
 
 MAX_CODE_COLUMNS = 10
+
+
+class _Rounder:
+    """half_up, remembered per value: fee schedules repeat a handful of rates
+    across thousands of practices, and the whole-store export called the
+    Decimal-based half_up 11,461,266 times (40 s of a 128 s profile — review 13
+    item 3.3). The SAME function decides every value; only repeats are looked
+    up, so the bytes are unchanged."""
+
+    def __init__(self):
+        self._memo: dict = {}
+
+    def __call__(self, x, nd=None):
+        k = (x, nd)
+        r = self._memo.get(k)
+        if r is None:
+            r = self._memo[k] = _half_up(x, nd) if nd is not None else _half_up(x)
+        return r
+
+
+half_up = _half_up
 
 BASE_HEADERS = [
     "ORG_NAME", "ENTITY_ID", "TINS", "NPI_COUNT", "ENTITY_KIND",
@@ -55,17 +77,18 @@ def _geo_by_tin(store: Store, scope_tins: list[str]) -> dict[str, dict]:
         return {}
     import pyarrow as pa
     scope = pa.table({"tin_value": pa.array(scope_tins, type=pa.string())})
+    pairs = store.pairs_relation()      # the kept (TIN, NPI) pairs, not a raw scan
     with store.connect() as con:
         con.register("_scope", scope)
         try:
             rows = con.execute(
-                """
+                f"""
                 WITH tin_npi AS (
-                    SELECT DISTINCT r.tin_value, r.npi FROM rates r JOIN _scope s USING (tin_value)
+                    SELECT DISTINCT r.tin_value, r.npi FROM {pairs} r JOIN _scope s USING (tin_value)
                     WHERE r.tin_value IS NOT NULL AND NOT r.tin_is_really_npi
                     UNION
                     -- tin.type='npi' rows: the "TIN" IS an NPI — locate through it
-                    SELECT DISTINCT r.tin_value, r.tin_value AS npi FROM rates r JOIN _scope s USING (tin_value)
+                    SELECT DISTINCT r.tin_value, r.tin_value AS npi FROM {pairs} r JOIN _scope s USING (tin_value)
                     WHERE r.tin_value IS NOT NULL AND r.tin_is_really_npi
                 )
                 SELECT tin_value,
@@ -129,6 +152,9 @@ def build_outreach_rows(store: Store, rel_sql: str, params: list,
     in its mail merge; a flat code put everyone at PCTL 100 while three tabs
     said p50 (audit 8 P1-6)."""
     from .benchmark import normalize_market, practice_base_sql
+    half_up = _Rounder()
+    prog = progress.current()
+    prog.stage("Listing the organizations in this view")
     with store.connect() as con:
         units = con.execute(
             f"""
@@ -151,8 +177,10 @@ def build_outreach_rows(store: Store, rel_sql: str, params: list,
     tins_of = {u[0]: sorted({t.strip() for t in (u[2] or "").split(";") if t.strip()})
                for u in units}
     scope_tins = sorted({t for ts in tins_of.values() for t in ts})
+    prog.stage("Looking up addresses and contacts")
     geo = _geo_by_tin(store, scope_tins)
     meta = _tin_meta(store, scope_tins)
+    prog.stage("One rate per organization and code")
 
     # per-code entity rates on the house basis: per-TIN medians (the
     # materialised practice medians when the basis allows), then the median
@@ -219,8 +247,12 @@ def build_outreach_rows(store: Store, rel_sql: str, params: list,
     for c in wanted:
         headers += [f"C{c}_RATE", f"C{c}_MKT_MEDIAN", f"C{c}_PCTL", f"C{c}_GAP_TO_MEDIAN"]
 
+    prog.stage("Writing the CSV and methodology")
     out_rows: list[dict] = []
-    for unit_id, display_name, tins, npi_count, payers, months in units:
+    n_units = max(1, len(units))
+    for i_unit, (unit_id, display_name, tins, npi_count, payers, months) in enumerate(units):
+        if i_unit % 5000 == 0:
+            prog.tick(i_unit / n_units)
         # entity-grain rows already carry aggregated 'tin1; tin2' strings whose
         # order varies — split, dedupe, and sort for a stable output
         tin_list = sorted({t.strip() for t in (tins or "").split(";") if t.strip()})
@@ -278,8 +310,10 @@ def _defuse(v):
 
 
 def outreach_csv(headers: list[str], rows: list[dict]) -> str:
+    # csv.writer over the header order — exactly what DictWriter writes
+    # (restval "", extras ignored) without a dict per row (review 13 item 3.3)
     buf = io.StringIO()
-    w = csv.DictWriter(buf, fieldnames=headers, extrasaction="ignore")
-    w.writeheader()
-    w.writerows([{k: _defuse(v) for k, v in r.items()} for r in rows])
+    w = csv.writer(buf)
+    w.writerow(headers)
+    w.writerows([[_defuse(r.get(h, "")) for h in headers] for r in rows])
     return "﻿" + buf.getvalue()  # BOM for Excel / Brevo import

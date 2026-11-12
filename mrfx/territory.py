@@ -102,21 +102,23 @@ def local_rate_map(store: Store, code: str, market: dict, *,
     where, params = _market_where(m, bool(m.get("include_assistant")),
                                   bool(m.get("include_non_dollar")))
     rel = _rates_relation(m)
+    pairs = store.pairs_relation()
     # A practice's cities IN THIS STATE: the cities of its own NPIs located in
     # the state (NPPES). tin_directory.cities is every city of a TIN with ANY
     # location in the state, so "Therapy market report — ND" read "Within ND,
     # Tampa pays 8.1% more than Tuscaloosa" — 10 of its 12 cities had no
-    # provider in ND (review 10 item 2.1)
+    # provider in ND (review 10 item 2.1).
+    # The per-TIN median is computed ONCE into a temp table (it ran three
+    # times: the cities, the reference and the suppressed count — 3.2 + 2.3 s
+    # on a 99M-rate store) and the (TIN, NPI) pairs come from the kept pair
+    # table, not a raw scan (review 13 items 3.2 / 3.5).
+    import uuid
+    base_tbl = f"_lrm_base_{uuid.uuid4().hex[:10]}"
     cities_cte = f"""
-    base AS (
-        SELECT t.tin_value, median(t.negotiated_rate) AS rate
-        FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
-        WHERE {where}
-        GROUP BY t.tin_value
-    ),
+    base AS (SELECT * FROM {base_tbl}),
     exploded AS (
         SELECT DISTINCT upper(trim(n.city)) AS city, r.tin_value
-        FROM (SELECT DISTINCT tin_value, npi FROM rates
+        FROM (SELECT DISTINCT tin_value, npi FROM {pairs}
               WHERE tin_value IN (SELECT tin_value FROM base) AND npi IS NOT NULL) r
         JOIN npi_directory n ON n.npi = r.npi
         WHERE n.state = ? AND coalesce(trim(n.city), '') <> ''
@@ -137,23 +139,28 @@ def local_rate_map(store: Store, code: str, market: dict, *,
     ORDER BY median_rate DESC, city
     """
     with store.connect() as con:
-        cur = con.execute(sql, [*params, st, MIN_CELL])
-        every = [dict(zip([d[0] for d in cur.description], r)) for r in cur.fetchall()]
-        # the headline compares the best- and the worst-paying city of ALL that
-        # qualify; the list shown is cut at `limit` (it compared the first
-        # city with the 60th when more qualified)
-        rows = every[:int(limit)]
-        ref = con.execute(f"""
-            WITH base AS (
-                SELECT t.tin_value, median(t.negotiated_rate) AS rate
-                FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
-                WHERE {where} GROUP BY t.tin_value)
-            SELECT round(median(rate), 2), count(*) FROM base""", params).fetchone()
-        suppressed = con.execute(f"""
-            WITH {cities_cte}
-            SELECT count(*) FROM (
-                SELECT city FROM exploded GROUP BY city
-                HAVING count(DISTINCT tin_value) < ?)""", [*params, st, MIN_CELL]).fetchone()[0]
+        con.execute(f"""
+            CREATE OR REPLACE TEMP TABLE {base_tbl} AS
+            SELECT t.tin_value, median(t.negotiated_rate) AS rate
+            FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
+            WHERE {where}
+            GROUP BY t.tin_value""", params)
+        try:
+            cur = con.execute(sql, [st, MIN_CELL])
+            every = [dict(zip([d[0] for d in cur.description], r)) for r in cur.fetchall()]
+            # the headline compares the best- and the worst-paying city of ALL
+            # that qualify; the list shown is cut at `limit` (it compared the
+            # first city with the 60th when more qualified)
+            rows = every[:int(limit)]
+            ref = con.execute(
+                f"SELECT round(median(rate), 2), count(*) FROM {base_tbl}").fetchone()
+            suppressed = con.execute(f"""
+                WITH {cities_cte}
+                SELECT count(*) FROM (
+                    SELECT city FROM exploded GROUP BY city
+                    HAVING count(DISTINCT tin_value) < ?)""", [st, MIN_CELL]).fetchone()[0]
+        finally:
+            con.execute(f"DROP TABLE IF EXISTS {base_tbl}")
 
     state_median = ref[0]
     for r in rows:
@@ -328,7 +335,7 @@ def steal_share(store: Store, subject: str, *, radius_miles: float | None = None
         raise BenchmarkError(f"no practice matches {subject!r}")
     with store.connect() as con:
         mine = [r[0] for r in con.execute(
-            "SELECT DISTINCT npi FROM rates WHERE tin_value IN "
+            f"SELECT DISTINCT npi FROM {store.pairs_relation()} WHERE tin_value IN "
             "(SELECT unnest(?::VARCHAR[])) AND npi IS NOT NULL", [tins]).fetchall()]
     if not mine:
         # resolve_subject_tins falls through to the raw string for an unknown

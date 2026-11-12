@@ -5784,9 +5784,30 @@ class Store:
                     if held is not None and held[0] == gen:
                         tins, payers = held[1]
                     else:
-                        tins, payers = con.execute(
-                            "SELECT count(DISTINCT tin_value), count(DISTINCT payer) "
-                            "FROM rates_by_tin_tbl").fetchone()
+                        # kept on disk per spine content (review 13 item 3.5:
+                        # 6.8 s on every fresh start of a 99M-rate store)
+                        kept = None
+                        try:
+                            kpath = self.dir / f"spine_counts.v1.{self.spine_key()}.json"
+                            if kpath.exists():
+                                kept = json.loads(kpath.read_text())
+                        except (OSError, ValueError, duckdb.Error):
+                            kpath, kept = None, None
+                        if isinstance(kept, list) and len(kept) == 2:
+                            tins, payers = int(kept[0]), int(kept[1])
+                        else:
+                            tins, payers = con.execute(
+                                "SELECT count(DISTINCT tin_value), count(DISTINCT payer) "
+                                "FROM rates_by_tin_tbl").fetchone()
+                            if kpath is not None:
+                                try:
+                                    for old in self.dir.glob("spine_counts.v1.*.json"):
+                                        old.unlink(missing_ok=True)
+                                    tmp = kpath.with_suffix(".tmp")
+                                    tmp.write_text(json.dumps([tins, payers]))
+                                    os.replace(tmp, kpath)
+                                except OSError:
+                                    pass
                         self._spine_counts = (gen, (tins, payers))
                 else:
                     # analytics behind: what is LOADED, from the per-part sets
@@ -5920,6 +5941,50 @@ class Store:
                         try:
                             old.unlink()
                         except OSError:      # still open on Windows: next time
+                            pass
+        return f"read_parquet('{sql_path(path)}')"
+
+    PAIRS_SCHEMA = 1
+
+    def pairs_relation(self) -> str:
+        """`read_parquet(...)` of every (tin_value, npi, tin_is_really_npi)
+        pair the rate parts hold, with its row count `c` (review 13 item 3.2).
+
+        `SELECT DISTINCT tin_value, npi FROM rates` ran on EVERY call of the
+        city rate map, market sizing, the client digest, outreach, new-to-
+        network, steal-share and the entity drawer — 2-12 s of raw scan each on
+        a 99M-rate store (1,939,999 pairs). Built once from the raw rows and
+        stamped with the parts' signatures like placement_relation, so a part
+        landing, changing or leaving yields a new file on the next request and
+        never a stale pair. NULL npi (TIN-only rows) and NULL tin are kept, so
+        a reader's DISTINCT over this equals the same DISTINCT over `rates`."""
+        import hashlib
+        import json as _json
+        stamp = hashlib.sha1(_json.dumps(
+            [sorted(self._part_sigs().items()), self.PAIRS_SCHEMA]).encode()).hexdigest()[:16]
+        path = self.dir / f"tin_npi_pairs.{stamp}.parquet"
+        if not path.exists():
+            lock = self.__dict__.setdefault("_pairs_lock", threading.Lock())
+            with lock:
+                if not path.exists():
+                    tmp = self.dir / f"tin_npi_pairs.{stamp}.parquet.{os.getpid()}.tmp"
+                    try:
+                        with self.connect() as con:
+                            con.execute(
+                                "COPY (SELECT tin_value, npi, tin_is_really_npi, count(*) AS c "
+                                "FROM rates GROUP BY tin_value, npi, tin_is_really_npi "
+                                "ORDER BY tin_value, npi) "
+                                f"TO '{sql_path(tmp)}' (FORMAT PARQUET)")
+                        os.replace(tmp, path)
+                    except BaseException:
+                        tmp.unlink(missing_ok=True)
+                        raise
+                    olds = sorted((p for p in self.dir.glob("tin_npi_pairs.*.parquet")
+                                   if p != path), key=lambda p: p.stat().st_mtime, reverse=True)
+                    for old in olds[1:]:
+                        try:
+                            old.unlink()
+                        except OSError:
                             pass
         return f"read_parquet('{sql_path(path)}')"
 
@@ -6119,6 +6184,30 @@ class Store:
         finally:
             self.write_lock.release()
         return complete
+
+    def parts_holding(self, ident: str) -> list[str] | None:
+        """The rate parts that hold `ident` as a TIN or an NPI (review 13 item
+        3.5: /api/validate read every part — an OR of tin and npi defeats
+        Parquet pruning; 13.9 s cold on a 99M-rate store). From the kept
+        per-part TIN and NPI sets; None when they cannot answer exactly right
+        now (the caller then scans every part, as before)."""
+        if not re.fullmatch(r"[0-9]{9,10}", str(ident or "")):
+            return None     # rate_npi_set keeps well-formed NPIs only
+        try:
+            with self.connect() as con:
+                if not self._part_sets_current(con, None):
+                    return None
+                rel = self._rate_npis_relation(con)
+                if "__npi_new" in rel:       # a writer held the lock: not applied
+                    return None
+                got = con.execute(
+                    "SELECT part FROM part_tin_set WHERE tin_value = ? "
+                    "UNION SELECT part FROM rate_npi_set WHERE npi = ?",
+                    [ident, ident]).fetchall()
+            return sorted(str(self.rates_dir / r[0]) for r in got
+                          if (self.rates_dir / r[0]).exists())
+        except Exception:  # noqa: BLE001 — the full scan is always right
+            return None
 
     def loaded_inventory(self, budget_s: float | None = 2.0) -> dict:
         """{payers, months, tins, rows_by_payer, complete} of every LOADED rate
@@ -6577,7 +6666,8 @@ class Store:
                 unlink_with_retry(p)
             for p in self.dir.glob("tin_zip_place.*"):
                 unlink_with_retry(p)
-            for pat in ("practice_medians*.parquet*", "spine_units*.parquet*",
+            for pat in ("practice_medians*.parquet*", "spine_units*.parquet*", "tin_npi_pairs.*",
+                        "spine_counts.*",
                         "summary_strips.*.json"):
                 for p in self.dir.glob(pat):
                     unlink_with_retry(p)

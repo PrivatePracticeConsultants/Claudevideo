@@ -395,7 +395,7 @@ def market_sizing(store: Store, zip_code: str, radius_miles: float = 25,
         # otherwise scale with total rows, not distinct pairs).
         practices, npis = con.execute(f"""
             WITH pairs AS (
-                SELECT DISTINCT tin_value, npi FROM rates
+                SELECT DISTINCT tin_value, npi FROM {store.pairs_relation()}
                 WHERE tin_value IS NOT NULL AND NOT tin_is_really_npi
             ), p AS (
                 SELECT pr.tin_value AS tin,

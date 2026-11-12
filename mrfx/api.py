@@ -255,12 +255,40 @@ def _entity_keyed(tin_rows: str) -> str:
             "LEFT JOIN entity_map s2 ON s2.tin_value = s.tin_value")
 
 
-def _resolve_entity_key(con, key: str) -> str:
+def _entity_units_keyed(units: str | None = None) -> str:
+    """Every PRACTICE of the spine (tin_value, tin_is_really_npi) with its
+    display name and entity key — the SAME expressions _TIN_PROJECTION and
+    _ENTITY_KEY_SQL give each spine row, computed once per practice from the
+    practice list instead of on every spine row (review 13 item 3.1: the
+    drawer's key lookups each aggregated the whole 79M-row spine)."""
+    units = units or "(SELECT DISTINCT tin_value, tin_is_really_npi FROM rates_by_tin)"
+    return f"""
+        SELECT s.tin_value, s.tin_is_really_npi, s.display_name,
+               {_ENTITY_KEY_SQL} AS entity_key
+        FROM (SELECT t.tin_value, t.tin_is_really_npi,
+                     {_UNIT_COLS["display_name"]} AS display_name,
+                     coalesce(td.entity_kind = 'org', nn.entity_type = 'NPI-2', FALSE) AS name_is_org,
+                     coalesce(td.primary_state, nn.state) AS primary_state
+              FROM {units} t {_TIN_JOINS}) s
+        LEFT JOIN entity_map s2 ON s2.tin_value = s.tin_value"""
+
+
+def _member_tin_rows(tins_param: str = "?", latest: bool = False) -> str:
+    """_TIN_REL[_LATEST] restricted to a list of member TINs (one VARCHAR[]
+    parameter) — the spine is clustered by (code, TIN), so this prunes."""
+    where = " WHERE t.tin_value IN (SELECT unnest(" + tins_param + "::VARCHAR[]))"
+    if latest:
+        where += " AND t.is_latest"
+    return f"SELECT {_TIN_PROJECTION} FROM rates_by_tin t {_TIN_JOINS}{where}"
+
+
+def _resolve_entity_key(con, key: str, units: str | None = None) -> str:
     """An entity drawer link may carry a bare organization name (a bookmark,
     an older build's link, a hand-typed URL) where the key is now "NAME · ST".
     Exactly one entity of that name -> its key; several -> say which (never
     pick one); none -> the key as given (the caller 404s)."""
-    if con.execute(f"SELECT 1 FROM ({_entity_keyed(_TIN_REL)}) WHERE entity_key = ? LIMIT 1",
+    keyed = _entity_units_keyed(units)
+    if con.execute(f"SELECT 1 FROM ({keyed}) WHERE entity_key = ? LIMIT 1",
                    [key]).fetchone():
         return key
     keys = [r[0] for r in con.execute(
@@ -2159,14 +2187,29 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         if grain not in GRAIN_REL:
             raise HTTPException(404, "grain must be entity|tin|npi")
         with store.connect() as con:
+            members: list[str] = []
             if grain == "entity":
-                unit_id = _resolve_entity_key(con, unit_id)
-            rows = _dicts(con.execute(
-                f"SELECT * FROM ({GRAIN_REL[grain]}) WHERE unit_id = ? "
-                "ORDER BY billing_code, payer, modifier_set, file_month, billing_class, "
-                "service_code_set, is_dollar_rate, tin_value, negotiated_rate",
-                [unit_id],
-            ))
+                # review 13 item 3.1: the member TINs FIRST (from the practice
+                # list), then only their spine rows — the entity relation used
+                # to aggregate the whole spine into entities before filtering
+                # (30.4 s cold / 15.9 s warm on a 99M-rate store)
+                units = _units_rel()
+                unit_id = _resolve_entity_key(con, unit_id, units)
+                members = [r[0] for r in con.execute(
+                    f"SELECT DISTINCT tin_value FROM ({_entity_units_keyed(units)}) "
+                    "WHERE entity_key = ? ORDER BY tin_value", [unit_id]).fetchall()]
+                rows = _dicts(con.execute(
+                    f"SELECT * FROM ({_entity_rel(_member_tin_rows())}) WHERE unit_id = ? "
+                    "ORDER BY billing_code, payer, modifier_set, file_month, billing_class, "
+                    "service_code_set, is_dollar_rate, tin_value, negotiated_rate",
+                    [members, unit_id])) if members else []
+            else:
+                rows = _dicts(con.execute(
+                    f"SELECT * FROM ({GRAIN_REL[grain]}) WHERE unit_id = ? "
+                    "ORDER BY billing_code, payer, modifier_set, file_month, billing_class, "
+                    "service_code_set, is_dollar_rate, tin_value, negotiated_rate",
+                    [unit_id],
+                ))
             if not rows:
                 raise HTTPException(404, f"no rates for {grain} {unit_id}")
             if grain == "npi":
@@ -2183,11 +2226,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                     # manual map name, else NPPES name + state(s), else the raw
                     # TIN for a no-name SSN-pattern TIN) — so the drawer lists
                     # exactly the members the entity row aggregated.
-                    tin_list = [r[0] for r in con.execute(
-                        f"SELECT DISTINCT tin_value FROM ({_entity_keyed(_TIN_REL)}) "
-                        "WHERE entity_key = ? ORDER BY tin_value",
-                        [unit_id],
-                    ).fetchall()]
+                    tin_list = members
                 tins = _dicts(con.execute(
                     f"SELECT * FROM tin_directory WHERE tin_value IN ({', '.join('?' for _ in tin_list)}) "
                     "ORDER BY npi_count DESC NULLS LAST, tin_value",
@@ -2198,7 +2237,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 member_npis = _dicts(con.execute(
                     f"""
                     SELECT DISTINCT r.npi, n.org_name, n.entity_type, n.city, n.state, n.taxonomy_desc
-                    FROM rates r LEFT JOIN npi_directory n USING (npi)
+                    FROM {store.pairs_relation()} r LEFT JOIN npi_directory n USING (npi)
                     WHERE r.tin_value IN ({', '.join('?' for _ in tin_list)})
                       AND r.npi IS NOT NULL  -- TIN-only rows have no NPI to list
                     ORDER BY r.npi
@@ -2220,7 +2259,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 chart_rel = (f"SELECT * FROM ({GRAIN_REL['npi']}) WHERE unit_id = ? "
                              f"{_NPI_LATEST_QUALIFY}")
             elif grain == "entity":
-                chart_rel = f"SELECT * FROM ({_entity_rel(_TIN_REL_LATEST, True)}) WHERE unit_id = ?"
+                chart_rel = (f"SELECT * FROM ({_entity_rel(_member_tin_rows(latest=True), True)}) "
+                             "WHERE unit_id = ?")
             else:
                 chart_rel = f"SELECT * FROM ({_TIN_REL_LATEST}) WHERE unit_id = ?"
             chart = _dicts(con.execute(
@@ -2231,7 +2271,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                   AND billing_class = 'professional' AND {base_sql("modifier_set")}
                 GROUP BY billing_code, payer ORDER BY billing_code, payer
                 """,
-                [unit_id],
+                [members, unit_id] if grain == "entity" else [unit_id],
             ))
         variance = [r for r in rows if (r.get("rate_variants") or 1) > 1]
         # website: the user-verified URL (if any of this org's TINs has one) +
@@ -2490,14 +2530,22 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 raise HTTPException(422, "expected_rate must be a number")
         else:
             expected = None
+        # only the parts that hold this id (the kept per-part TIN / NPI sets)
+        parts = store.parts_holding(ident)
+        if parts is None:
+            src = "rates"
+        elif parts:
+            src = "read_parquet([" + ", ".join(f"'{sql_path(p)}'" for p in parts) + "])"
+        else:
+            src = "(SELECT * FROM rates WHERE FALSE)"
         with store.connect() as con:
             rows = _dicts(con.execute(
-                """
+                f"""
                 SELECT payer, tin_value, npi, billing_code,
                        coalesce(array_to_string(billing_code_modifier, '|'), '') AS modifiers,
                        negotiated_rate, negotiated_type, billing_class,
                        file_month, source_file
-                FROM rates
+                FROM {src}
                 WHERE billing_code = ? AND (tin_value = ? OR npi = ?)
                 -- unique (invariant 7): payer+month+rate tied across TINs,
                 -- NPIs, modifiers, classes and files; two identical requests
@@ -2932,8 +2980,12 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             with store.connect() as con:
                 if not roomy:
                     _prog.stage("Counting the rows")
-                    rows = con.execute(f"SELECT count(*) FROM ({select})",
-                                       params).fetchone()[0]
+                    # the SAME rows counted off the bare spine (stat_rel: the
+                    # dimension joins never add or drop a row) — the export's
+                    # joined, sorted select took 8-11 s to say "too big" on a
+                    # 99M-rate store (review 13 item 3.5)
+                    rows = con.execute(f"SELECT count(*) FROM ({stat_rel(grain, fs)})",
+                                       fs.params).fetchone()[0]
                     _check_export_space(tmp.parent, rows, zip_factor, mem)
                 _prog.stage("Writing the rows to a file")
                 con.execute(f"COPY ({select}) TO '{sql_path(tmp)}' (FORMAT CSV, HEADER)",
@@ -3228,11 +3280,16 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         from the same payer's previous published month."""
         from .contracts import new_to_network
         try:
-            return new_to_network(
-                store, body.get("market") or {},
-                zip_code=str(body.get("zip") or "").strip() or None,
-                radius_miles=_radius_arg(body.get("radius_miles")),
-                therapy_only=bool(body.get("therapy_only", True)))
+            market = body.get("market") or {}
+            zip_code = str(body.get("zip") or "").strip() or None
+            radius = _radius_arg(body.get("radius_miles"))
+            therapy = bool(body.get("therapy_only", True))
+            # review 13 item 3.5: 8-10 s on every click of a 99M-rate store
+            # for an answer that changes only with the data — cached like
+            # changes / trajectory (Store.cached: data + user-edit generation)
+            key = json.dumps([market, zip_code, radius, therapy], sort_keys=True, default=str)
+            return store.cached("api.new_to_network", key, lambda: new_to_network(
+                store, market, zip_code=zip_code, radius_miles=radius, therapy_only=therapy))
         except BenchmarkError as e:
             raise HTTPException(422, str(e))
         except (TypeError, ValueError) as e:
@@ -4094,7 +4151,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         no comment header lines that would break a mail-merge import; the
         dashboard button uses outreach.zip, which carries the methodology."""
         csv_text, _method = _outreach_parts(request)
-        stamp = dt.datetime.now().strftime("%Y-%m-%d_%H%M")
+        stamp = dt.datetime.now().strftime("%Y-%m-%d")
         out = _mktemp(".csv")
         # bytes, not write_text: the CSV already ends rows with \r\n and
         # Windows' text mode made every row \r\r\n — a blank line between
@@ -4111,11 +4168,17 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         bare CSV download had nowhere to put it (comment lines would break
         the mail-merge import the CSV exists for)."""
         csv_text, method = _outreach_parts(request)
-        stamp = dt.datetime.now().strftime("%Y-%m-%d_%H%M")
+        today = dt.datetime.now()
+        stamp = today.strftime("%Y-%m-%d")
         out = _mktemp(".zip")
+        _progress.current().stage("Compressing")
+        day = (today.year, today.month, today.day, 0, 0, 0)
         with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
-            z.writestr(f"mrfx_outreach_{stamp}.csv", csv_text.encode("utf-8"))
-            z.writestr(f"mrfx_outreach_{stamp}_methodology.txt", method)
+            for member, data in ((f"mrfx_outreach_{stamp}.csv", csv_text.encode("utf-8")),
+                                 (f"mrfx_outreach_{stamp}_methodology.txt", method)):
+                info = zipfile.ZipInfo(member, date_time=day)
+                info.compress_type = zipfile.ZIP_DEFLATED
+                z.writestr(info, data)
         background.add_task(out.unlink, missing_ok=True)
         return FileResponse(out, filename=f"mrfx_outreach_{stamp}.zip", media_type="application/zip")
 
@@ -4415,13 +4478,27 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     @_progress_route("leads")
     def leads(body: dict = Body(...)):
         try:
-            return compute_leads(
+            # computed (and cached) at the CSV's limit and cut here: the screen
+            # and its "Download CSV" are then one computation, not two (review
+            # 13 item 3.5 — the CSV recomputed the list the screen had just
+            # cached, 1.8 s). The ranking has a unique tiebreak, so the first
+            # N of the long list ARE the short list.
+            limit = _bounded_int(body.get("limit"), 100, 1, LEADS_LIMIT)
+            full = compute_leads(
                 store, body.get("market") or {},
                 threshold_percentile=_as_int(body.get("threshold_percentile"), 25),
                 min_codes=_bounded_int(body.get("min_codes"), 3, 1, 1000),
-                limit=_bounded_int(body.get("limit"), 100, 1, LEADS_LIMIT),
+                limit=LEADS_LIMIT,
                 exclude_subject=(str(body["exclude_subject"]) if body.get("exclude_subject") else None),
             )
+            if limit >= LEADS_LIMIT:
+                return full
+            out = dict(full)
+            out["leads"] = full["leads"][:limit]
+            out["count"] = len(out["leads"])
+            out["limit"] = limit
+            out["truncated"] = bool(full["truncated"]) or len(full["leads"]) > limit
+            return out
         except (BenchmarkError, ValueError, TypeError) as e:
             # ValueError/TypeError: a non-numeric or null volume/percentile in
             # the JSON body — a client input error (422), never a 500.

@@ -286,7 +286,7 @@ def new_to_network(store: Store, market: dict | None = None,
                 SELECT r.tin_value,
                        bool_or(n.npi IS NOT NULL),
                        coalesce(bool_or({therapy}), FALSE)
-                FROM rates r LEFT JOIN npi_directory n ON n.npi = r.npi
+                FROM {store.pairs_relation()} r LEFT JOIN npi_directory n ON n.npi = r.npi
                 WHERE r.tin_value IN (SELECT unnest(?::VARCHAR[]))
                 GROUP BY 1
             """, [tins]).fetchall()}

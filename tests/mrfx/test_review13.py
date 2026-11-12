@@ -402,3 +402,146 @@ def test_1_4_pooled_months_are_not_recounted_after_a_name_refresh(cfg, store):
     assert first == second and first and first[0]["files"] == 2
     assert runs["n"] == 1
 
+
+# ---------------------------------------------------------------- group 5
+
+
+class _SqlSpy:
+    """Every statement run on a connection the store hands out."""
+
+    def __init__(self, store, monkeypatch):
+        self.sql: list[str] = []
+        real = store.connect
+        spy = self
+
+        class Con:
+            def __init__(self, con):
+                self._c = con
+
+            def execute(self, q, *a, **k):
+                spy.sql.append(q)
+                return self._c.execute(q, *a, **k)
+
+            def __getattr__(self, k):
+                return getattr(self._c, k)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *e):
+                return self._c.__exit__(*e)
+        monkeypatch.setattr(store, "connect", lambda: Con(real()))
+
+    def raw_scans(self):
+        import re
+        return [q for q in self.sql if re.search(r"FROM rates(\s|$|\))", q)]
+
+
+def _two_payer_store(cfg, store):
+    T, _ = _market(cfg, store, "Alpha Health", "71000", [40, 50, 60, 70, 80])
+    _market(cfg, store, "Beta Health", "71000", [42, 52, 62, 72, 82])
+    store.rebuild_rollups()
+    return T
+
+
+def test_3_1_the_entity_drawer_reads_only_its_members(cfg, store, monkeypatch):
+    """3.1 (P2): the drawer of a NAME entity aggregated the whole spine into
+    entities, then filtered (four whole-spine passes, 30.4 s cold on 99M).
+    was: statements over rates_by_tin with no member-TIN restriction."""
+    T = _two_payer_store(cfg, store)
+    c = TestClient(create_app(cfg, store))
+    key = c.get("/api/rates", params={"grain": "entity", "q": T[0]}).json()["rows"][0]["unit_id"]
+    before = c.get(f"/api/entity/entity/{key}").json()
+    spy = _SqlSpy(store, monkeypatch)
+    got = TestClient(create_app(cfg, store)).get(f"/api/entity/entity/{key}").json()
+    assert got == before and got["rates"]
+    spine_stmts = [q for q in spy.sql if "FROM rates_by_tin t" in q]
+    assert spine_stmts and all("unnest(?::VARCHAR[])" in q for q in spine_stmts), spine_stmts
+
+
+def test_3_2_pair_readers_do_not_rescan_the_raw_rows(cfg, store, monkeypatch):
+    """3.2 (P2): the city rate map, market sizing, the digest, new-to-network,
+    steal-share and the drawer each ran SELECT DISTINCT tin_value, npi FROM
+    rates on every call. was: a raw `FROM rates` scan on the second call too."""
+    from mrfx.territory import local_rate_map
+    _two_payer_store(cfg, store)
+    m = {"month": "latest", "state": "MO"}
+    first = local_rate_map(store, "97110", m, state="MO")
+    spy = _SqlSpy(store, monkeypatch)
+    second = local_rate_map(store, "97110", m, state="MO")
+    assert first == second
+    assert spy.raw_scans() == []
+
+
+def test_3_3_outreach_rounds_each_value_once_and_names_by_day(cfg, store, monkeypatch):
+    """3.3 (P2): half_up ran per cell (11,461,266 calls on the whole 99M
+    store); the ZIP's member names carried HHMM. was: 4+ calls per priced
+    cell; member names like mrfx_outreach_2026-11-12_0215.csv."""
+    import io
+    import re
+    import zipfile
+    import mrfx.outreach as O
+    _two_payer_store(cfg, store)
+    c = TestClient(create_app(cfg, store))
+    calls = {"n": 0}
+    real = O._half_up if hasattr(O, "_half_up") else O.half_up
+
+    def counting(*a, **k):
+        calls["n"] += 1
+        return real(*a, **k)
+    monkeypatch.setattr(O, "_half_up" if hasattr(O, "_half_up") else "half_up", counting)
+    r = c.get("/api/export/outreach.zip?grain=tin&latest=1&dollar_only=1")
+    z = zipfile.ZipFile(io.BytesIO(r.content))
+    names = z.namelist()
+    assert all(re.search(r"_\d{4}-\d\d-\d\d(_methodology)?\.(csv|txt)$", n) for n in names), names
+    rows = list(__import__("csv").reader(io.StringIO(z.read(names[0]).decode("utf-8-sig"))))
+    cells = sum(1 for row in rows[1:] for v in row[15:] if v != "")
+    assert calls["n"] < cells, (calls["n"], cells)
+
+
+def test_3_4_the_overview_reads_the_practice_medians(cfg, store, monkeypatch):
+    """3.4 (P2): the overview copied the market's spine rows into a temp table
+    and recomputed per-practice medians three times. was: CREATE TEMP TABLE
+    __overview on every first visit."""
+    from mrfx.overview import market_overview
+    _two_payer_store(cfg, store)
+    spy = _SqlSpy(store, monkeypatch)
+    d = market_overview(store, "MO")
+    assert not any("__overview" in q for q in spy.sql)
+    assert d["payers"] == 2 and d["practices"] == 5
+    top = {r["billing_code"]: r for r in d["top_codes"]}
+    # per practice, both payers' rates: 97110 at (40,42), (50,52) … -> medians 41, 51, …
+    assert top["97110"]["practices"] == 5 and top["97110"]["median"] == 61.0
+
+
+def test_3_5_new_to_network_validate_stats_and_leads_csv_reuse(cfg, store, monkeypatch):
+    """3.5 (P2/P3): new-to-network recomputed on every click; /api/validate read
+    every part; /api/stats recounted the spine on every fresh start; leads.csv
+    recomputed the screen's list. was: SQL on the 2nd new-to-network call; a
+    scan of `rates` in validate; no spine_counts file; compute_leads ran twice."""
+    T = _two_payer_store(cfg, store)
+    c = TestClient(create_app(cfg, store))
+    body = {"market": {"month": "latest"}, "therapy_only": False}
+    first = c.post("/api/contracts/new-to-network", json=body).json()
+    spy = _SqlSpy(store, monkeypatch)
+    assert c.post("/api/contracts/new-to-network", json=body).json() == first
+    assert spy.sql == []
+    v = c.post("/api/validate", json={"code": "97110", "id": T[0]}).json()
+    assert v["rows"] and not spy.raw_scans()
+    monkeypatch.undo()
+    c.get("/api/stats")
+    assert list(store.dir.glob("spine_counts.v1.*.json"))
+    store._bump_generation(spine=False)
+    lb = {"market": {"month": "latest", "payers": [], "state": "MO", "therapy_only": False},
+          "min_codes": 1}
+    spy = _SqlSpy(store, monkeypatch)
+    screen = c.post("/api/leads", json=lb).json()
+    csv = c.post("/api/leads.csv", json=lb)
+    assert screen["count"] >= 1 and csv.status_code == 200
+    builds = [q for q in spy.sql if "TEMP TABLE _lead_base" in q]
+    assert len(builds) == 1, len(builds)
+
+
+# ---------------------------------------------------------------- group 4
+
+

@@ -279,7 +279,11 @@ function switchView(view) {
     state.filesTimer = setInterval(() => { loadFiles(); loadUrlQueue(); }, 4000);
   }
   if (view === "cpt" && !state.cptSelected) {
-    const first = Object.keys(state.catalog)[0];
+    // open on the first code that HAS rates (the summary strip's per-code
+    // rows), not the catalog's first code — 90912 is priced in almost no
+    // store, so the page opened empty (review 13 item 3.5)
+    const withData = (state.lastByCode || []).map((r) => r.billing_code).filter((c) => state.catalog[c]);
+    const first = withData.sort()[0] || Object.keys(state.catalog)[0];
     if (first) selectCpt(first);
   }
   // data landed while this view was closed: reload it now (P1.20)
@@ -1124,6 +1128,7 @@ async function loadSummary() {
     const note = $("#summary-strip-note");
     if (note) note.textContent =
       "Min · P25 · Median · P75 · Max span every matched code together; per-code medians are in the table below.";
+    if (Array.isArray(s.by_code) && s.by_code.length) state.lastByCode = s.by_code;
     renderByCode($("#summary-bycode"), s.by_code, s.mpfs_loaded, s.by_code_basis,
                  s.medicare_anchor, s.medicare_refusal);
   } catch (e) {

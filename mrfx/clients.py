@@ -137,7 +137,7 @@ def _build_digest(store: Store, subjects: list[str], mstatus: dict,
             tins = resolve_subject_tins(store, subject)
             with store.connect() as con:
                 npis = [r[0] for r in con.execute(
-                    "SELECT DISTINCT npi FROM rates WHERE tin_value IN "
+                    f"SELECT DISTINCT npi FROM {store.pairs_relation()} WHERE tin_value IN "
                     "(SELECT unnest(?::VARCHAR[])) AND npi IS NOT NULL",
                     [tins]).fetchall()]
                 from .benchmark import mapped_entity_name
