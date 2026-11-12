@@ -1,5 +1,5 @@
-# Tests that take >= 0.5 s each (measured with --durations=0, Nov 12 2026, round 13). They are
-# excluded from `pytest -m quick` (the inner-loop run, ~4.5 min); the DEFAULT run still
+# Tests that take >= 0.5 s each (measured with --durations=0, Nov 12 2026, round 14). They are
+# excluded from `pytest -m quick` (the inner-loop run, ~4 min); the DEFAULT run still
 # runs everything. The known-answer tests (test_known_answer*.py) are always quick. Regenerate after big
 # test changes; a renamed or new test simply counts as quick.
 tests/mrfx/test_adversarial.py::test_a_payer_with_no_rankable_code_is_never_judged_even_at_hostile_min_codes
@@ -172,7 +172,6 @@ tests/mrfx/test_fastscan.py::test_bulk_other_code_systems_count_exactly_like_cla
 tests/mrfx/test_fastscan.py::test_bulk_reference_skip_reads_ids_like_the_classic_parser
 tests/mrfx/test_fastscan.py::test_bulk_skip_never_drops_codes_that_clean_into_targets
 tests/mrfx/test_fastscan.py::test_duplicate_arrays_ingest_like_classic_through_the_fallback
-tests/mrfx/test_fastscan.py::test_extreme_whitespace_and_nested_bundle_references
 tests/mrfx/test_fastscan.py::test_items_bigger_than_the_peek_limit[97110-first]
 tests/mrfx/test_fastscan.py::test_items_bigger_than_the_peek_limit[97110-last]
 tests/mrfx/test_fastscan.py::test_items_bigger_than_the_peek_limit[99213-first]
@@ -183,6 +182,7 @@ tests/mrfx/test_fastscan.py::test_real_vendor_shapes_match_classic_and_golden[re
 tests/mrfx/test_fastscan.py::test_real_vendor_shapes_match_classic_and_golden[real_moda_compact]
 tests/mrfx/test_fastscan.py::test_real_vendor_shapes_match_classic_and_golden[real_tufts_pretty_jackson]
 tests/mrfx/test_fastscan.py::test_references_before_after_scalar_and_missing
+tests/mrfx/test_fastscan.py::test_remote_location_references_are_counted_identically
 tests/mrfx/test_fastscan.py::test_short_reads_do_not_change_anything[1]
 tests/mrfx/test_fastscan_e2e.py::test_a_file_both_parsers_reject_fails_the_same_way
 tests/mrfx/test_fastscan_e2e.py::test_all_codes_big_files_never_spool_and_ingest_identically
@@ -218,6 +218,7 @@ tests/mrfx/test_fetch.py::test_allowed_amounts_only_toc_skipped_not_failed
 tests/mrfx/test_fetch.py::test_blobs_listing_api_expands_rate_files_first
 tests/mrfx/test_fetch.py::test_bulk_retried_rows_wait_behind_fresh_files
 tests/mrfx/test_fetch.py::test_byte_identical_file_on_second_url_skipped
+tests/mrfx/test_fetch.py::test_clear_queued_and_cancel_downloading
 tests/mrfx/test_fetch.py::test_dedup_and_failed_retry
 tests/mrfx/test_fetch.py::test_direct_file_url_downloads_and_ingests
 tests/mrfx/test_fetch.py::test_download_aborts_mid_stream_on_cancel
@@ -252,7 +253,6 @@ tests/mrfx/test_fetch.py::test_react_portal_root_found_via_blobs_probe
 tests/mrfx/test_fetch.py::test_reexpanding_toc_does_not_undo_user_skip
 tests/mrfx/test_fetch.py::test_resume_continues_the_running_hash_instead_of_rereading
 tests/mrfx/test_fetch.py::test_resume_restarts_when_content_changed
-tests/mrfx/test_fetch.py::test_resume_stopped_undoes_clear_queue_and_stop_downloads
 tests/mrfx/test_fetch.py::test_retry_failed_is_bulk_and_unbounded
 tests/mrfx/test_fetch.py::test_rollups_rebuilt_once_queue_drains
 tests/mrfx/test_fetch.py::test_segmentation_falls_back_when_server_ignores_range
@@ -275,7 +275,6 @@ tests/mrfx/test_fetch.py::test_truncated_download_resumes_and_completes
 tests/mrfx/test_fetch.py::test_unknown_json_link_container_lifts_urls
 tests/mrfx/test_fetch.py::test_unknown_length_download_checks_disk_mid_stream
 tests/mrfx/test_fetch.py::test_unknown_length_download_holds_provisional_reservation
-tests/mrfx/test_fetch.py::test_urls_api_never_splits_on_commas
 tests/mrfx/test_fetch.py::test_user_transition_guards
 tests/mrfx/test_fetch.py::test_wall_clock_cap_sets_aside_a_too_slow_download
 tests/mrfx/test_file_month.py::test_an_older_store_with_a_future_month_is_fixed_once
@@ -306,10 +305,8 @@ tests/mrfx/test_growth_features.py::test_weighted_position_moves_when_the_heavy_
 tests/mrfx/test_growth_features.py::test_weighted_position_needs_volumes_that_cover_the_book
 tests/mrfx/test_growth_features.py::test_without_a_units_divisor_no_per_visit_figure_is_invented
 tests/mrfx/test_hardening.py::test_cosmetic_failures_never_fail_real_work
-tests/mrfx/test_hardening.py::test_crash_recovery_flips_stuck_rows
 tests/mrfx/test_hardening.py::test_duckdb_temp_dir_override_honored
 tests/mrfx/test_hardening.py::test_enrichment_yields_to_rollup
-tests/mrfx/test_hardening.py::test_explorer_month_filter_rejects_latest
 tests/mrfx/test_hardening.py::test_export_defuses_formulas_and_masks_ssn_per_element
 tests/mrfx/test_hardening.py::test_forget_api_guards_and_flow
 tests/mrfx/test_hardening.py::test_forget_recomputes_shared_tin_directory_flags
@@ -394,7 +391,6 @@ tests/mrfx/test_messy_files.py::test_numeric_code_and_loose_types_cleaned
 tests/mrfx/test_messy_files.py::test_refs_after_payload_and_scalar_ref_resolve
 tests/mrfx/test_modifiers.py::test_failed_rewrite_leaves_rows_and_retries_next_start
 tests/mrfx/test_modifiers.py::test_old_store_is_fixed_once_at_open_exactly_like_a_reingest
-tests/mrfx/test_mpfs.py::test_simple_csv_path_is_unchanged
 tests/mrfx/test_nppes_auto.py::test_a_broken_download_is_discarded
 tests/mrfx/test_nppes_auto.py::test_an_unwritable_stamp_does_not_mean_asking_cms_all_day
 tests/mrfx/test_nppes_auto.py::test_auto_download_then_local_lookups_then_monthly_refresh
@@ -451,6 +447,55 @@ tests/mrfx/test_quality.py::test_the_endpoints_answer_and_refuse_cleanly
 tests/mrfx/test_quality.py::test_the_subject_is_placed_against_others_its_own_size
 tests/mrfx/test_queue_signal.py::test_every_url_queue_writer_signals_the_workers
 tests/mrfx/test_queue_signal.py::test_idle_workers_stay_quiet_and_new_work_starts_at_once
+tests/mrfx/test_repros.py::test_repro_holds[diff_data/scripts/s10_killwindow_twin.py]
+tests/mrfx/test_repros.py::test_repro_holds[diff_data/scripts/s11_failed_link_claim.py]
+tests/mrfx/test_repros.py::test_repro_holds[diff_data/scripts/s13_recheck_new_children.py]
+tests/mrfx/test_repros.py::test_repro_holds[diff_data/scripts/s2_midplan.py]
+tests/mrfx/test_repros.py::test_repro_holds[diff_data/scripts/s3_names_plan_and_header.py]
+tests/mrfx/test_repros.py::test_repro_holds[diff_data/scripts/s4_old_vs_new.py]
+tests/mrfx/test_repros.py::test_repro_holds[diff_data/scripts/s5_rule_sentence.py]
+tests/mrfx/test_repros.py::test_repro_holds[diff_data/scripts/s7_month_twin.py]
+tests/mrfx/test_repros.py::test_repro_holds[diff_data/scripts/s8_legacy_twin.py]
+tests/mrfx/test_repros.py::test_repro_holds[diff_data/scripts/s9_reread_codes.py]
+tests/mrfx/test_repros.py::test_repro_holds[diff_ui/r01_digest_stop_poisons_cache.py]
+tests/mrfx/test_repros.py::test_repro_holds[diff_ui/r02_size_premium_stop_cached.py]
+tests/mrfx/test_repros.py::test_repro_holds[diff_ui/r03_backup_lists_parts_before_lock.py]
+tests/mrfx/test_repros.py::test_repro_holds[diff_ui/r09_bytes_with_without_bar.py]
+tests/mrfx/test_repros.py::test_repro_holds[diff_ui/r13_cache_after_forget.py]
+tests/mrfx/test_repros.py::test_repro_holds[diff_ui/r14_poll_under_saturation.py]
+tests/mrfx/test_repros.py::test_repro_holds[diff_ui/r15_query_token_in_outputs.py]
+tests/mrfx/test_repros.py::test_repro_holds[regress/review11_repros/download/c01_truncate_resume.py]
+tests/mrfx/test_repros.py::test_repro_holds[regress/review11_repros/download/c02_range_odd.py]
+tests/mrfx/test_repros.py::test_repro_holds[regress/review11_repros/download/c02b_json_splice.py]
+tests/mrfx/test_repros.py::test_repro_holds[regress/review11_repros/download/c05_http_errors.py]
+tests/mrfx/test_repros.py::test_repro_holds[regress/review11_repros/download/c05b_bad_encoding.py]
+tests/mrfx/test_repros.py::test_repro_holds[regress/review11_repros/download/c08b_wrong_sidecar_json.py]
+tests/mrfx/test_repros.py::test_repro_holds[regress/review11_repros/download/c09_early_dedup.py]
+tests/mrfx/test_repros.py::test_repro_holds[regress/review11_repros/ingest/s1_containers.py]
+tests/mrfx/test_repros.py::test_repro_holds[regress/review11_repros/ingest/s2_samename.py]
+tests/mrfx/test_repros.py::test_repro_holds[regress/review11_repros/ingest/s2b_keep_stuck.py]
+tests/mrfx/test_repros.py::test_repro_holds[regress/review11_repros/ingest/s3_claims.py]
+tests/mrfx/test_repros.py::test_repro_holds[regress/review11_repros/ingest/s7_pool.py]
+tests/mrfx/test_repros.py::test_repro_holds[regress/review11_repros/ingest/s9b_opens.py]
+tests/mrfx/test_repros.py::test_repro_holds[regress/review11_repros/queue/s11_oversize_reexpand.py]
+tests/mrfx/test_repros.py::test_repro_holds[regress/review11_repros/queue/s12_waiting_drain.py]
+tests/mrfx/test_repros.py::test_repro_holds[regress/review11_repros/queue/s3_toc.py]
+tests/mrfx/test_repros.py::test_repro_holds[regress/review11_repros/queue/s4k_twin_kill.py]
+tests/mrfx/test_repros.py::test_repro_holds[regress/review11_repros/seams/content_encoding.py]
+tests/mrfx/test_repros.py::test_repro_holds[regress/review11_repros/seams/dest_no_sidecar.py]
+tests/mrfx/test_repros.py::test_repro_holds[regress/review11_repros/seams/refresh_static_children.py]
+tests/mrfx/test_repros.py::test_repro_holds[regress/review11_repros/seams/stale_reuse.py]
+tests/mrfx/test_repros.py::test_repro_holds[regress/review12_repros/agent_2_5/npi_drawer_latest.py]
+tests/mrfx/test_repros.py::test_repro_holds[regress/review12_repros/agent_diff/s1_unquoted_etag.py]
+tests/mrfx/test_repros.py::test_repro_holds[regress/review12_repros/agent_diff/s4_refresh_old_url.py]
+tests/mrfx/test_repros.py::test_repro_holds[regress/review12_repros/agent_diff/s5_crash_inbox_claim.py]
+tests/mrfx/test_repros.py::test_repro_holds[regress/review12_repros/agent_diff/s7_clear_during_recheck.py]
+tests/mrfx/test_repros.py::test_repro_holds[regress/review12_repros/agent_diff/s8_stale_splices.py]
+tests/mrfx/test_repros.py::test_repro_holds[regress/review13_repros/diff/p_a_val_compat.py]
+tests/mrfx/test_repros.py::test_repro_holds[regress/review13_repros/diff/p_e_live_twin.py]
+tests/mrfx/test_repros.py::test_repro_holds[regress/review13_repros/diff/p_g_loaded_size_unknown.py]
+tests/mrfx/test_repros.py::test_repro_holds[regress/review13_repros/skip/s10_known.py]
+tests/mrfx/test_repros.py::test_repro_holds[regress/review13_repros/skip/s4_claims.py]
 tests/mrfx/test_review10.py::test_a_client_name_that_matches_nothing_is_refused
 tests/mrfx/test_review10.py::test_a_practice_missing_from_the_payers_newest_file_is_flagged
 tests/mrfx/test_review10.py::test_a_ten_digit_npi_suggests_its_practice_and_explains_the_tin_view
@@ -491,7 +536,6 @@ tests/mrfx/test_review11.py::test_blob_listing_dropped_in_the_inbox_is_quarantin
 tests/mrfx/test_review11.py::test_capped_index_can_be_retried_and_takes_the_rest
 tests/mrfx/test_review11.py::test_clear_queue_pressed_while_an_index_expands_sticks
 tests/mrfx/test_review11.py::test_complete_part_answered_416_is_finished_not_downloaded_again
-tests/mrfx/test_review11.py::test_dashboard_read_that_meets_a_part_swap_is_asked_again
 tests/mrfx/test_review11.py::test_download_rename_tolerates_a_transient_windows_lock
 tests/mrfx/test_review11.py::test_empty_and_utf16_files_say_what_they_are
 tests/mrfx/test_review11.py::test_failed_pasted_rows_stay_listed_past_500_links
@@ -529,6 +573,7 @@ tests/mrfx/test_review12.py::test_mrfx_status_opens_the_store_once
 tests/mrfx/test_review12.py::test_non_finite_medicare_rate_is_refused_and_a_stored_one_is_no_anchor
 tests/mrfx/test_review12.py::test_npi_drawer_current_rate_uses_the_contract_window
 tests/mrfx/test_review12.py::test_refresh_of_a_child_loaded_by_0_7_4_compares_the_loaded_size
+tests/mrfx/test_review12.py::test_repasting_a_fresh_link_updates_a_queued_row_but_not_a_downloading_one
 tests/mrfx/test_review12.py::test_set_aside_sentence_says_what_is_kept
 tests/mrfx/test_review12.py::test_the_stored_row_update_opens_the_dashboard_first
 tests/mrfx/test_review12.py::test_two_files_of_one_payer_month_are_pooled_and_said_so
@@ -557,6 +602,7 @@ tests/mrfx/test_review13.py::test_5_2_1_the_same_content_under_other_bytes_loads
 tests/mrfx/test_review13.py::test_5_2_1_the_same_content_under_other_bytes_loads_once[gz1_gz9]
 tests/mrfx/test_review13.py::test_5_2_1_the_same_content_under_other_bytes_loads_once[json_gz]
 tests/mrfx/test_review13.py::test_5_2_4_adding_codes_offers_to_read_the_loaded_files_again
+tests/mrfx/test_review13.py::test_5_2_5_every_loaded_index_is_rechecked_monthly
 tests/mrfx/test_review13.py::test_5_2_6_a_kill_after_the_commit_keeps_the_file_the_same_file
 tests/mrfx/test_review13.py::test_5_2_6_a_legacy_file_is_never_same_on_size_and_age
 tests/mrfx/test_review13.py::test_5_2_7_a_list_finishing_during_the_rate_files_read_is_applied
@@ -568,9 +614,44 @@ tests/mrfx/test_review13.py::test_6_2_medicaid_and_hospital_lines_in_the_negotia
 tests/mrfx/test_review13.py::test_6_3_hot_backup_from_serve_is_consistent_checked_and_kept_n
 tests/mrfx/test_review13.py::test_6_3_mrfx_verify_reads_the_hot_backup
 tests/mrfx/test_review13.py::test_6_4_a_bookmarked_link_opens_and_runs_and_the_search_box_finds
+tests/mrfx/test_review14.py::test_1_1a_a_file_with_no_credit_goes_in_while_a_download_runs
+tests/mrfx/test_review14.py::test_1_1b_the_header_says_when_not_when_the_queue_is_idle
+tests/mrfx/test_review14.py::test_1_1c_a_rebuild_over_an_existing_spine_still_counts_its_payers
+tests/mrfx/test_review14.py::test_1_1d_an_out_of_memory_incremental_is_retried_not_escalated
+tests/mrfx/test_review14.py::test_1_1e_a_new_file_of_a_known_payer_recomputes_only_its_tins
+tests/mrfx/test_review14.py::test_1_1f_an_update_moves_its_bar_and_says_what_it_does
+tests/mrfx/test_review14.py::test_1_2_outputs_are_byte_identical_with_the_panel_open
+tests/mrfx/test_review14.py::test_1_2_pause_holds_fold_ins_and_the_header_says_so
+tests/mrfx/test_review14.py::test_1_2_run_now_folds_in_during_a_busy_queue
+tests/mrfx/test_review14.py::test_1_2_status_analytics_prints_the_panel
+tests/mrfx/test_review14.py::test_1_2_the_first_update_after_an_upgrade_records_its_files
+tests/mrfx/test_review14.py::test_1_2_the_panel_shows_a_file_waiting_then_added
+tests/mrfx/test_review14.py::test_2_10_two_overlapping_runs_leave_the_button_enabled
+tests/mrfx/test_review14.py::test_2_11_a_copy_after_a_kill_in_the_done_window_is_recognised
+tests/mrfx/test_review14.py::test_2_1_a_deferred_content_twin_loads_when_its_link_fails
+tests/mrfx/test_review14.py::test_2_1_a_failed_link_releases_its_content_claim
+tests/mrfx/test_review14.py::test_2_2_a_file_loaded_before_0_7_7_is_named_by_content
+tests/mrfx/test_review14.py::test_2_3_two_rereads_of_one_rate_file_never_fail_it
+tests/mrfx/test_review14.py::test_2_4_a_drive_that_cannot_link_copies_outside_the_lock
+tests/mrfx/test_review14.py::test_2_4_a_file_committed_while_the_backup_waits_is_in_it
+tests/mrfx/test_review14.py::test_2_4_a_stopped_backup_leaves_nothing_and_inside_the_store_is_refused
+tests/mrfx/test_review14.py::test_2_4_verify_refuses_a_zip_whose_parts_do_not_hold_its_rows
+tests/mrfx/test_review14.py::test_2_5_an_ssn_pattern_tin_reaches_no_shareable_surface
+tests/mrfx/test_review14.py::test_2_6_a_needs_full_raised_during_a_plan_survives_it
+tests/mrfx/test_review14.py::test_2_7_screens_and_documents_agree_during_a_rebuild
+tests/mrfx/test_review14.py::test_2_8_the_monthly_check_downloads_no_new_file
+tests/mrfx/test_review14.py::test_2_9_a_result_built_under_a_stop_is_never_cached
+tests/mrfx/test_review14.py::test_3_a_killed_names_build_resumes_as_a_names_build
+tests/mrfx/test_review14.py::test_3_b_the_same_document_named_for_another_month_keeps_its_month
+tests/mrfx/test_review14.py::test_3_c_the_practice_rate_rule_prints_with_every_all_payer_figure
+tests/mrfx/test_review14.py::test_3_d_a_hospital_without_a_state_says_so_and_no_name_overwrites
+tests/mrfx/test_review14.py::test_3_e_stop_while_compressing_an_export_keeps_no_zip
+tests/mrfx/test_review14.py::test_3_f_stop_kills_the_printer
+tests/mrfx/test_review14.py::test_3_g_a_restart_ends_a_bar_and_frees_its_button
+tests/mrfx/test_review14.py::test_3_h_small_honesty_items
+tests/mrfx/test_review14.py::test_3_h_the_reread_button_counts_only_what_it_can_read
 tests/mrfx/test_review9.py::test_a_big_reference_file_is_stored_on_the_two_pass_path[fast_scan_off]
 tests/mrfx/test_review9.py::test_a_big_reference_file_is_stored_on_the_two_pass_path[low_disk]
-tests/mrfx/test_review9.py::test_a_copy_skipped_against_replaced_content_is_queued_again
 tests/mrfx/test_review9.py::test_a_corrected_file_of_the_same_size_is_held_then_replaces
 tests/mrfx/test_review9.py::test_a_cut_streak_is_measured_on_the_same_pairs_month_to_month
 tests/mrfx/test_review9.py::test_a_file_changed_while_it_is_read_is_not_recorded_as_loaded
@@ -672,8 +753,9 @@ tests/mrfx/test_stop_parse.py::test_stop_api_endpoints
 tests/mrfx/test_stop_parse.py::test_stop_is_refused_when_nothing_is_processing
 tests/mrfx/test_stop_parse.py::test_stop_mid_parse_saves_nothing_and_says_so[True]
 tests/mrfx/test_stop_parse.py::test_stop_works_on_the_big_file_paths[pooled_big]
-tests/mrfx/test_stop_parse.py::test_stop_works_on_the_big_file_paths[single_read]
 tests/mrfx/test_stop_parse.py::test_stopping_a_reingest_keeps_the_earlier_version
+tests/mrfx/test_stress.py::test_race_test_holds_under_a_cpu_hog[tests/mrfx/test_fetch.py::test_parallel_ingest_matches_serial]
+tests/mrfx/test_stress.py::test_race_test_holds_under_a_cpu_hog[tests/mrfx/test_fetch.py::test_toc_url_expands_and_children_ingest]
 tests/mrfx/test_taxonomy_coverage.py::test_an_older_cache_without_the_column_still_works
 tests/mrfx/test_taxonomy_coverage.py::test_every_therapy_filtered_search_includes_it
 tests/mrfx/test_taxonomy_coverage.py::test_new_clinic_feed_counts_a_secondary_slot

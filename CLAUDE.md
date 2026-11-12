@@ -28,8 +28,8 @@ for correctness of the numbers.
 
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/pip install -e .
 .venv/bin/mrfx serve                       # dashboard http://localhost:8377 + inbox watcher + URL worker
-.venv/bin/python -m pytest tests/ -q       # the suite: real end-to-end drains against local HTTP servers (~36 min, 1247 tests)
-.venv/bin/python -m pytest tests/ -q -m quick   # inner loop, ~4.5 min (470 tests): skips tests/slow_tests.txt
+.venv/bin/python -m pytest tests/ -q       # the suite: real end-to-end drains against local HTTP servers (~48 min, 1336 tests)
+.venv/bin/python -m pytest tests/ -q -m quick   # inner loop, ~4 min (476 tests): skips tests/slow_tests.txt
 .venv/bin/ruff check mrfx/ tests/          # lint gate: narrow by design (see pyproject), stays at ZERO
 .venv/bin/pip-audit -r requirements.txt    # dependency CVEs: was 25 across 5 packages, now clean
 ```
@@ -37,7 +37,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/
 Other commands: `mrfx add <url>… [--file links.txt] [--known [--states MO,KS]] [--retry-failed]`,
 `mrfx sources [--check] [--states …] [--report out.csv]` (the tested-sources catalog; `--check`
 re-audits it live, read-only, as MRF Explorer — OK / NEEDS-BROWSER / PORTAL / CHANGED / DEAD),
-`mrfx preflight <path>`, `mrfx ingest [path] [--force]`, `mrfx status`,
+`mrfx preflight <path>`, `mrfx ingest [path] [--force]`, `mrfx status [--analytics]` (`--analytics`: the dashboard's Analytics activity panel as text — what is being added to the numbers, what waits and why),
 `mrfx export out.csv [--cpt … --payer … --grain tin]`, `mrfx outreach`,
 `mrfx forget <filename>`, `mrfx speedtest <url>`,
 `mrfx fastcheck <file>…` (run real files through the fast AND classic parsers;

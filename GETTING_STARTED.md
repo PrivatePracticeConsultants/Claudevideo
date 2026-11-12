@@ -173,8 +173,8 @@ a file bigger than the safety limit shows `too big` — see the disk section
 below).
 Files process **a few at a time in the background** — by default as many as
 your computer has processor cores minus one, or fewer if your RAM can't hold
-that many (about 2 GB each after the database's 8 GB: 2 on a 16 GB machine,
-up to 7 on 32 GB; the
+that many (about 2 GB each after the database's share — 6 GB on a 16 GB
+machine, which leaves room for 3 to 4; up to 7 on 32 GB; the
 `parallel_ingests:` knob in `config/mrfx.yaml`, `0` = automatic), and **several files download at once**
 to keep those workers fed (`parallel_downloads:`, `0` = automatic, capped at
 6 — the same per-host limit a web browser uses; simultaneous downloads
@@ -225,17 +225,21 @@ clean even if you paste every state's index.
   `small_file_downloads:` / `small_file_mb:` in `config/mrfx.yaml` (0 = no
   lanes; add the lines if your file doesn't have them).
 
-> **When is a file skipped, and when is it loaded again?** (version 0.7.7)
+> **When is a file skipped, and when is it loaded again?** (version 0.8.0)
 >
 > - **Skipped:** the same link pasted again; a file with the same contents as
 >   one already loaded — even if it is compressed differently, or one is the
->   `.json` and the other the `.json.gz` ("the same content as X"); an
->   allowed-amounts or drug-price file (no negotiated rates). The Files tab
->   always says which file it duplicates, or why it was left out.
+>   `.json` and the other the `.json.gz` ("the same content as X") — unless
+>   its name gives another month and its header has no date (then it is that
+>   month's file); an allowed-amounts or drug-price file (no negotiated
+>   rates). The Files tab always says which file it duplicates, or why it was
+>   left out.
 > - **Loaded again:** a file the payer CHANGED (once a month the app asks
 >   every payer index you loaded whether each of its files changed — one tiny
 >   request per file — and downloads only the changed ones; the index row
->   says "last checked … · next check …"); the files read before you ADDED
+>   says "last checked … · next check …", and names any NEW file the index
+>   lists without downloading it — paste the index again to load those);
+>   the files read before you ADDED
 >   billing codes (the Files tab's **Re-read N files for the new codes**
 >   button); a file you forgot and pasted again.
 > - **Held for you to decide:** a different file dropped into `data/inbox`
@@ -1050,6 +1054,107 @@ Downloads and files:
   factor that doesn't match the file's own is refused.
 - **"fee for service" / "fee_schedule"** spelled differently by a payer no
   longer drop rates.
+
+## What changed in version 0.8.0 (review 14)
+
+You asked: are the analytics really taking in every newly loaded file — and
+can we watch it? **Yes, every file that finishes loading goes into the
+numbers, once and completely** (we checked it file by file, in more than
+twenty live runs, including killing the app in the middle). What was not fine
+was *when*: a long download could hold the update back for hours, and the
+header did not say when the next one would come. Both are fixed, and you can
+now watch it happen.
+
+**The Analytics activity panel.** Click the orange line at the top right
+("Analytics cover …"), or **Analytics** on the Files tab, or open
+`…/#analytics`. It shows, updating every 2 seconds:
+
+- **A big bar** for the update running now, in words: *"Adding 37 newly
+  loaded files — payer Blue Cross of X — part 3 of 8 — 1.2 M rows/s — about
+  14 min left"*. The time left only appears once the app has measured one
+  part, and always says "about".
+- **Waiting to be added**: every file that has loaded but is not in the
+  numbers yet, newest first — its payer, rows, when it loaded, and *why it
+  is waiting* in plain words: "next in line", "next update in about 4 min
+  (downloads are running; updates are spaced so they keep the disk)",
+  "after the build finishes", "retrying at 10:50 after an out-of-memory
+  stop", "analytics paused".
+- **Added recently**: the last 50 files that went in, with the time each
+  appeared on screen, how long it waited, and what kind of update did it.
+- **Per payer**: ✓ in the analytics, part-way (k of n parts), or waiting —
+  with the rows in the analytics next to the rows loaded.
+- **Problems**: the last failure in a sentence, when it tries again, and
+  what you can do (usually: raise `duckdb_memory_gb`, or free disk space).
+- **Run now** (do the next update at once, even while downloads continue)
+  and **Pause analytics** (for a laptop on battery: files keep loading, but
+  nothing new reaches the numbers until you press Resume; remembered after a
+  restart, and the header says "paused").
+- A short **"What this means"** box. In one line: files load in minutes;
+  adding them to the numbers every screen reads takes longer on a big store,
+  and until a file is added its rates are stored safely but are not in any
+  report.
+
+`mrfx status --analytics` prints the same panel in the terminal.
+
+**Updates no longer wait for the queue to go quiet.** The update is now its
+own job: it runs whenever the numbers are behind, whatever the downloads are
+doing — a few seconds after the last file when nothing else is happening,
+and while downloads run, spaced out (at least a minute, three times as long
+as the last update took, never more than 30 minutes apart) so the downloads
+keep most of the disk. The header says when: *"2 newly loaded files not in
+the analytics yet — added in about 2 min (downloads are running)"*. A new
+file of a payer you already have now updates only that payer's practices in
+that file, not the whole payer and the whole store. An update that runs out
+of memory is simply tried again later — it no longer turns into a rebuild of
+everything.
+
+**Fixed (these could lose or double data):**
+
+- A link whose load failed once kept a hidden lock: the same file under
+  another link was then skipped for good, and a copy dropped in the inbox
+  made the inbox wait forever. Fixed — a failed load always lets go, and the
+  copy loads.
+- The "same document compressed differently" check of 0.7.7 did not cover
+  files loaded before 0.7.7. The app now names those older files by their
+  content in the background, one at a time (the Files tab shows "Naming N
+  older files by content — 37 %"). Files whose original download was deleted
+  after loading (the default) cannot be named this way; the Files tab says
+  how many, and what to do if a second copy of one appears.
+- A backup taken while a file was being saved could leave that file's rows
+  out of the backup — and still say "backup OK". The backup now lists the
+  store's files at the same instant it copies the database, and `mrfx
+  verify` checks that the files in the zip really hold the rows the backup
+  claims. A stopped backup no longer leaves a store-sized `.part` file on
+  the backup drive; a `backup_dir` inside the data folder is refused (every
+  backup would contain all the earlier ones); on a drive that cannot make
+  links (an exFAT USB stick) the copy no longer blocks new files for
+  minutes. While a backup copies the database, new files wait to be saved
+  for about 25 seconds per GB of database — the Files tab says how long for
+  yours.
+- A tax ID shaped like a Social Security number can no longer be saved as a
+  client, and one saved earlier is never shown, put in the address bar, a
+  folder name, a title or a PDF.
+
+**Smaller fixes.** The monthly re-check no longer downloads new files an
+index lists (next month's files, often many GB) — it says on the index row
+"N new files listed — not downloaded; paste this index again, or turn on
+monthly_refresh"; that was always the intent. Stop no longer leaves wrong
+"stopped" answers behind in the client digest and the monthly packets. A Run
+button no longer stays greyed out after you press Enter twice. Two copies of
+the same document whose names give different months (and whose header has
+no date) now load as their two months instead of losing one. Save as PDF can
+be stopped, gives up after 3 minutes, and a report too large to print says
+so (use Open printable → Print instead); `mrfx packets --pdf` skips a
+document it cannot print and does the rest. If the app restarts while an
+export is building, its bar says "the app restarted — run it again" instead
+of staying stuck. Back in your browser now returns to the previous tab.
+Pasting many links at once survives the app being closed half way. A damaged
+download says so in words. The rule for a practice's all-payer rate is now
+printed on every report and export that uses it.
+
+**Numbers.** None changed: the same files give the same rows and the same
+analytics, byte for byte (checked on real payer files and on the
+99-million-rate test store).
 
 ## What changed in version 0.7.7 (review 13)
 

@@ -926,14 +926,17 @@ def test_6_1_every_printable_report_saves_as_a_pdf(cfg, store, monkeypatch):
     assert r.headers["content-type"] == "application/pdf"
     assert r.content[:5] == b"%PDF-" and len(r.content) > 2000
     assert 'filename="pitch_report_' in r.headers["content-disposition"]
-    from mrfx import render
-
-    def no_browser(pw):
-        raise RuntimeError("no Chromium here")
-    monkeypatch.setattr(render, "_launch", no_browser)
+    # UPDATED in round 14 (Group 3, deliberately): the print runs in a CHILD
+    # process a Stop or the deadline can kill, so an in-process monkeypatch
+    # of render._launch no longer reaches it — "no browser" is now simulated
+    # the way a user's machine has it: an empty browsers folder, auto-install
+    # off (the child inherits both)
+    import tempfile
+    cfg.render_auto_install = False
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", tempfile.mkdtemp(prefix="no-browsers-"))
     r = c.post("/api/report/pitch?format=pdf", json=body)
-    assert r.status_code == 422
-    assert "Open printable" in r.json()["detail"] and "no Chromium here" in r.json()["detail"]
+    assert r.status_code == 422, r.text[:300]
+    assert "Open printable" in r.json()["detail"] and "not available" in r.json()["detail"]
     assert c.post("/api/report/pitch", json=body).headers["content-type"].startswith("text/html")
 
 

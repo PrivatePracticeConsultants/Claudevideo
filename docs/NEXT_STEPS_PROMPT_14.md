@@ -1,8 +1,136 @@
 # Prompt for the next session, round 14 — prove the analytics take in every new file and show it happening; close what round 13's own new code broke; no steps backwards (written for Claude Opus 5.5)
 
-> **STATUS: not started.** Baseline for every number and line reference below is
-> commit 9617c59 (version 0.7.7), the zip the user installed. When you are done,
-> replace this block with what closed, in which commit, with the numbers.
+> **STATUS (Nov 12, 2026, v0.8.0): Groups 1–4 closed — every item; the
+> carry-overs are listed with what happened to each.** Baseline 9617c59.
+> Commits: Group 1 746de71; Group 2 f684996 (with Group 3's month-twin rule:
+> it is a parameter of the same claim queries as 2.11); Group 3 d9c0719;
+> Group 4 92ba875; four fixes the live 99M panel check found 6c41e02; the
+> release (docs, version, this block, slow_tests) is the commit after it.
+> Each group's commit was built from a tree holding only that group (and
+> the ones before it) and tested there before it was pushed: Group 1 quick
+> tier 481 passed, Group 2 496 passed.
+> `tests/mrfx/test_review14.py`: **37 cases — every Group 1–3 item; all 37
+> fail on 9617c59** (run from a `git archive` copy with the editable
+> install's finder stripped; the value each got there is in its docstring —
+> a module 0.7.7 did not have fails on its import, and says so). One of them,
+> `test_1_2_the_first_update_after_an_upgrade_records_its_files`, is also the
+> regression test for this round's own seed fix (6c41e02; it fails with the
+> seed removed). `tests/mrfx/test_repros.py`: 50 repro scripts of rounds
+> 11–14 run and their "after" lines asserted, 50 passed (9 min, slow tier).
+> `tests/mrfx/test_stress.py`: the two race tests beside a CPU hog.
+> Full suite **1336 passed in 48 min** after the last code change, no test needing a
+> retry; quick tier 476 passed in 4 min 8 s; ruff 0; pip-audit clean (no new dependency).
+> `tests/slow_tests.txt` regenerated from that run (870 slow). One earlier full run is not counted: the disk filled under it (1.3 GB left) and it was stopped. Existing tests changed on
+> purpose, each with the reason in the test: `test_review13::test_1_3…` (the
+> retry is the scheduler's, and a failing incremental is retried, not
+> escalated — 1.1d), `test_review13::test_6_1…` (a PDF is now printed in a
+> child process, which an in-process patch cannot reach, so "no browser" is
+> simulated through the environment), `test_hardening::test_rollup_never_rebuilds_back_to_back…`
+> (the cadence rule moved to mrfx/foldin.py), `test_hardening`'s async-route
+> whitelist adds `/api/analytics/activity`, `test_progress::test_t13` waits
+> up to 15 s for the sampler threads (it failed once under load),
+> `test_review13::test_6_1_every_printable…` simulates "no browser" with an
+> empty browsers folder (the print now runs in a child process an
+> in-process monkeypatch cannot reach — the first full run's one failure),
+> and `test_round7`'s version pin 0.7.7 -> 0.8.0.
+>
+> **Group 1 — the user's question, re-run live (before = 9617c59, after = this code).**
+> - **Yes, every loaded file reaches the analytics, once and completely**: every
+>   truth check below 0 missing / 0 extra, every file's count equal to its part.
+> - **Busy queue (F1: 25 links, a 30 s fold-in emulated, the queue never idle
+>   for 6 min)**: per-file done -> covered max **178.3 s -> 141.8 s**, median
+>   84.3 -> 75.3 s, the first file 106.7 -> 31.2 s; the header said "added when
+>   the queue is idle" -> "added in about 2 min (downloads are running)".
+> - **Starvation (F3: a part-way plan whose catch-up fails, one stalling
+>   download)**: before, the plan **never resumed in 20 min** (spine 72,398 of
+>   444,992 rows, 2 of 7 payers); after, it resumed at **122 s** (the 2-min
+>   back-off) while the download still stalled, spine complete (444,992),
+>   state current at the end.
+> - **99M store** (45 files, 79,027,749 spine rows): a new 10,000-row file of
+>   an existing payer (6.6 M rows): the update **35 s -> 12 s**, drop -> covered
+>   41.1 -> 18.0 s, peak RSS 5.9 -> 3.6 GB, the resulting spine and directory
+>   **hash-identical to 9617c59's**; a new payer (Moda TX, 430,768 rates): the
+>   update 11.6 s (the review's run) -> **3 s** (the directory read 1 of 46
+>   parts). After every run `mrfx forget` (server stopped) returned the spine
+>   and directory set-hashes exactly. A full rebuild killed at 35 % under
+>   serve resumed at part 13 of 49 and ended **byte-identical** (set hash) to the
+>   store's previous build; an uninterrupted plan (426 s) too. The 8-file real
+>   store: sliced plan uninterrupted and killed-at-40 %-then-resumed both equal
+>   9617c59's one uninterrupted build (spine 444,992, directory 12,370).
+> - **Upgrade with a stale spine** (s_h.py, 3 of 7 payers, 190,445 of 444,992
+>   rows): 0.7.6 -> 0.8.0 update 2.2 s, first start current in **16.7 s**
+>   (0.7.7's was 31.6 s); 0.7.7 -> 0.8.0 update 2.4 s, current in 13.7 s; both
+>   0 missing / 0 extra, 7 of 7 payers covered, no click.
+> - **The panel** (screenshots, looked at, in
+>   `scratchpad/r14exec/an/shots/`): new_syn_0[1-6] and _final (a real fold-in
+>   on the 99M store: bar 13 % -> 21 % -> 50 % with "payer Payer 03 — the payer
+>   rates, part 2 of 3 — 376 k rows/s — less than 2 min left", then "Added
+>   recently … waited 12 s … payer update"); new_moda_*; fail_0[2-6] (an
+>   out-of-memory stop: Problem, "retrying at 11:17 after an out-of-memory stop
+>   at 11:15", Run now, added); rebuild_0[2-10] (a full rebuild, the kill, "The
+>   analytics are being rebuilt (12 of 49 parts saved) — the rows in place
+>   still answer every screen", the resume). Four things the screenshots
+>   showed were fixed in 6c41e02 (no "Added" on an upgraded store's first
+>   update; a stale headline beside a fresh list; "Failed to fetch" during a
+>   restart; doubled wording).
+>
+> **Group 2 P0s, each end to end.** 2.1 a failed link: twin link done and an
+> inbox copy returns at once (s11: claims {}, rate rows 60, was 0 and a frozen
+> inbox) — `test_2_1_*` through the real queue; 2.2 a 0.7.6-loaded file named by
+> content (s8: backfilled 1, 60 rows, was 120); cost measured on five real
+> files: **2.7 s per GB uncompressed (44 s per GB compressed)**, one read —
+> e.g. 300 GB of kept copies in about 3.7 h in the background; files whose
+> download was deleted after loading (the default for links) cannot be named
+> and the Files tab says so; 2.4 a part committed while the backup waited
+> is in it (r03: 0 rows lost, was 200; verify now checks the parts' rows);
+> 2.5 SSN-pattern subjects refused, a saved one masked on every surface
+> (digest, folders, titles, pages, PDFs, the address bar — tested in
+> Chromium).
+>
+> **Decisions.**
+> - **2.8: probe only.** The monthly re-check asks about loaded files; a file
+>   an index lists for the first time is named on the index row ("1 new file
+>   listed — not downloaded …; paste this index again, or turn on
+>   monthly_refresh"). A "check" that silently starts next month's 20 GB is
+>   not a check (s13: no GET of the new file; was a full download).
+> - **Month twins (Group 3): two copies of one document are twins only within
+>   one month.** When the month comes from the file name (no usable header
+>   date) and the names give different months, each copy is that month's
+>   publication and loads; within one month it stays a twin. No row is
+>   counted twice (pooling is per payer x month) and no month is dropped —
+>   0.7.6's behaviour for re-encoded copies, now also for byte-identical ones
+>   (s7: 2026-05 and 2026-06).
+> - **Cadence** (1.1b): a busy queue waits max(60 s, 3 x the last fold-in),
+>   at most 30 min, counted from the end of the last one (0.7.7: 4 x, at least
+>   90 s, no cap); a quiet one 3 s. 3 x keeps fold-ins to a quarter of a grind's
+>   disk time (the July 2026 field failure was rebuilds back to back); the cap
+>   bounds the gap on a billion-row store; 1.1e makes each fold-in cheaper.
+>
+> **Repros of rounds 11–14** (`tests/mrfx/test_repros.py`, 50/50; plus a sweep
+> of all 164 scripts): every "after" line holds; the round-13 regression's own
+> script (skip/s4_claims case C) now loads the twin. Round 11's kill
+> harnesses on the final code: s5_crash 20/20 (stuck=[], rows_mismatch={},
+> downloads_left=[]; "PROBLEM" is the known `.verified_parts.json` artifact),
+> c10_kill 12/12 OK, s4_kill **25/25 correct, 0/25 workers alive 45 s after the
+> kill** (seed 85821). Race tests: the index test and test_parallel_ingest_matches_serial **50/50 each** on the final code, and **50/50 each beside a CPU hog** (`MRFX_STRESS_N=50 pytest tests/mrfx/test_stress.py`, 14 min), 0 failures.
+> **Rows unchanged through ingest**: BCBS-MS (2,660,356 + 926,628), UHC-NY
+> (20,741), Tufts (128,044 + 118,895), via the inbox and via links: every
+> part's row count and sha256 of its sorted rows identical to 9617c59's;
+> `mrfx fastcheck` 3 of 3 identical. **Accuracy** (check_real.py, fresh
+> three-file real store, bulk names): **TX 734 OK / WY 202 OK, 0 differences**,
+> visit value All payers p26 · Q2, entity 2/2; 58/58 + 58/58 bodies the same
+> twice. **Determinism**: 200/200 routes identical A = B = C (two calls
+> without a token, one with) after the documented "Generated" stamps.
+>
+> **Carry-overs, not done (why).** Round 11's 3.6 segment map, 4.4(h) the
+> monotonic clock through laptop sleep and 4.4(c) the filename cap: not
+> touched — this round's P0/P1 list and its live verification took the
+> session; none is a wrong number. 6.5 (Excel) and 6.6 (expected payment)
+> stay as round 13 decided them; nothing changed. Windows: no Windows box
+> was available — the install → start → paste → update → Ctrl-C path and a hot
+> backup to an exFAT drive (now copied outside the lock, after a free-space
+> check — simulated here with `os.link` refused) remain the most valuable
+> hour for whoever has one.
 
 ## What the user asked for, in their words
 

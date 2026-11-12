@@ -77,6 +77,8 @@ Two codebases live in this repo:
 | `mrfx/pdf.py` | "Save as PDF" (round 13 6.1): prints a report's own HTML with the Chromium `render._launch` finds or installs, every request refused; `?format=pdf` on the eight report routes (`api._html_or_pdf`), `mrfx packets --pdf`. No browser = `PdfUnavailable` -> a 422 sentence, never a broken report. |
 | `mrfx/anchors.py` | Medicaid-floor and hospital-parity lines (round 13 6.2) in the negotiation one-pager, payer comparison, proposal and dossier. The practice's rate on a line is the rate the document already prints (passed in, never recomputed); Medicaid = newest loaded year of the state's schedule; hospitals = one rate per hospital under `hospital.hospital_filters` (the parity table's rule). A half with nothing loaded is omitted WITH its reason. |
 | `mrfx/backup.py` | Store backups: `store_files`, `write_zip` / `verify_zip` (one format and one check for `mrfx backup`, `mrfx verify` and the hot backup) and `hot_backup` — `serve`'s weekly backup (round 13 6.3; off until `backup_dir` is set). Under the write lock: CHECKPOINT, `ATTACH … COPY FROM DATABASE` into a staging file on the backup drive, hard links pinning every part in `<store>/.backup_snapshot`; the zip is written outside the lock, verified, and only then are the oldest `mrfx-backup-*.zip` beyond `backup_keep` deleted. Disk guard: store + database copy + 1 GB free, else `BackupRefused` with the sentence (recorded in `meta('last_backup')` for the Files tab). |
+| `mrfx/foldin.py` | **The analytics fold-in scheduler** (round 14 Group 1). ONE `FoldIn` per serving process owns every analytics update: whenever `rollups_stale()`, at a bounded cadence (3 s after the last file on a quiet queue; max(60 s, 3 x the last fold-in), at most 30 min, on a busy one), Run now / Pause, a back-off of 2..60 min after a failure that retries the SAME update. `fold_in()` is the one decision tree (resume a names plan as names, a full plan as full, first build in full, else the incremental; a full build only on `RollupNeedsFull`). `decide()` / `when_text()` are what the header and the panel say. See "Round 14 additions". |
+| `mrfx/activity.py` | **The Analytics activity panel** (round 14 item 1.2): one dict (`build`) for `GET /api/analytics/activity` and `mrfx status --analytics` (`text`) — the live bar, files waiting and why, files added recently (the fold-in event ring in `meta`), per payer, problems, "What this means". Its headline numbers are `Store.analytics_coverage()`'s. |
 | `mrfx/cli.py` | `mrfx serve / add / preflight / ingest / status / export / outreach / forget / enrich / speedtest / reset`. `speedtest <url>` pulls a slice of one real link on 1/2/4/8 connections (a DIFFERENT slice each time, so a CDN cache can't flatter the later runs) and either prints the `download_segments` line to paste or says extra connections don't help — it exists because "downloads are slow" has two opposite fixes and only a measurement on the user's own network distinguishes them. `add` hands URLs to a running server, else drains locally. `forget <filename>` (or DELETE `/api/files/{name}`, the Files-tab remove button) erases one file's rates + raw copies and flips its done url_queue row to 'skipped' so the dedup anchor never outlives the data; rollups rebuild after. |
 
 ## Step 3 — Internalize the invariants (violating these breaks real users)
@@ -304,10 +306,11 @@ Two codebases live in this repo:
    re-clusters. `/api/payers` reads DISTINCT payer from the materialized spine
    (small native table) rather than a DISTINCT scan across every raw parquet
    part on the dashboard-load path.
-   Mid-grind refreshes are purely TIME-based (`_rollup_due`): one per
-   adaptive interval of max(90s, `ROLLUP_INTERVAL_MULTIPLE` (4x) × the last
-   rebuild's duration), counted from rebuild COMPLETION, plus a final rebuild
-   when the queue goes idle. There is deliberately NO count-based ("N files
+   Mid-grind refreshes are purely TIME-based (since 0.8.0 in the analytics
+   scheduler, `mrfx/foldin.py` — `_rollup_due` and the 4x/90 s rule are gone):
+   one per max(60 s, 3 x the last fold-in), at most 30 min apart, counted from
+   the fold-in's COMPLETION, and a few seconds after the last file when the
+   queue is quiet. There is deliberately NO count-based ("N files
    pending") trigger: on a big store one rebuild outlasts any batch of fresh
    ingests, so an unconditioned batch check fired the instant each rebuild
    finished — rebuilds ran back-to-back for the whole grind, monopolized the
@@ -315,8 +318,10 @@ Two codebases live in this repo:
    measured July 2026 field failure). Counting the interval from the start
    instead of completion would likewise degenerate into rebuild-per-file.
    `scan_inbox` batches to ONE rebuild per pass for the same reason.
-   Rebuilds give up after 3 failures (raw data is safe) and never run
-   per-file during queue grinds.
+   Rebuilds never give up (round 13: a failure backs off 2..60 min and is
+   retried; since 0.8.0 the analytics scheduler, mrfx/foldin.py, owns the
+   timing — see "Round 14 additions") and never run per-file during queue
+   grinds.
    COALESCING (skip_if_busy): the PERIODIC triggers — the ingest worker's
    `rebuild_now` and the enrichment name refresh `_maybe_refresh_directory` —
    now pass `skip_if_busy=True` to `update_rollups_incremental` /
@@ -867,6 +872,106 @@ progress tests); the evidence is under `docs/review13_repros/`.
   would. 6.5 (xlsx) and 6.6 (expected payment) were not built — see the
   round-13 prompt's status block.
 
+### Round 14 additions (Nov 12, 2026, v0.8.0) — rules a change must keep
+
+Pinned by `tests/mrfx/test_review14.py` (every Group 1-3 case fails on
+9617c59, the value it got there in its docstring), `tests/mrfx/test_repros.py`
+(the repro scripts of rounds 11-14 against their recorded "after" lines) and
+`tests/mrfx/test_stress.py` (the two race tests beside a CPU hog,
+`MRFX_STRESS_N`). The evidence is under `docs/review14_repros/`.
+
+- **The fold-in contract** (Group 1; `mrfx/foldin.py`). A file reaches the
+  analytics by exactly one road: whatever loaded it (the queue, the inbox
+  watcher, an upload, a re-read, a Keep-both) commits its part and its 'done'
+  row, then pokes the store's scheduler (`foldin.poke`; `ingest_file` does it
+  on every 'done'). ONE `FoldIn` per serving process (started by `serve`, or
+  by `run_queue` for its own lifetime when none runs — a CLI drain, a test)
+  decides when: whenever `rollups_stale()` and the analytics lock is free and
+  the write lock is free at that instant; a quiet queue after `IDLE_SETTLE_S`
+  (3 s) from the last poke, a busy one (`note_queue` from run_queue's
+  coordinator, or any in-process ingest claim) after max(`BUSY_FLOOR_S` 60 s,
+  `BUSY_MULTIPLE` 3 x the last fold-in), capped at `BUSY_CAP_S` 30 min,
+  counted from the END of the last fold-in. Never "when the queue is idle"
+  again: one long download starved a part-way plan for 20 min (F3). The
+  decision tree is `foldin.fold_in` for every caller (CLI ones too): a
+  part-way `names` plan resumes as names, a `full` one as full, a never-built
+  store builds in full, else the payer-scoped incremental — and a full build
+  ONLY when the incremental raises `RollupNeedsFull` (a failed precondition,
+  logged with which); any other failure (out of memory at the finest
+  slicing, disk) is noted (`_note_rollup_failure`) and the SAME update is
+  retried after 2, 4 … 60 min. Pause (`meta('analytics_paused')`) holds
+  everything, a running plan stops between two committed parts
+  (`RollupPaused`, not a failure); Run now bypasses the cadence (and a pause,
+  for that one run). The incremental recomputes the spine for (payer, the new
+  files' TINs) only — every spine row and is_latest contract lives inside one
+  payer x TIN — and the directory reads only the parts holding the delta TINs
+  (`part_tin_set`); a removal keeps the payer-wide spine.
+- **How the panel knows** (1.2; `mrfx/activity.py`, `GET /api/analytics/
+  activity` — async, single-flight, its own 2-token limiter). One coverage
+  rule, `Store._coverage_facts`: a file is covered when the marker or a
+  plan's committed slices include it; a payer when it is in the spine and not
+  part-way. The header, `/api/payers`, the panel, `analytics_note()` and the
+  document sentence all read it (they disagreed during a rebuild: 0 vs 3 vs
+  4). Every commit point that can make a file visible (`update_rollups_
+  incremental`, each full-plan spine slice, `_finish_plan`) calls
+  `_note_fold_ins(kind)`, which appends one event per newly covered
+  (filename, finished_at) to a 200-entry ring in `meta('analytics_events')`
+  (`analytics_known_covered` is the set it diffs against; seeded without
+  events on the first 0.8.0 run). "Why it is waiting" comes from
+  `FoldIn.decide()`, never a guess; the ETA only after one measured unit.
+- **The claim-release rule** (2.1). A content claim
+  (`Store._content_claims`) is released on EVERY exit of the load that took
+  it (`process_url_record`'s `finally`, `ingest_file`'s `finally`), records
+  its owner (`_content_claim_owner`: the url id, or None for an inbox file),
+  and a claim whose link is no longer loading in this process
+  (`update_url` drops the id from `_live_url_ingests` on any non-loading
+  status) is no owner: nobody ever waits on it. A failed load revives the
+  rows that deferred to its BYTES (raw sha) and to its CONTENT
+  (`duplicate_of` = its name, "will retry automatically").
+- **Content identity of older files** (2.2): `backfill_identities` also names
+  every file with a raw sha and no content sha from its kept copy (one read,
+  recorded only when the raw sha equals the loaded one), one at a time,
+  resumable; files with no copy are listed in `meta('content_backfill_no_
+  copy')` and the Files tab says what that means. Every claim path also reads
+  `files.read_identity` (sha AND csha since 0.8.0) when a kill skipped the
+  identity row (2.11). Two copies of one document are twins only within one
+  month (`_SAME_MONTH`, `fetch._same_name_month`; decided — the month a file
+  name gives is never dropped).
+- **Re-reads** (2.3): `requeue_skipped` leaves a file whose claim is held to
+  its own end-of-read check, and a re-read that loses the claim
+  (`CLAIM_LOST`) returns None — the first read's 'done' stands.
+- **The cache-under-Stop rule** (2.9): a result computed while
+  `progress.current().cancelled` is never stored — `Store.cached`,
+  `spine_cached`, the client digest, the Overview (`store._run_cancelled`).
+  A new cache with a fault-isolated compute must check it.
+- **The backup consistency rule** (2.4): the parts a hot backup carries are
+  listed UNDER the write lock, after the database copy (the pre-lock list is
+  only a size estimate); `verify_zip` checks that the zip's parts hold the
+  row count its database recorded (parquet footers, no inflate); a failed or
+  stopped write leaves no `.zip.part`; a `backup_dir` inside the store is
+  refused; a drive that cannot hard-link copies OUTSIDE the lock, checks the
+  data drive's free space first, and refuses if a part changed meanwhile.
+  The writer lock is held ~25 s per GB of database file (the Files tab says
+  how long for this store).
+- **SSN-pattern subjects** (2.5): `add_client` refuses one; a client saved
+  by one before 0.8.0 is shown as `subject_label` (MASKED-SSN-<hash>) in the
+  digest, folder names, titles and stdout, its jump buttons are disabled,
+  every report page / PDF / packet document goes through `mask_ssn_text`,
+  and `hashFor` never writes one into the address bar.
+- **needs-full generations** (2.6): `rollup_needs_full` holds '1' (pre-0.8.0)
+  or '1:<id>' (a new id per raise); a build clears only the token it started
+  with. **Monthly re-check** (2.8, decided): probe only — a file an index
+  lists for the first time is named on the index row, downloaded only by a
+  re-paste or `monthly_refresh`.
+- **Group 3**: PDFs print in a child process (`python -m mrfx.pdf`) that a
+  Stop or `PRINT_TIMEOUT_S` kills, refused above `PAGE_BUDGET` pages with a
+  sentence; `packets --pdf` skips a document that fails. A Stop during an
+  export's compress removes the zip; a Stop on a finished run answers
+  `{"stopped": false}`. The progress text bar prints one line per OUTER step
+  on redirected output; a nested step reads "Outer: inner". A multi-link
+  paste is durable (`meta('pending_paste')`, `resume_pending_paste`). A
+  hospital of an already-loaded name from another file is refused.
+
 #### The skip protocol in one page (amended in 0.7.7; rules 4, 7, 8, 9 changed)
 
 1. **A LINK is one queue row per `dedup_key`** = `scheme://host(lower)/path(as is)?sorted query minus signature params` (always: `expires signature policy key-pair-id awsaccesskeyid sig x-amz-<signing>`, GCS V4 `x-goog-*`, Akamai `__token__`, a lone JWT `token`; beside a signature param also the Azure SAS names and `token/st/policy` only when the value LOOKS like a signature part — JWT, date, epoch, `%`/`=`/`+`/`/`, 40+ hex). `http`/`https`, `:443`, trailing slash, percent-encoding and host aliases are DIFFERENT rows; content decides later. A paste of an existing key refreshes the row's url (not in flight) and revives `failed` / `skipped` / `oversize` / a done index; a known duplicate pasted again is answered from what is loaded, no byte downloaded. **A done RATE row is re-read by a paste only when billing codes were added since it was read**; otherwise only forget + paste, the monthly re-check, `requeue_url_for_file`, or a re-expansion that finds it republished.
@@ -1147,16 +1252,21 @@ inbox, `inbox/.held/` or `inbox/.replacing/`.
 
 ## Step 7 — Test and verify like the history did
 
-- `.venv/bin/python -m pytest tests/ -q -m quick` — the ~4.5-min inner loop (CLAUDE.md
-  has the current count and time)
-  (497 of 866 tests, 2 min 48 s on Nov 6 2026; the >= 0.5 s ones are listed in
-  `tests/slow_tests.txt` — regenerate it from a `--durations=0` run).
+- `.venv/bin/python -m pytest tests/ -q -m quick` — the inner loop (CLAUDE.md
+  has the current count and time; the >= 0.5 s tests are listed in
+  `tests/slow_tests.txt` — regenerate it from a `--durations=0` run; tests
+  marked `slow` / `stress` are never quick).
   Run the full suite before every commit that touches numbers.
+- `tests/mrfx/test_repros.py` (slow tier) RUNS the repro scripts of rounds
+  11-14 and asserts their recorded "after the fix" lines; add a round's
+  fast repros to its CASES table when you close its items.
+  `MRFX_STRESS_N=50 pytest tests/mrfx/test_stress.py` runs the two race
+  tests 50 times each beside a CPU hog (the release check).
 - `tests/mrfx/test_known_answer.py` — the hand-computed end-to-end answer
   check (ingest -> rollups -> API -> CSV/ZIP, masking, month rules). If a
   change moves one of its numbers, the change is wrong or the rule changed —
   say which in the commit.
-- `.venv/bin/python -m pytest tests/ -q` — the suite (670 tests) runs real
+- `.venv/bin/python -m pytest tests/ -q` — the suite (CLAUDE.md has the count) runs real
   end-to-end drains against local HTTP servers, including parallel mode,
   kill-recovery semantics (crash-flip of stuck files/urls is tested
   directly), the forget HTTP flow, dedup, guards, and messy-file parser cases
