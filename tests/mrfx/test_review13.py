@@ -545,3 +545,59 @@ def test_3_5_new_to_network_validate_stats_and_leads_csv_reuse(cfg, store, monke
 # ---------------------------------------------------------------- group 4
 
 
+def test_4_1_the_quartile_follows_the_printed_percentile_in_a_tied_market():
+    """4.1 (P1, real TX data: p26 printed beside "Q3"). A practice at a tied
+    median/P25. was: percentile 33, quartile Q3."""
+    from mrfx.visit_market import _position, _stats
+    others = [105.44, 105.44, 110.31]
+    v = 105.44
+    st = _stats(others + [v])
+    assert (st["p25"], st["median"]) == (105.44, 105.44)
+    pos = _position(v, others, st)
+    assert pos["percentile"] == 33 and pos["quartile"] == "Q2"
+    from mrfx.visit_market import SUBJECT_NOTE
+    assert "read from that printed percentile" in SUBJECT_NOTE
+
+
+def test_4_2_the_practice_rate_rule_is_written_down_and_unchanged(cfg, store):
+    """4.2 (P1, decided: disclose). The Benchmark's "YOU" for one code is the
+    median over the practice's base LINES — Payer 01's two POS sets count
+    twice: median(46.29, 46.29, 67.15, 46.01, 20.33) = 46.29, not the
+    one-per-payer 46.15 — and the methodology now says so. was: the sentence
+    was printed nowhere (PRACTICE_RATE_RULE did not exist)."""
+    from mrfx.benchmark import PRACTICE_RATE_RULE, practice_base_sql
+    T = tins("75000", 1)
+    npis = {T[0]: [f"1{T[0]}"]}
+    docs = [
+        ("p1.json", doc("Payer 01", "2026-06-01", {"97110": {T[0]: [
+            price(46.29, pos=("11",)), price(46.29, pos=("11", "22"))]}}, npis)),
+        ("p2.json", doc("Payer 02", "2026-06-01", {"97110": {T[0]: 67.15}}, npis)),
+        ("p3.json", doc("Payer 03", "2026-06-01", {"97110": {T[0]: 46.01}}, npis)),
+        ("p4.json", doc("Payer 04", "2026-06-01", {"97110": {T[0]: 20.33}}, npis)),
+    ]
+    load(cfg, store, docs)
+    store.rebuild_rollups()
+    q, p = practice_base_sql(store, {"month": "latest"})
+    with store.connect() as con:
+        rate = con.execute(f"SELECT rate FROM ({q}) WHERE tin_value = ?", [*p, T[0]]).fetchone()[0]
+    assert round(rate, 2) == 46.29
+    assert "counts once per set" in PRACTICE_RATE_RULE
+
+
+def test_4_3_the_three_small_wordings():
+    """4.3 (P3). was: the config said "about 4 GB on a 16 GB laptop … about
+    1 GB each" (the code gives 6 GB and budgets 2 GB per worker); the guide
+    never said a practice is a TIN; the Clear-queue confirm did not mention the
+    file a downloader claimed an instant before."""
+    from pathlib import Path
+    from mrfx.store import auto_pool_gb
+    root = Path(__file__).resolve().parents[2]
+    conf = (root / "config" / "mrfx.yaml").read_text()
+    assert "6 GB on a" in conf and "16 GB laptop" in conf and "2 GB each" in conf
+    assert auto_pool_gb(16 * (1 << 30)) == 6 and auto_pool_gb(32 * (1 << 30)) == 12
+    gs = (root / "GETTING_STARTED.md").read_text()
+    assert "A **practice** here is one tax ID (TIN)" in gs
+    js = (root / "mrfx" / "web" / "app.js").read_text()
+    assert "picked up in the instant before this click still" in js
+
+

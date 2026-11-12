@@ -207,8 +207,9 @@ move_processed: true          # false = leave files in inbox, track via checkpoi
 
 # Memory ceiling (GB) for the analytics database (rollup rebuilds + dashboard
 # queries). Leave it unset: the app picks a safe value from this machine's RAM
-# after setting aside room for the parser workers (about 1 GB each), Windows
-# and your browser — about 4 GB on a 16 GB laptop, 12 GB on a 32 GB desktop.
+# after setting aside room for Windows (3 GB) and at least two parser workers
+# (2 GB each): 2 GB on an 8 GB laptop (with 1 parser worker), 6 GB on a
+# 16 GB laptop (4 workers), 12 GB on a 32 GB desktop (9 workers).
 # Set it only if a rebuild says it ran out of memory (8 is a good value on a
 # 32 GB machine):
 # duckdb_memory_gb: 8

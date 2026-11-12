@@ -1052,9 +1052,14 @@ P25 $105.00, P75 $155.00, and the clinic at p40, second quartile, $10.00
 (7.7%) below both the average and the median. A practice counts for a payer
 only if that payer has a rate for **every** code of the visit (a half-priced
 visit is left out, and the box says how many were); a payer with fewer than 5
-practices is not shown. **Open printable** and **Download CSV** give the same
-numbers, and the printable rate card and its CSV include the box when State
-and Discipline are set.
+practices is not shown. A **practice** here is one tax ID (TIN): a clinic that
+bills under two tax IDs counts as two practices in the market's numbers, and
+when you pick it, the box places it once, at its own value. The quartile is
+read from the percentile on the same row (below 25 is the first quartile,
+below 50 the second, below 75 the third), so the two never disagree when many
+practices are paid exactly the same. **Open printable** and **Download CSV**
+give the same numbers, and the printable rate card and its CSV include the box
+when State and Discipline are set.
 
 The rest of this round fixed what an end-to-end check of the 0.7.5 zip found:
 

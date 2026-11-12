@@ -4846,7 +4846,9 @@ function initFilesView() {
     const msg = $("#url-msg");
     if (!confirm("Cancel everything WAITING to download?\n\nFiles already " +
       "downloaded or being processed are untouched, and cleared links become " +
-      "'skipped' so you can retry them later. This lets ingesting catch up.")) return;
+      "'skipped' so you can retry them later. This lets ingesting catch up.\n\n" +
+      "A file a downloader picked up in the instant before this click still " +
+      "finishes and loads.")) return;
     msg.textContent = "clearing queue…";
     try {
       const r = await postJson("/api/urls/clear-queued", {});

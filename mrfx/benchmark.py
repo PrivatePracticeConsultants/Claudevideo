@@ -32,6 +32,20 @@ BASIS_NOTE = (
 )
 
 
+# The one rule for "a practice's rate for a code" across payers (review 13
+# item 4.2, decided: disclosed, not changed). It is the median over the
+# practice's published base LINES on the market's basis — a payer that
+# publishes the code under two place-of-service sets contributes two lines.
+# Measured: collapsing to one rate per payer first would move 52 of 144,859
+# practice x code rates (0.04 %) on the real 8-file store; the numbers are
+# kept and the rule is printed with every all-payer figure.
+PRACTICE_RATE_RULE = (
+    "A practice's all-payer rate for a code is the median of its published base "
+    "lines across payers: a payer that lists the code under more than one "
+    "place-of-service set counts once per set (a per-payer figure is one rate "
+    "per payer).")
+
+
 def basis_note_for(market: dict) -> str:
     """BASIS_NOTE plus every toggle the query actually applied. The note must
     never claim a basis the SQL did not use: the fee schedule and contract
@@ -2084,6 +2098,7 @@ def methodology_footer(store: Store, benchmark: dict) -> str:
         "Dedup rule: one row per (payer, TIN, code, modifier-set, billing class, "
         "place-of-service set, month); a TIN's rate is the median of its distinct "
         "published values excluding $0/$0.01 dollar placeholders (variants flagged).",
+        PRACTICE_RATE_RULE,
         *_pooled_lines(store, payers),
         *store.analytics_note(),
         "Rate files in the store matching the market's payer scope (the "

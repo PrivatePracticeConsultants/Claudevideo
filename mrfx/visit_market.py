@@ -75,8 +75,9 @@ SUBJECT_NOTE = (
     "This practice's position is its mid-rank among the practices priced for the "
     "payer, this practice included (counted once, in place of its own TINs): "
     "those paid less, plus half of those paid the same, as a share of the others. "
-    "Quartile: Q1 below P25, Q2 below the median, Q3 below P75, Q4 at or above "
-    "P75 (the printed figures).")
+    "Quartile: read from that printed percentile — Q1 below 25, Q2 below 50, Q3 "
+    "below 75, Q4 from 75 — so a practice tied at the median of a tied market "
+    "reads the same on both cells.")
 
 
 def _quantile_cont(s: list[float], q: float) -> float:
@@ -101,11 +102,19 @@ def _position(v: float, others: list[float], st: dict) -> dict:
     below = sum(1 for x in others if x < v)
     tied = sum(1 for x in others if x == v)
     pct = (100.0 * (below + 0.5 * tied) / (len(pop) - 1)) if len(pop) > 1 else None
-    if v < st["p25"]:
+    # the quartile is read from the PRINTED percentile (review 13 item 4.1):
+    # read from P25 / median / P75 it said "Q3" beside "percentile 26" for a
+    # practice AT a tied median — fee schedules tie heavily (1,668 TX
+    # practices, four distinct visit values). No other number moves.
+    printed = None if pct is None else int(half_up(pct, 0))
+    if printed is None:
+        quart = "Q1" if v < st["p25"] else "Q2" if v < st["median"] else \
+            "Q3" if v < st["p75"] else "Q4"
+    elif printed < 25:
         quart = "Q1"
-    elif v < st["median"]:
+    elif printed < 50:
         quart = "Q2"
-    elif v < st["p75"]:
+    elif printed < 75:
         quart = "Q3"
     else:
         quart = "Q4"
