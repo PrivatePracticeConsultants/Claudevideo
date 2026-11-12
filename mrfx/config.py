@@ -127,6 +127,12 @@ class MrfxConfig(BaseModel):
     # Content-hash dedup means a payer that republished nothing costs one HEAD
     # per file, not a re-ingest.
     monthly_refresh: bool = False
+    # on (review 13 item 5.2.5): once a month every LOADED index — catalog or
+    # pasted by the user — is fetched again and each of its loaded files asked
+    # (one tiny request) whether the payer changed it; only changed files
+    # download. monthly_refresh above is the separate, opt-in queueing of NEW
+    # dated months of catalog sources.
+    monthly_recheck: bool = True
     # Where `mrfx packets` writes client packets. Relative paths anchor to the
     # project folder; unset means <store_dir>/../packets.
     packets_dir: Path | None = None

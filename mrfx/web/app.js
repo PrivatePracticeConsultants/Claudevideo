@@ -4555,14 +4555,29 @@ async function loadFilesNow() {
         ? ` <span class="progress" style="display:inline-block;width:160px;vertical-align:middle"><span class="progress-fill" style="width:${Math.max(0, Math.min(100, an.pct))}%"></span></span>`
         : ""}</div>`
     : "";
-  stateEl.innerHTML = anLine + ruLine + pmLine + (d.total > d.files.length
+  // files read before the user ADDED billing codes (review 13 item 5.2.4)
+  const rr = d.reread;
+  const rrLine = rr && rr.count
+    ? `<div class="warn-text">${fmtInt(rr.count)} loaded file${rr.count === 1 ? " was" : "s were"} read before ` +
+      `you added billing code${rr.added.length === 1 ? "" : "s"} ${esc(rr.added.join(", "))} — ` +
+      (rr.running ? "re-reading them now…" :
+        `<button class="btn" id="files-reread" style="padding:2px 8px;font-size:12px">Re-read ${fmtInt(rr.count)} file${rr.count === 1 ? "" : "s"} for the new codes</button>`) +
+      `</div>`
+    : "";
+  stateEl.innerHTML = anLine + rrLine + ruLine + pmLine + (d.total > d.files.length
     ? `<div class="muted">Showing the newest ${fmtInt(d.files.length)} of ${fmtInt(d.total)} files.
         <button class="btn" id="files-more" style="padding:2px 8px;font-size:12px">show ${fmtInt(Math.min(d.total, (state.filesLimit || 500) * 4))}</button></div>`
     : "");
+  const rrBtn = document.getElementById("files-reread");
+  if (rrBtn) rrBtn.onclick = async () => {
+    rrBtn.disabled = true;
+    try { await postJson("/api/files/reread", {}); } catch (e) { alert(e.message); }
+    loadFiles();
+  };
   const more = $("#files-more");
   if (more) more.onclick = () => { state.filesLimit = Math.min(5000, (state.filesLimit || 500) * 4); loadFiles(); };
   body.innerHTML = d.files.map((f) => {
-    let warn = "";
+    let warn = f.identity_note ? `<span class="muted" title="${esc(f.identity_note)}">ⓘ loaded before identities were kept</span> ` : "";
     if (f.ref_groups_skipped > 0) {
       const remote = (f.qa && f.qa.remote_ref_groups) || 0;
       warn = remote >= f.ref_groups_skipped
@@ -4694,6 +4709,7 @@ async function loadUrlQueue() {
                  "waiting", "failed", "done", "skipped", "queued"]
     .filter((k) => c[k]).map((k) => (countLabel[k] || ((n) => `${n} ${k}`))(fmtInt(c[k])));
   const ds = d.settings || {};
+  state.monthlyRecheck = ds.monthly_recheck !== false;
   const setLine = ds.downloads
     ? `<div class="sub muted" style="margin-top:4px">Downloads: ${fmtInt(ds.downloads)} at a time`
       + (ds.small_file_downloads ? ` (${fmtInt(ds.small_file_downloads)} kept for files of ${fmtInt(ds.small_file_mb)} MB or less)` : "")
@@ -4781,6 +4797,13 @@ async function loadUrlQueue() {
     else if (u.kind === "page" && u.status === "done") notes = `found ${fmtInt(u.child_count)} file links on the page`;
     // a list cut at max_toc_files says so, in amber (round 7 P1.6)
     if (notes && u.error) notes += ` — <span class="warn-text">${esc(u.error)}</span>`;
+    // a loaded index says when it was last checked and when it is next
+    // (review 13 item 5.2.5: nothing said whether a file was current)
+    if (notes && u.parent_id == null && u.finished_at) {
+      const nx = new Date(); nx.setDate(1); nx.setMonth(nx.getMonth() + 1);
+      notes += ` · <span class="muted">last checked ${esc(localTime(u.finished_at))}` +
+        `${state.monthlyRecheck ? ` · next check ${esc(nx.toLocaleDateString())}` : " · monthly re-check off"}</span>`;
+    }
     // Color the note by what it actually is: red is reserved for real
     // failures. Over-size is amber ("your OK needed"), and SKIPPED rows are
     // neutral — a duplicate of an already-ingested file, a file with none of

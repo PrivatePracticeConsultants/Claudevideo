@@ -363,6 +363,12 @@ def _download_identity(path: Path) -> dict | None:
     return None
 
 
+def code_set_key(cfg: MrfxConfig) -> str:
+    """The active billing-code list as the files table records it."""
+    cs = cfg.code_set
+    return "ALL" if cs is None else ",".join(sorted(cs))
+
+
 def _finish_ok(cfg: MrfxConfig, store: Store, path: Path) -> None:
     """A file ingested successfully: remember its fingerprint (so a copy of
     it under another web address is recognised before it finishes
@@ -376,6 +382,11 @@ def _finish_ok(cfg: MrfxConfig, store: Store, path: Path) -> None:
     ingest."""
     from .identity import LOCAL_HASH_MAX_BYTES
     started = _INGEST_STAT.pop(str(path), None)
+    try:
+        # the code list this file was read for (review 13 item 5.2.4)
+        store.upsert_file(path.name, code_set=code_set_key(cfg))
+    except Exception:  # noqa: BLE001 — bookkeeping
+        pass
     try:
         st = path.stat()
         if started is not None and (st.st_size, st.st_mtime_ns) != started:
@@ -397,10 +408,18 @@ def _finish_ok(cfg: MrfxConfig, store: Store, path: Path) -> None:
         if fp is not None:
             store.record_fingerprint(path.name, fp)
         if ident is None and seen is not None and seen.get("sha"):
-            ident = {"sha": seen["sha"],
+            ident = {"sha": seen["sha"], "csha": seen.get("csha"), "csize": seen.get("csize"),
                      "trailer_proves": trailer_proves_for(path, seen.get("gz_members"))}
         store.record_identity(path.name, st.st_size, st.st_mtime_ns,
-                              (ident or {}).get("sha"), (ident or {}).get("trailer_proves"))
+                              (ident or {}).get("sha"), (ident or {}).get("trailer_proves"),
+                              (ident or {}).get("csha"), (ident or {}).get("csize"))
+        # a link's download releases its content claim here (the inbox path
+        # releases in ingest_file)
+        try:
+            if (ident or {}).get("csha"):
+                store.release_content_claim(ident["csha"], path.name)
+        except Exception:  # noqa: BLE001
+            pass
     except Exception:  # noqa: BLE001
         log.debug("fingerprint not recorded for %s", path.name, exc_info=True)
     _finish_file(cfg, path, ok=True)
@@ -1231,6 +1250,11 @@ def ingest_file(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight | None 
     is always current; only the dedup/by-TIN rollups lag until the batch
     rebuild."""
     name = path.name
+    if getattr(store, "current_code_set", None) is None:
+        try:
+            store.stamp_code_sets(code_set_key(cfg))
+        except Exception:  # noqa: BLE001
+            pass
     if not _claim_ingest(name):
         # two threads on one filename share the same pid-suffixed temp: the
         # slower writer's half-written parquet would be renamed into the live
@@ -1240,12 +1264,16 @@ def ingest_file(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight | None 
         return {"status": "skipped", "error": "already being ingested by another worker"}
     claim: dict = {}
     result = None
+    # review 13 item 5.2.7: the payer's provider lists as of the START of this
+    # read — compared again once it is done (_reread_if_refs_landed)
+    refs_before = store.refs_epochs() if hasattr(store, "refs_epochs") else {}
     try:
         result = _ingest_file_locked(cfg, store, path, pf, progress_bar, rebuild_rollups,
                                      claim=claim)
-        return result
     finally:
         sha = claim.get("sha")
+        if claim.get("csha"):
+            store.release_content_claim(claim["csha"], name)
         if sha:
             # the files row (done, with its sha) is the record from here on
             store.release_inbox_claim(sha, name)
@@ -1257,6 +1285,56 @@ def ingest_file(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight | None 
                 except Exception:  # noqa: BLE001 — the next scan/retry covers it
                     log.debug("duplicate revival skipped", exc_info=True)
         _release_ingest(name)
+    if result and result.get("status") == "done":
+        again = _reread_if_refs_landed(cfg, store, path, refs_before, rebuild_rollups)
+        if again is not None:
+            return again
+    return result
+
+
+def _reread_if_refs_landed(cfg: MrfxConfig, store: Store, path: Path, before: dict,
+                           rebuild_rollups: bool = True) -> dict | None:
+    """A rate file read while its payer's provider list was still landing
+    keeps "rate groups skipped — missing provider reference file" for good
+    when the list finished during its read: the list's own re-read pass
+    (requeue_skipped) runs once, and it saw this file either not yet 'done'
+    or still claimed (review 13 item 5.2.7 — test_parallel_ingest_matches_
+    serial failed 3 of 12 runs, (4, 4) rows instead of (6, 4)). Closed here:
+    after its claim is released, a file that skipped or missed ids compares
+    its payer's provider-list counter with the one at its start and, if a
+    list finished meanwhile, is read again (once more per list, never a
+    loop). Returns the re-read's result (the caller reports it), or None.
+    Never raises: the file is already safely loaded."""
+    name = path.name
+    try:
+        st = store.file_status(name) or {}
+        if (st.get("file_type") or "in_network") != "in_network":
+            return
+        qa = st.get("qa")
+        if isinstance(qa, str):
+            try:
+                qa = json.loads(qa)
+            except ValueError:
+                qa = {}
+        qa = qa if isinstance(qa, dict) else {}
+        waiting = (int(st.get("ref_groups_skipped") or 0) > 0
+                   or int(qa.get("missing_ref_ids") or 0) > 0
+                   or int(qa.get("ambiguous_ref_ids") or 0) > 0)
+        payer = st.get("payer")
+        if not waiting or not payer:
+            return
+        if store.refs_epochs().get(payer, 0) == before.get(payer, 0):
+            return
+        log.info("%s: its payer's provider list finished while it was being read — "
+                 "reading it again with the list", name)
+        for src in (path, cfg.processed_dir / name, cfg.inbox_dir / name,
+                    cfg.downloads_dir / name):
+            if src.exists():
+                return ingest_file(cfg, store, src, rebuild_rollups=rebuild_rollups)
+        requeue_skipped(cfg, store, payer, only={name})     # no copy: its link again
+    except Exception:  # noqa: BLE001 — housekeeping, never fails the done file
+        log.debug("provider-list re-read check skipped for %s", name, exc_info=True)
+    return None
 
 
 def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight | None,
@@ -1573,8 +1651,42 @@ def _ingest_reference_file(cfg: MrfxConfig, store: Store, path: Path, pf: Prefli
     return {"status": "done", "refs": state["n"], "requeued": requeued}
 
 
+def reread_for_new_codes(cfg: MrfxConfig, store: Store, names: list[str] | None = None) -> dict:
+    """Read again the loaded files that were read WITHOUT codes the list now has
+    (review 13 item 5.2.4): from the kept raw copy (processed/, inbox/,
+    downloads/) when there is one, else by downloading the link again; a file
+    with neither is told on its row. Returns {"reread", "redownload", "asked"}."""
+    store.current_code_set = code_set_key(cfg)
+    todo = [r["filename"] for r in store.files_missing_codes()]
+    if names is not None:
+        todo = [n for n in todo if n in set(names)]
+    out = {"reread": [], "redownload": [], "asked": []}
+    for fname in todo:
+        for base in (cfg.processed_dir, cfg.inbox_dir, cfg.downloads_dir):
+            src = base / fname
+            if src.exists():
+                log.info("re-reading %s for the billing codes added since it was read", fname)
+                ingest_file(cfg, store, src, rebuild_rollups=False)
+                out["reread"].append(fname)
+                break
+        else:
+            if store.requeue_url_for_file(
+                    fname, "downloading again: billing codes were added to your list "
+                           "since this file was read"):
+                out["redownload"].append(fname)
+            else:
+                store.upsert_file(fname, error=(
+                    "billing codes were added to your list since this file was read — drop "
+                    "it in again to pick them up (its download is gone and it came from no link)"))
+                out["asked"].append(fname)
+    if out["reread"]:
+        _rebuild_rollups_best_effort(store, "re-read for new codes")
+    return out
+
+
 def requeue_skipped(cfg: MrfxConfig, store: Store, payer: str,
-                    last_updated_on: str | None = None, month: str | None = None) -> list[str]:
+                    last_updated_on: str | None = None, month: str | None = None,
+                    only: set | None = None) -> list[str]:
     """After a reference file lands, load again this payer's in-network files
     OF ITS VINTAGE (item 1.3) that had skipped / missing / ambiguous ids:
     from the raw copy if it is still on disk (processed/, inbox/ or
@@ -1599,6 +1711,8 @@ def requeue_skipped(cfg: MrfxConfig, store: Store, payer: str,
     lu = str(last_updated_on or "").strip()[:10]
     requeued = []
     for fname, flu, fmonth in rows:
+        if only is not None and fname not in only:
+            continue
         if lu or month:
             same = (lu and str(flu or "").strip()[:10] == lu) or \
                    (month and str(fmonth or "")[:7] == str(month)[:7])
@@ -1736,17 +1850,20 @@ def _content_claim(cfg: MrfxConfig, store: Store, path: Path, name: str,
         return None
     if size > LOCAL_HASH_MAX_BYTES:
         return _big_local_twin(cfg, store, path, name)
+
     def note(text):
         try:
             store.upsert_file(name, error=text)
         except Exception:  # noqa: BLE001 — cosmetic tier
             pass
-    sha = _identity_of(path, cfg.early_dedup_mb, note=note)["sha"]
+    ident = _identity_of(path, cfg.early_dedup_mb, note=note)
+    sha, csha = ident["sha"], ident.get("csha")
     told = False
     while True:
-        got = store.claim_inbox_content(sha, name)
+        got = store.claim_inbox_content(sha, name, csha)
         if got is None:
             claim["sha"] = sha
+            claim["csha"] = csha
             return None
         twin, status = got
         if status == "done":
@@ -1780,6 +1897,14 @@ def _record_duplicate(cfg: MrfxConfig, store: Store, path: Path, name: str,
         sha = (_IDENT_SEEN.get((str(path), st.st_size, st.st_mtime_ns)) or {}).get("sha")
     except OSError:
         pass
+    try:
+        twin_sha = (store.loaded_identity(twin) or {}).get("full_sha")
+    except Exception:  # noqa: BLE001
+        twin_sha = None
+    if sha and twin_sha and twin_sha != sha:
+        # the same CONTENT, other bytes (review 13 item 5.2.1)
+        msg = (f"the same content as {twin}, which is already loaded — the same document "
+               "compressed differently or saved decompressed; not loaded twice")
     drop = _twin_kept_in_processed(cfg, store, path, twin, sha, size)
     if drop:
         # the original is already kept in data/processed: a second copy of a
@@ -1880,17 +2005,10 @@ def same_name_verdict(cfg: MrfxConfig, store: Store, path: Path, name: str,
                         break
             except OSError:
                 continue
-        else:
-            # nothing to compare with: unchanged since that load finished
-            # (same size, not modified after it) is that file
-            fin = prior.get("finished_at")
-            try:
-                fin_ts = fin.replace(tzinfo=dt.timezone.utc).timestamp() if fin else None
-            except AttributeError:
-                fin_ts = None
-            if fin_ts and prior.get("size_bytes") == st.st_size and \
-                    st.st_mtime <= fin_ts and prior.get("status") == "done":
-                return "same", sha
+        # nothing to compare with (a file loaded before identities were kept,
+        # its copy gone): NOT "same" on size and age — a corrected file of the
+        # same size copied with an older date was silently ignored (review 13
+        # item 5.2.6). It falls through to the held choice below: one click.
     if prior.get("status") in ("processing", "queued"):
         return "replace", sha
     if pf is None:
@@ -1905,6 +2023,40 @@ def same_name_verdict(cfg: MrfxConfig, store: Store, path: Path, name: str,
     if not theirs[0] or not theirs[1] or mine == theirs:
         return "replace", sha
     return "new", sha
+
+
+def backfill_identities(cfg: MrfxConfig, store: Store, limit: int = 500) -> int:
+    """Files loaded before identities were kept (audit 8) whose copy is still
+    in data/processed: name them from their bytes now, so a later drop under
+    the name is compared by content, not guessed (review 13 item 5.2.6).
+    Best-effort, background, one file at a time; returns how many."""
+    n = 0
+    try:
+        with store.connect() as con:
+            rows = con.execute(
+                "SELECT f.filename, f.size_bytes FROM files f LEFT JOIN content_fingerprints c "
+                "USING (filename) WHERE f.status = 'done' AND (c.filename IS NULL OR "
+                "c.full_sha IS NULL) ORDER BY f.filename LIMIT ?", [limit]).fetchall()
+    except Exception:  # noqa: BLE001
+        return 0
+    for name, size in rows:
+        p = cfg.processed_dir / name
+        try:
+            if not p.exists() or (size and p.stat().st_size != size):
+                continue      # not the loaded bytes (or gone): leave it unnamed
+            ident = _identity_of(p, cfg.early_dedup_mb, keep=False)
+            from .fetch import trailer_proves_for
+            st = p.stat()
+            store.record_identity(name, st.st_size, st.st_mtime_ns, ident["sha"],
+                                  trailer_proves_for(p, ident.get("gz_members")),
+                                  ident.get("csha"), ident.get("csize"))
+            n += 1
+        except Exception:  # noqa: BLE001 — the next start tries again
+            continue
+    if n:
+        log.info("named %d file(s) loaded before identities were kept, from their copies "
+                 "in data/processed", n)
+    return n
 
 
 def unique_inbox_name(directory: Path, name: str, store: Store, tag: str) -> str:

@@ -683,11 +683,14 @@ Here's what moves the queue's total time, in order of impact:
    biofeedback and caregiver training. Trim it if you only care about a handful
    of codes and want smaller, faster ingests.
 
-   **Adding a code only affects files ingested afterwards.** That list is the
+   **Adding a code: read the loaded files again.** That list is the
    extraction filter, so a code that wasn't in it was never pulled out of the
-   files you already loaded — no later update recovers it. To pick up new codes
-   in files you already have, re-add those links (the app re-downloads and
-   re-extracts them).
+   files you already loaded. Since version 0.7.7 the app remembers which codes
+   each file was read for: after you add codes and restart, the **Files** tab
+   shows **Re-read N files for the new codes** — one click reads them again
+   (from the copy kept in `data/processed`, or by downloading the link again
+   when the copy is gone). Pasting a loaded link again does the same for that
+   one file.
 
    **Want proof the fast reader gives the same numbers?** The app reads big
    files with a fast scanner that skips every code you didn't ask for without

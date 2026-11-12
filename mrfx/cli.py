@@ -140,7 +140,9 @@ def _monthly_refresh_loop(cfg: MrfxConfig, store: Store, stop: threading.Event) 
 
     while not stop.is_set():
         try:
-            r = monthly_refresh_tick(cfg, store)
+            r = monthly_refresh_tick(
+                cfg, store, dated_sources=bool(getattr(cfg, "monthly_refresh", False)),
+                recheck=bool(getattr(cfg, "monthly_recheck", True)))
             if r.get("queued") or r.get("retried") or r.get("requeued_static"):
                 log.info("monthly refresh %s: %d dated source(s) queued, %d not-yet-"
                          "posted retried, %d index(es) re-fetched (only sources you "
@@ -270,6 +272,11 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
 
         threading.Thread(target=_catch_up,
                          name="mrfx-rollup-catchup", daemon=True).start()
+    # files loaded before identities were kept: named from their kept copies
+    # (review 13 item 5.2.6), off the start path
+    from .ingest import backfill_identities
+    threading.Thread(target=lambda: backfill_identities(cfg, store),
+                     name="mrfx-identity-backfill", daemon=True).start()
     threading.Thread(
         target=_watcher_loop, args=(cfg, store, stop), name="mrfx-watcher", daemon=True
     ).start()
@@ -280,7 +287,7 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
     # the inbox watcher AND the URL worker), refreshing the directory
     # progressively rather than only when everything finishes.
     start_persistent_enrichment(cfg, store, stop)
-    if getattr(cfg, "monthly_refresh", False):
+    if getattr(cfg, "monthly_refresh", False) or getattr(cfg, "monthly_recheck", True):
         threading.Thread(target=_monthly_refresh_loop, args=(cfg, store, stop),
                          name="mrfx-monthly-refresh", daemon=True).start()
     app = create_app(cfg, store)
@@ -713,8 +720,9 @@ def _print_code_coverage(cfg: MrfxConfig) -> None:
           f"codes{warn}")
     print(f"  {len(missing)} known code(s) are NOT being extracted; files are "
           "scanned only for the\n  list in codes.cpt_codes (config/mrfx.yaml). "
-          "Delete that whole list to collect\n  everything, then re-add links "
-          "to pick the new codes up in files you already have.")
+          "After adding codes, the Files tab's\n  'Re-read N files for the new codes' "
+          "button (or pasting a loaded link again)\n  reads the files already loaded "
+          "for them.")
 
 
 def _print_medicare_status(cfg: MrfxConfig, store: Store | None = None) -> None:

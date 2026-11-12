@@ -1013,6 +1013,13 @@ class Store:
         # link and an inbox copy of the same bytes can never both win. In
         # memory on purpose: a crash ends every load it could describe.
         self._inbox_claims: dict[str, str] = {}
+        # CONTENT sha (inflated) -> name of a file being loaded right now
+        # (review 13 item 5.2.1), beside the raw-byte claims above
+        self._content_claims: dict[str, str] = {}
+        # payer -> how many provider-reference files finished in THIS process
+        # (review 13 item 5.2.7): a rate file that started before its payer's
+        # list landed compares it at its end and is read again when it moved
+        self._refs_epoch: dict[str, int] = {}
         # url_queue ids THIS process set to 'ingesting' (a processor claim or a
         # won content claim). A row 'ingesting' that is not here was left by a
         # process that died: no load is running for it, so an inbox copy of
@@ -2376,6 +2383,11 @@ class Store:
             -- 0 = they do not (a multi-member gzip), NULL = not known
             -- (review 9 item 1.5). Only 1 lets a copy be skipped early.
             ALTER TABLE content_fingerprints ADD COLUMN IF NOT EXISTS trailer_proves INTEGER;
+            -- the CONTENT a parser reads (gzip inflated, the zip member read,
+            -- the BOM dropped) and its length: the same document under other
+            -- bytes is the same file (review 13 item 5.2.1)
+            ALTER TABLE content_fingerprints ADD COLUMN IF NOT EXISTS content_sha VARCHAR;
+            ALTER TABLE content_fingerprints ADD COLUMN IF NOT EXISTS content_size BIGINT;
             -- fingerprints of downloads IN FLIGHT, one per queue row. Kept
             -- apart from the loaded ones: a re-fetch of a file under its old
             -- name must never pass for the file already loaded (audit 8 F2)
@@ -2496,6 +2508,10 @@ class Store:
         # older parts are rewritten once at open (_migrate_row_rules) — plus
         # the file's month (header rule) and its published month (file name)
         con.execute("ALTER TABLE files ADD COLUMN IF NOT EXISTS row_rules INTEGER")
+        # the billing codes the file was read for ("ALL", or the sorted list
+        # joined by ","): after the user ADDS codes, the files read without
+        # them can be read again (review 13 item 5.2.4)
+        con.execute("ALTER TABLE files ADD COLUMN IF NOT EXISTS code_set VARCHAR")
         # the state a Medicare fee-schedule row prices (None: the file didn't say)
         con.execute("ALTER TABLE mpfs ADD COLUMN IF NOT EXISTS state VARCHAR")
         con.execute("ALTER TABLE files ADD COLUMN IF NOT EXISTS file_month VARCHAR")
@@ -2804,12 +2820,53 @@ class Store:
             retryable = (("failed", "oversize") if parent_id is not None
                          else ("failed", "skipped", "oversize"))
             revive = exists[1] in retryable
+            if revive and exists[1] == "skipped" and exists[2] == "duplicate":
+                # a known COPY pasted again: answered from what is loaded,
+                # without a byte (review 13 item 5.2 P2 — it downloaded the
+                # file, or 15 MB + 1.5 MB of ranges, to skip it again). The
+                # row's retry button still downloads it on purpose.
+                twin = con.execute(
+                    "SELECT coalesce(q.duplicate_of, t.filename, c.filename) FROM url_queue q "
+                    "LEFT JOIN files fd ON fd.filename = q.duplicate_of AND fd.status = 'done' "
+                    "LEFT JOIN url_queue t ON t.content_sha = q.content_sha AND t.id <> q.id "
+                    "     AND t.status = 'done' "
+                    "LEFT JOIN (SELECT c.filename, c.full_sha FROM content_fingerprints c "
+                    "           JOIN files f USING (filename) WHERE f.status = 'done') c "
+                    "     ON c.full_sha = q.content_sha "
+                    "WHERE q.id = ? AND (fd.filename IS NOT NULL OR t.id IS NOT NULL "
+                    "                    OR c.filename IS NOT NULL) LIMIT 1",
+                    [exists[0]]).fetchone()
+                if twin:
+                    con.execute(
+                        "UPDATE url_queue SET error = ? WHERE id = ?",
+                        [f"pasted again: still a copy of {str(twin[0]).split('?')[0]}, which is "
+                         "loaded — nothing downloaded (press retry to download it anyway)",
+                         exists[0]])
+                    return None
             if revive and exists[1] == "oversize" and parent_id is not None:
                 # a re-expansion revives an over-size child only when its
                 # known size now fits: it re-checked the size (and a chunked
                 # one downloaded up to the limit again) every month (review
                 # 11 item 2.9)
                 revive = bool(oversize_limit) and 0 < int(exists[3] or 0) <= oversize_limit
+            if not revive and exists[1] == "done" and parent_id is None \
+                    and exists[2] == "in_network" and self.current_code_set:
+                # a loaded rate link pasted again after the user ADDED billing
+                # codes: it is read again for them (review 13 item 5.2.4 — the
+                # guide promised this and it was "0 added, 1 already known")
+                had = con.execute(
+                    "SELECT f.code_set FROM url_queue q JOIN files f ON f.filename = q.filename "
+                    "WHERE q.id = ?", [exists[0]]).fetchone()
+                had = had[0] if had else None
+                cur = self.current_code_set
+                if had and had != "ALL" and had != cur and (
+                        cur == "ALL" or set(cur.split(",")) - set(had.split(","))):
+                    con.execute(
+                        "UPDATE url_queue SET url = ?, status = 'queued', revalidate = 2, "
+                        "error = 'reading it again: billing codes were added to your list "
+                        "since it was read', force_size = false, "
+                        f"{REQUEUE_RESET} WHERE id = ?", [url, exists[0]])
+                    return exists[0]
             if not revive and exists[1] == "done" and parent_id is None \
                     and exists[2] in ("toc", "page"):
                 # a pasted index / page again: it carries no rates (it anchors
@@ -3096,7 +3153,9 @@ class Store:
                  fp["tail_sha"], fp["win_sha"], fp["magic"]])
 
     def record_identity(self, filename: str, size: int, mtime_ns: int | None,
-                        full_sha: str | None, trailer_proves: int | None = None) -> None:
+                        full_sha: str | None, trailer_proves: int | None = None,
+                        content_sha: str | None = None,
+                        content_size: int | None = None) -> None:
         """What was loaded under `filename`: its size, the mtime it had when
         it was read, its full sha256 (None when not computed) and whether
         its last bytes vouch for its whole content (see the column)."""
@@ -3125,11 +3184,17 @@ class Store:
                         "as identical to the old content are queued again", filename, len(n))
             con.execute(
                 "INSERT INTO content_fingerprints (filename, size, recorded_at, "
-                "full_sha, mtime_ns, trailer_proves) VALUES (?, ?, current_timestamp, ?, ?, ?) "
+                "full_sha, mtime_ns, trailer_proves, content_sha, content_size) "
+                "VALUES (?, ?, current_timestamp, ?, ?, ?, ?, ?) "
                 "ON CONFLICT (filename) DO UPDATE SET full_sha = excluded.full_sha, "
                 "mtime_ns = excluded.mtime_ns, trailer_proves = excluded.trailer_proves, "
-                "size = excluded.size",
-                [filename, size, full_sha, mtime_ns, trailer_proves])
+                "size = excluded.size, content_sha = coalesce(excluded.content_sha, "
+                "CASE WHEN content_fingerprints.full_sha IS NOT DISTINCT FROM excluded.full_sha "
+                "THEN content_fingerprints.content_sha END), "
+                "content_size = coalesce(excluded.content_size, CASE WHEN "
+                "content_fingerprints.full_sha IS NOT DISTINCT FROM excluded.full_sha "
+                "THEN content_fingerprints.content_size END)",
+                [filename, size, full_sha, mtime_ns, trailer_proves, content_sha, content_size])
 
     def loaded_identity(self, filename: str) -> dict | None:
         with self.connect() as con:
@@ -3300,7 +3365,8 @@ class Store:
         return (row[0], row[1]) if row else None
 
     def claim_content_ingest(self, content_sha: str, url_id: int,
-                             kind: str | None, filename: str | None) -> tuple[str, str] | None:
+                             kind: str | None, filename: str | None,
+                             content_sha2: str | None = None) -> tuple[str, str] | None:
         """Atomically decide whether THIS row may ingest its content, done
         right before the ingest under the write lock so the twin-check and the
         status flip are ONE indivisible step.
@@ -3365,12 +3431,55 @@ class Store:
                         [msg, _utcnow(), twin_name, url_id])
                     con.execute("DELETE FROM inflight_fingerprints WHERE url_id = ?", [url_id])
                     return (twin_name, twin_status)
+            # the same CONTENT under other bytes (review 13 item 5.2.1)
+            same = self._same_content_locked(con, content_sha2, filename)
+            if same:
+                twin_name, twin_status = same
+                msg = (f"the same content as {twin_name}, which is already loaded — the "
+                       "same document compressed differently (or saved decompressed); "
+                       "skipped so it is not counted twice"
+                       if twin_status == "done" else
+                       f"the same content as {twin_name}, which is being loaded right now "
+                       "— will retry automatically from the kept download if that one fails")
+                con.execute(
+                    "UPDATE url_queue SET status = 'skipped', kind = 'duplicate', "
+                    "error = ?, finished_at = ?, duplicate_of = ? WHERE id = ?",
+                    [msg, _utcnow(), twin_name, url_id])
+                con.execute("DELETE FROM inflight_fingerprints WHERE url_id = ?", [url_id])
+                return (twin_name, twin_status)
             con.execute(
                 "UPDATE url_queue SET status = 'ingesting', kind = ?, filename = ? WHERE id = ?",
                 [kind, filename, url_id],
             )
             self._live_url_ingests.add(url_id)
+            if content_sha2:
+                self._content_claims[content_sha2] = filename or str(url_id)
         return None
+
+    def _same_content_locked(self, con, content_sha2: str | None,
+                             own_name: str | None) -> tuple[str, str] | None:
+        """Under write_lock: a LOADED file (or one being loaded now) whose
+        CONTENT — not its bytes — equals `content_sha2` (review 13 item 5.2.1)."""
+        if not content_sha2:
+            return None
+        row = con.execute(
+            "SELECT c.filename FROM content_fingerprints c JOIN files f "
+            "ON f.filename = c.filename WHERE c.content_sha = ? AND f.status = 'done' "
+            "AND c.filename IS DISTINCT FROM ? ORDER BY c.filename LIMIT 1",
+            [content_sha2, own_name]).fetchone()
+        if row:
+            return (row[0], "done")
+        claimant = self._content_claims.get(content_sha2)
+        if claimant and claimant != own_name:
+            return (claimant, "ingesting")
+        return None
+
+    def release_content_claim(self, content_sha2: str | None, name: str | None) -> None:
+        if not content_sha2:
+            return
+        with self.write_lock:
+            if self._content_claims.get(content_sha2) == name:
+                del self._content_claims[content_sha2]
 
     def _loaded_or_claimed_locked(self, con, content_sha: str,
                                   own_name: str | None) -> tuple[str, str] | None:
@@ -3389,7 +3498,8 @@ class Store:
             return (claimant, "ingesting")
         return None
 
-    def claim_inbox_content(self, content_sha: str, filename: str) -> tuple[str, str] | None:
+    def claim_inbox_content(self, content_sha: str, filename: str,
+                            content_sha2: str | None = None) -> tuple[str, str] | None:
         """The inbox twin of claim_content_ingest (review 11 item 1.1): may
         `filename` (no queue row — dropped in the inbox, uploaded, chosen on
         the Files tab) load these bytes? Under the SAME write_lock as the link
@@ -3415,7 +3525,12 @@ class Store:
             other = self._loaded_or_claimed_locked(con, content_sha, filename)
             if other:
                 return other
+            same = self._same_content_locked(con, content_sha2, filename)
+            if same:
+                return same
             self._inbox_claims[content_sha] = filename
+            if content_sha2:
+                self._content_claims[content_sha2] = filename
         return None
 
     def release_inbox_claim(self, content_sha: str | None, filename: str) -> None:
@@ -3640,6 +3755,16 @@ class Store:
                     "waiting_on = NULL, finished_at = ? WHERE id = ?",
                     [status, _utcnow(), url_id])
             return True
+
+    def note_unlisted_children(self, parent_id: int, keys: list[str], note: str) -> int:
+        """Loaded children of `parent_id` whose link the index no longer lists
+        get `note` on their row; returns how many."""
+        with self.write_lock, self.connect() as con:
+            got = con.execute(
+                "UPDATE url_queue SET error = ? WHERE parent_id = ? AND status = 'done' "
+                "AND dedup_key NOT IN (SELECT unnest(?::VARCHAR[])) RETURNING id",
+                [note, parent_id, list(keys)]).fetchall()
+        return len(got)
 
     def done_rate_rows(self, dedup_keys: list[str]) -> list[dict]:
         """Loaded rate / reference rows among these links (an index's children
@@ -5503,6 +5628,7 @@ class Store:
             "size_bytes", "rows_emitted", "ref_groups_skipped", "error",
             "preflight", "qa", "progress", "chunks_done", "chunks_total",
             "started_at", "finished_at", "row_rules", "file_month", "published_month",
+            "code_set",
         }
         fields = {k: v for k, v in fields.items() if k in cols}
         if fields.get("status") == "done":
@@ -5534,6 +5660,46 @@ class Store:
                     f"INSERT INTO files ({', '.join(keys)}) VALUES ({', '.join('?' for _ in keys)})",
                     [filename, *fields.values()],
                 )
+
+    # the active code list, as the files table records it (set by whoever
+    # holds the config: serve, the CLI, ingest_file) — None: not known
+    current_code_set: str | None = None
+
+    def stamp_code_sets(self, key: str) -> int:
+        """Files loaded before 0.7.7 carry no code list: they are taken to have
+        been read with the list configured the first time 0.7.7 runs (the only
+        honest default — it is the list the user had). Once per store."""
+        self.current_code_set = key
+        try:
+            with self.write_lock, self.connect() as con:
+                if self._meta_get(con, "code_set_baseline"):
+                    return 0
+                n = con.execute("UPDATE files SET code_set = ? WHERE code_set IS NULL "
+                                "AND status = 'done' RETURNING 1", [key]).fetchall()
+                con.execute("INSERT OR REPLACE INTO meta VALUES ('code_set_baseline', ?)", [key])
+                return len(n)
+        except Exception:  # noqa: BLE001 — bookkeeping never stops the open
+            return 0
+
+    def files_missing_codes(self, key: str | None = None) -> list[dict]:
+        """Done rate files read WITHOUT some code the active list now has:
+        [{filename, added}] (review 13 item 5.2.4). "ALL" covers everything."""
+        key = key or self.current_code_set
+        if not key:
+            return []
+        want = None if key == "ALL" else set(key.split(","))
+        out = []
+        with self.connect() as con:
+            for name, had in con.execute(
+                    "SELECT filename, code_set FROM files WHERE status = 'done' "
+                    "AND file_type = 'in_network' AND code_set IS NOT NULL "
+                    "AND code_set <> ? ORDER BY filename", [key]).fetchall():
+                if had == "ALL":
+                    continue
+                added = ["(every code)"] if want is None else sorted(want - set(had.split(",")))
+                if added:
+                    out.append({"filename": name, "added": added})
+        return out
 
     def file_status(self, filename: str) -> dict | None:
         with self.connect() as con:
@@ -5597,6 +5763,15 @@ class Store:
         with self.write_lock, self.connect() as con:
             con.execute("UPDATE provider_refs SET payer = ?, last_updated_on = ? "
                         "WHERE source_file = ?", [payer, last_updated_on, source_file])
+            # the list is complete from here on: bump BEFORE the caller asks
+            # which rate files wait for it (requeue_skipped), so a rate file
+            # finishing on either side of that query is read again
+            self._refs_epoch[payer] = self._refs_epoch.get(payer, 0) + 1
+
+    def refs_epochs(self) -> dict[str, int]:
+        """A copy of the per-payer provider-list counters (see __init__)."""
+        with self.write_lock:
+            return dict(self._refs_epoch)
 
     def clear_provider_refs(self, source_file: str) -> None:
         with self.write_lock, self.connect() as con:

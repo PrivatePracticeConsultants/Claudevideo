@@ -292,7 +292,7 @@ def _resolve_entity_key(con, key: str, units: str | None = None) -> str:
                    [key]).fetchone():
         return key
     keys = [r[0] for r in con.execute(
-        f"SELECT DISTINCT entity_key FROM ({_entity_keyed(_TIN_REL)}) "
+        f"SELECT DISTINCT entity_key FROM ({keyed}) "
         "WHERE display_name = ? AND entity_key <> tin_value ORDER BY 1", [key]).fetchall()]
     if len(keys) > 1:
         raise HTTPException(409, f"several practices are named {key!r}: "
@@ -1714,6 +1714,11 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return {"stopped": True}
     registry = Registry(cfg)
     sync_entity_map(cfg, store)
+    try:   # the code list loaded files are compared with (review 13 item 5.2.4)
+        from .ingest import code_set_key
+        store.stamp_code_sets(code_set_key(cfg))
+    except Exception:  # noqa: BLE001
+        log.debug("code list not stamped", exc_info=True)
     if cfg.mpfs_path and Path(cfg.mpfs_path).exists():
         try:
             _load_mpfs_csv(store, Path(cfg.mpfs_path).read_bytes(), str(cfg.mpfs_path))
@@ -2625,6 +2630,16 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 "SELECT * EXCLUDE (preflight) FROM files WHERE status = 'done' "
                 "ORDER BY coalesce(finished_at, started_at) DESC NULLS LAST, filename "
                 "LIMIT ? OFFSET ?", [limit, offset]))
+            # files loaded before identities were kept (review 13 item 5.2.6)
+            named = {r[0] for r in con.execute(
+                "SELECT filename FROM content_fingerprints WHERE full_sha IS NOT NULL "
+                "OR mtime_ns IS NOT NULL").fetchall()}
+        for r in rows:
+            if r.get("status") == "done" and r.get("filename") not in named:
+                r["identity_note"] = ("loaded before file identities were kept — a "
+                                      "same-size file dropped under this name cannot be "
+                                      "told apart from it, so you will be asked "
+                                      "(Replace or Keep both)")
         for r in rows:
             for k in ("started_at", "finished_at"):
                 if r.get(k) is not None:
@@ -2648,7 +2663,40 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 "rows_update": store.rows_update,
                 # where the analytics stand (review 13 items 1.2/1.3): the
                 # build's progress, or the sentence of a failed attempt
-                "analytics": _analytics_public()}
+                "analytics": _analytics_public(),
+                # loaded files read without billing codes the list now has
+                # (review 13 item 5.2.4): the Files tab offers to read them again
+                "reread": _reread_summary()}
+
+    def _reread_summary() -> dict:
+        try:
+            from .ingest import code_set_key
+            store.current_code_set = code_set_key(cfg)
+            rows = store.files_missing_codes()
+        except Exception:  # noqa: BLE001 — a note never fails the poll
+            return {"count": 0, "added": []}
+        added = sorted({c for r in rows for c in r["added"]})
+        return {"count": len(rows), "added": added[:20], "running": bool(reread_job.get("running"))}
+
+    reread_job: dict = {"running": False, "result": None}
+
+    @app.post("/api/files/reread")
+    def files_reread():
+        """Read again every loaded file that was read without billing codes the
+        list now has (review 13 item 5.2.4) — in the background, one file at a
+        time; links whose download is gone are downloaded again."""
+        from .ingest import reread_for_new_codes
+        if reread_job.get("running"):
+            raise HTTPException(409, "already re-reading files for the new codes")
+        reread_job.update(running=True, result=None)
+
+        def run():
+            try:
+                reread_job["result"] = reread_for_new_codes(cfg, store)
+            finally:
+                reread_job["running"] = False
+        threading.Thread(target=_bg_safe, args=(run,), name="mrfx-reread", daemon=True).start()
+        return {"started": True, "files": len(store.files_missing_codes())}
 
     @app.post("/api/files/scan")
     def files_scan():
@@ -2748,6 +2796,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return {"downloads": n, "small_file_downloads": small,
                 "small_file_mb": cfg.small_file_mb,
                 "early_dedup_mb": cfg.early_dedup_mb,
+                "monthly_recheck": bool(getattr(cfg, "monthly_recheck", True)),
                 "config_file": "config/mrfx.yaml"}
 
     @app.get("/api/known-sources")

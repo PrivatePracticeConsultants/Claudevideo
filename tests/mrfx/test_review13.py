@@ -406,6 +406,77 @@ def test_1_4_pooled_months_are_not_recounted_after_a_name_refresh(cfg, store):
 # ---------------------------------------------------------------- group 5
 
 
+def _rate_and_list(cfg, tmp_path):
+    from tests.mrfx.conftest import FIXTURES
+    rate = cfg.inbox_dir / "rates_a.json"
+    rate.write_bytes((FIXTURES / "innetwork_mixed.json").read_bytes())
+    elsewhere = tmp_path / "later"
+    elsewhere.mkdir()
+    comp = elsewhere / "companion.json"
+    comp.write_bytes((FIXTURES / "provider_reference_companion.json").read_bytes())
+    return rate, comp
+
+
+def test_5_2_7_a_list_finishing_during_the_rate_files_read_is_applied(
+        cfg, store, tmp_path, monkeypatch):
+    """5.2.7 (P0, found by the 0.7.6 zip's suite run): the provider list lands
+    WHILE its payer's rate file is being read (after the read loaded the
+    lists, before its done write) — the list's re-read pass saw the file not
+    yet done, and the file kept "rate groups skipped" for good. Forced
+    ordering, no sleeps. was: 4 rows (6 expected), 1 group skipped."""
+    import mrfx.ingest as I
+    rate, comp = _rate_and_list(cfg, tmp_path)
+    real = I._companion_refs
+    fired = {"n": 0}
+
+    def list_lands_now(store_, pf, name):
+        refs = real(store_, pf, name)
+        if name == rate.name and not fired["n"]:
+            fired["n"] += 1
+            assert I.ingest_file(cfg, store, comp)["status"] == "done"
+        return refs
+    monkeypatch.setattr(I, "_companion_refs", list_lands_now)
+    out = I.ingest_file(cfg, store, rate)
+    st = store.file_status(rate.name)
+    assert fired["n"] == 1
+    assert (out["rows"], st["rows_emitted"], st["ref_groups_skipped"]) == (6, 6, 0)
+
+
+def test_5_2_7_a_list_finishing_while_the_rate_file_is_still_claimed_is_applied(
+        cfg, store, tmp_path, monkeypatch):
+    """5.2.7: the list's re-read pass runs after the rate file is 'done' but
+    before it released its per-file claim — the pass's ingest_file bowed out
+    ("already being ingested by another worker"). was: 4 rows."""
+    import mrfx.ingest as I
+    rate, comp = _rate_and_list(cfg, tmp_path)
+    real = I._release_ingest
+    fired = {"n": 0}
+
+    def list_lands_before_release(name):
+        if name == rate.name and not fired["n"]:
+            fired["n"] += 1
+            assert I.ingest_file(cfg, store, comp)["status"] == "done"
+        return real(name)
+    monkeypatch.setattr(I, "_release_ingest", list_lands_before_release)
+    out = I.ingest_file(cfg, store, rate)
+    st = store.file_status(rate.name)
+    assert fired["n"] == 1
+    assert (out["rows"], st["rows_emitted"], st["ref_groups_skipped"]) == (6, 6, 0)
+
+
+def test_5_2_7_a_list_landing_first_or_last_still_works(cfg, store, tmp_path):
+    """5.2.7: the two orders that always worked keep working (list first: read
+    with it; list last: requeue_skipped re-reads the done file)."""
+    import mrfx.ingest as I
+    rate, comp = _rate_and_list(cfg, tmp_path)
+    assert I.ingest_file(cfg, store, rate)["rows"] == 4
+    assert I.ingest_file(cfg, store, comp)["status"] == "done"
+    assert store.file_status(rate.name)["rows_emitted"] == 6
+
+
+# ---------------------------------------------------------------- group 3
+
+
 class _SqlSpy:
     """Every statement run on a connection the store hands out."""
 
@@ -601,3 +672,200 @@ def test_4_3_the_three_small_wordings():
     assert "picked up in the instant before this click still" in js
 
 
+def _rd(**k):
+    from tests.mrfx.test_review11 import rate_doc
+    return rate_doc(**k)
+
+
+def _q(store, sql, *a):
+    with store.connect() as con:
+        return con.execute(sql, list(a)).fetchall()
+
+
+@pytest.mark.parametrize("pair", ["gz1_gz9", "json_gz", "decoded_copy"])
+def test_5_2_1_the_same_content_under_other_bytes_loads_once(cfg, store, pair):
+    """5.2.1 (P0, skip/s3_identity A1-A3): one document re-gzipped at another
+    level, as .json beside .json.gz, or saved decompressed — two identities,
+    both loaded. was: 2 files done, 120 rates for 60."""
+    import gzip
+    body = _rd(n=60)
+    a, b = {"gz1_gz9": (("a.json.gz", gzip.compress(body, 1, mtime=0)),
+                        ("b.json.gz", gzip.compress(body, 9, mtime=0))),
+            "json_gz": (("a.json", body), ("a2.json.gz", gzip.compress(body, mtime=0))),
+            "decoded_copy": (("a.json.gz", gzip.compress(body, mtime=0)),
+                             ("a (1).json", b"\xef\xbb\xbf" + body))}[pair]
+    for name, data in (a, b):
+        (cfg.inbox_dir / name).write_bytes(data)
+        scan_inbox(cfg, store)
+    st = dict(_q(store, "SELECT filename, status FROM files"))
+    assert sorted(st.values()) == ["done", "skipped"], st
+    assert _q(store, "SELECT count(*) FROM rates")[0][0] == 60
+    err = _q(store, "SELECT error FROM files WHERE status = 'skipped'")[0][0]
+    assert "the same content as" in err
+
+
+def test_5_2_1_a_link_and_a_decoded_inbox_copy_load_once(cfg, store):
+    """5.2.1 (s3 A4): the link's raw .gz is loaded, then the browser-decoded
+    copy of the same file is dropped in. was: both loaded (120 rates)."""
+    import gzip
+    from mrfx import fetch
+    from tests.mrfx.test_review11 import Srv, drain, ranged
+    cfg.enrichment.mode = "off"
+    body = _rd(n=60)
+    raw = gzip.compress(body, mtime=0)
+    s = Srv({})
+    try:
+        s.routes["/r.json.gz"] = lambda req: ranged(raw, req, etag='"v1"')
+        fetch.add_urls(store, [s.base + "/r.json.gz"])
+        drain(cfg, store)
+    finally:
+        s.close()
+    (cfg.inbox_dir / "r.json").write_bytes(body)
+    scan_inbox(cfg, store)
+    assert _q(store, "SELECT count(*) FROM rates")[0][0] == 60
+
+
+def test_5_2_2_a_new_size_behind_an_unchanged_tag_is_a_republication():
+    """5.2.2 (P0, skip/s6 C): new bytes and a new size behind an unchanged
+    ETag. was: _republished -> False ("unchanged"), the size never looked at."""
+    from mrfx.fetch import _republished, _unchanged_by
+    then = {"validator": '"v1"', "server_size": 1505}
+    assert _republished(then, {"validator": '"v1"', "total": 2174}) is True
+    assert _republished(then, {"validator": '"v1"', "total": 1505}) is False
+    assert _republished(then, {"validator": None, "total": None}) is None
+    assert "size only" in _unchanged_by({"server_size": 5}, {"total": 5})
+    assert "version tag and the same size" in _unchanged_by(then, {"validator": '"v1"', "total": 1505})
+
+
+def test_5_2_3_a_file_over_4_gb_is_named_by_its_bytes(monkeypatch):
+    """5.2.3 (P1): above LOCAL_HASH_MAX_BYTES (4 GB) an inbox file kept size
+    + mtime only, so twins of national files loaded twice. was: 4294967296."""
+    from mrfx.identity import LOCAL_HASH_MAX_BYTES
+    assert LOCAL_HASH_MAX_BYTES > 1 << 50
+
+
+def test_5_2_4_adding_codes_offers_to_read_the_loaded_files_again(cfg, store):
+    """5.2.4 (P1, skip/s9_zero): after codes were added nothing re-read the
+    loaded files and the guide's advice ("re-add those links") did nothing.
+    was: no code list per file; no re-read; the CLI and guide said re-add."""
+    from pathlib import Path
+    from mrfx.ingest import code_set_key, reread_for_new_codes
+    cfg.codes.cpt_codes = ["97112"]                 # 97110 not wanted yet
+    (cfg.inbox_dir / "r.json").write_bytes(_rd(n=10))
+    scan_inbox(cfg, store)
+    assert _q(store, "SELECT rows_emitted, code_set FROM files")[0] == (0, "97112")
+    cfg.codes.cpt_codes = ["97110", "97112"]        # the user adds 97110
+    store.current_code_set = code_set_key(cfg)
+    miss = store.files_missing_codes()
+    assert [m["added"] for m in miss] == [["97110"]]
+    c = TestClient(create_app(cfg, store))
+    assert c.get("/api/files").json()["reread"]["count"] == 1
+    out = reread_for_new_codes(cfg, store)
+    assert out["reread"] == ["r.json"]
+    assert _q(store, "SELECT rows_emitted FROM files")[0][0] == 10
+    assert store.files_missing_codes() == []
+    root = Path(__file__).resolve().parents[2]
+    assert "re-add those links (the app re-downloads" not in (root / "GETTING_STARTED.md").read_text()
+    assert "re-add links to pick" not in (root / "mrfx" / "cli.py").read_text()
+
+
+def test_5_2_5_every_loaded_index_is_rechecked_monthly(cfg, store):
+    """5.2.5 (P1, skip/s10_known): a user-pasted static index outside the
+    catalog was never re-checked. was: requeued_static 0."""
+    import datetime as dt
+    from mrfx.fetch import monthly_refresh_tick
+    assert cfg.monthly_recheck is True
+    with store.write_lock, store.connect() as con:
+        con.execute("INSERT INTO url_queue (id, url, dedup_key, kind, status, parent_id, "
+                    "added_at) VALUES (1, 'https://p.example/idx.json', "
+                    "'https://p.example/idx.json', 'toc', 'done', NULL, current_timestamp)")
+    r = monthly_refresh_tick(cfg, store, dt.date(2026, 12, 1))
+    assert r["requeued_static"] == 1
+    assert _q(store, "SELECT status, revalidate FROM url_queue")[0] == ("queued", 1)
+
+
+def test_5_2_6_a_legacy_file_is_never_same_on_size_and_age(cfg, store):
+    """5.2.6 (P1, skip/s5 D): a file loaded before identities were kept, its
+    copy gone; a corrected same-size file with an OLDER mtime was silently
+    'same'. was: ('same', …)."""
+    import os
+    from mrfx.ingest import same_name_verdict
+    p = cfg.inbox_dir / "r.json"
+    p.write_bytes(_rd(rate=40.0, n=10))
+    scan_inbox(cfg, store)
+    with store.connect() as con:                    # what a pre-audit-8 load left
+        con.execute("DELETE FROM content_fingerprints")
+    for f in cfg.processed_dir.glob("*"):
+        f.unlink()
+    newer = _rd(rate=41.0, n=10)
+    assert len(newer) == len(_rd(rate=40.0, n=10))
+    p.write_bytes(newer)
+    os.utime(p, (1_000_000_000, 1_000_000_000))      # cp -p from an old backup
+    prior = store.file_status("r.json")
+    assert same_name_verdict(cfg, store, p, "r.json", prior)[0] != "same"
+    c = TestClient(create_app(cfg, store))
+    row = [f for f in c.get("/api/files").json()["files"] if f["filename"] == "r.json"][0]
+    assert "before file identities were kept" in row["identity_note"]
+
+
+def test_5_2_p2_signed_links_and_file_ids_by_the_right_rule():
+    """5.2 P2 (skip/s1_dedupkey): GCS V4, Akamai __token__ and a lone JWT
+    token kept every link unique; a long ?token=<file id>&sig= collapsed two
+    files. was: 3 distinct keys for one GCS file; the two ids one key."""
+    from mrfx.fetch import dedup_key as d
+    g = "https://storage.googleapis.com/b/f.json.gz?X-Goog-Algorithm=GOOG4-RSA-SHA256" \
+        "&X-Goog-Credential=a%2F1&X-Goog-Date=20261101T000000Z&X-Goog-Expires=900" \
+        "&X-Goog-SignedHeaders=host&X-Goog-Signature="
+    assert d(g + "aa") == d(g + "bb") == "https://storage.googleapis.com/b/f.json.gz"
+    assert d("https://a.net/f.json?__token__=exp=1~hmac=ab") == "https://a.net/f.json"
+    assert d("https://a.net/f.json?token=eyJhbGc.eyJzdWI.Sfl") == "https://a.net/f.json"
+    assert d("https://p.com/dl?token=fileAAAAAAAAAAAAAAAAAAA&sig=x") != \
+        d("https://p.com/dl?token=fileBBBBBBBBBBBBBBBBBBB&sig=y")
+
+
+def test_5_2_p2_a_known_copy_pasted_again_costs_nothing(cfg, store):
+    """5.2 P2 (skip/s7 A): re-pasting a skipped/duplicate link downloaded it
+    again to skip it again. was: the row was queued (1 more download)."""
+    from mrfx import fetch
+    with store.write_lock, store.connect() as con:
+        con.execute("INSERT INTO files (filename, status, rows_emitted) VALUES ('orig.json', 'done', 5)")
+        con.execute("INSERT INTO url_queue (id, url, dedup_key, kind, status, duplicate_of, "
+                    "added_at) VALUES (1, 'https://x.example/c.json', 'https://x.example/c.json', "
+                    "'duplicate', 'skipped', 'orig.json', current_timestamp)")
+    r = fetch.add_urls(store, ["https://x.example/c.json"])
+    assert r["added"] == 0
+    st, err = _q(store, "SELECT status, error FROM url_queue WHERE id = 1")[0]
+    assert st == "skipped" and "still a copy of orig.json" in err
+
+
+def test_5_2_p2_listing_names_match_whole_words_and_are_said(tmp_path):
+    """5.2 P2 (skip/s8_sniff): "Hallowed-Health", "Allowed-Benefits-TPA" and
+    "NDC-Corp" in-network files were dropped by name, log-only. was: 3 of the
+    real rate files missing."""
+    from mrfx.fetch import expand_blobs_listing
+    names = ["2026-11-01_Acme_in-network-rates.json.gz",
+             "2026-11-01_Hallowed-Health_in-network-rates.json.gz",
+             "2026-11-01_Allowed-Benefits-TPA_in-network-rates.json.gz",
+             "2026-11-01_Acme_allowed-amounts.json.gz",
+             "2026-11-01_Acme-NDC_in-network-rates.json.gz",
+             "2026-11-01_NDC-Corp_in-network-rates.json.gz"]
+    p = tmp_path / "l.json"
+    p.write_text(json.dumps({"blobs": [{"name": n, "downloadUrl": f"https://x/{i}.json.gz"}
+                                       for i, n in enumerate(names)]}))
+    ex: dict = {}
+    urls, _t = expand_blobs_listing(p, 100, excluded_out=ex)
+    assert sorted(urls) == ["https://x/0.json.gz", "https://x/1.json.gz",
+                            "https://x/2.json.gz", "https://x/5.json.gz"]
+    assert ex == {"allowed-amounts": 1, "drug-pricing": 1}
+
+
+def test_5_2_p2_a_child_the_index_no_longer_lists_says_so(cfg, store):
+    """5.2 P2 (skip/s6 D): nothing said what the payer stopped publishing.
+    was: no note on the row."""
+    with store.write_lock, store.connect() as con:
+        for i, k in ((2, "https://x/a.json"), (3, "https://x/b.json")):
+            con.execute("INSERT INTO url_queue (id, url, dedup_key, kind, status, parent_id, "
+                        "added_at) VALUES (?, ?, ?, 'in_network', 'done', 1, current_timestamp)",
+                        [i, k, k])
+    assert store.note_unlisted_children(1, ["https://x/a.json"], "no longer listed") == 1
+    assert _q(store, "SELECT id FROM url_queue WHERE error = 'no longer listed'") == [(3,)]

@@ -57,7 +57,8 @@ _VOLATILE_IF_SIGNED = re.compile(
     re.I,
 )
 _SIGNATURE_MARKERS = re.compile(
-    r"^(sig|signature|x-amz-signature|x-amz-credential|awsaccesskeyid|key-pair-id)$", re.I)
+    r"^(sig|signature|x-amz-signature|x-amz-credential|awsaccesskeyid|key-pair-id"
+    r"|x-goog-signature|x-goog-credential|__token__)$", re.I)
 # the S3 SigV4 query params themselves; any OTHER x-amz-* (x-amz-meta-file=2)
 # can name the file (review 11 item 2.10)
 _AMZ_SIGNING = re.compile(
@@ -67,16 +68,32 @@ _AMZ_SIGNING = re.compile(
 # (?token=<file-id>, ?st=NY, ?policy=A): stripped only when the VALUE looks
 # like a signature part — long, a JWT, or a timestamp (review 11 item 2.10)
 _AMBIGUOUS = re.compile(r"^(token|st|policy)$", re.I)
+# Google Cloud Storage V4 signed URLs and Akamai token auth (review 13 item
+# 5.2 P2: never stripped — every re-paste or monthly re-expansion of such an
+# index made a new row per child and downloaded it again)
+_GCS_SIGNING = re.compile(
+    r"^x-goog-(algorithm|credential|date|expires|signedheaders|signature)$", re.I)
+_JWT = re.compile(r"^eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*$")
 
 
 def _looks_signed_value(v: str) -> bool:
+    """A value that is a signature PART, not a file's own id: a JWT, a
+    date, an epoch, a base64/percent-encoded blob, or a long hex digest. A
+    plain id of 20+ letters/digits (`?token=<file-id>`) is NOT — two files
+    listed as ?token=<their ids>&sig=… were collapsed to one key and the
+    second reported "already known" (review 13 item 5.2 P2)."""
     v = unquote(v)
-    return (len(v) >= 20 or v.count(".") >= 2
-            or bool(re.match(r"^\d{4}-\d{2}-\d{2}", v)) or bool(re.match(r"^\d{9,}$", v)))
+    return (bool(_JWT.match(v)) or v.count(".") >= 2
+            or bool(re.match(r"^\d{4}-\d{2}-\d{2}", v)) or bool(re.match(r"^\d{9,}$", v))
+            or bool(re.search(r"[%=+/]", v)) or bool(re.fullmatch(r"[0-9a-fA-F]{40,}", v)))
 
 
 def _volatile(k: str, v: str, signed: bool) -> bool:
+    if _GCS_SIGNING.match(k) or k.lower() == "__token__":
+        return True
     if _AMBIGUOUS.match(k):
+        if k.lower() == "token" and _JWT.match(unquote(v)):
+            return True            # a lone JWT token is a credential, never an id
         if k.lower() == "policy" or signed:
             return _looks_signed_value(v)
         return False
@@ -1613,10 +1630,19 @@ def expand_toc(path: Path, max_files: int, base_url: str = "") -> tuple[list[str
 # drug-pricing rate files, named unambiguously in UHC/Optum listings
 # ("...PPO-NDC_in-network-rates...", "..._prescription-drugs.json.gz").
 # Bounded-token match so an employer literally named "NDC Corp" isn't caught.
-_DRUG_FILE_RE = re.compile(r"(^|[-_])ndc([-_.]|$)|prescription-drug", re.I)
+# Names that say "no medical rates in here", matched as whole tokens (review
+# 13 item 5.2 P2: `"allowed" in name` dropped "Hallowed-Health" and
+# "Allowed-Benefits-TPA", and the NDC token dropped "NDC-Corp"): an
+# allowed-amounts file names itself so; a drug-pricing in-network file carries
+# NDC right next to its in-network / file-type part, or "prescription-drug".
+_ALLOWED_FILE_RE = re.compile(r"(^|[-_ .])allowed[-_ ]?amounts?([-_ .]|$)", re.I)
+_DRUG_FILE_RE = re.compile(
+    r"(^|[-_])ndc[-_]in-network|in-network[-_a-z]*[-_]ndc([-_.]|$)|(^|[-_])ndc\.json"
+    r"|prescription-drug", re.I)
 
 
-def expand_blobs_listing(path: Path, max_files: int, base_url: str = "") -> tuple[list[str], bool]:
+def expand_blobs_listing(path: Path, max_files: int, base_url: str = "",
+                         excluded_out: dict | None = None) -> tuple[list[str], bool]:
     """Expand a transparency-portal blobs listing ({"blobs": [{"name",
     "downloadUrl"}, ...]} — UHC / Optum style). Rate files first: the UHC
     listing carries ~7k in-network files, ~67k per-employer index files that
@@ -1643,7 +1669,7 @@ def expand_blobs_listing(path: Path, max_files: int, base_url: str = "") -> tupl
             if not loc.lower().startswith(("http://", "https://")):
                 continue
             low = name.lower()
-            if "allowed" in low:
+            if _ALLOWED_FILE_RE.search(low):
                 excluded["allowed-amounts"] += 1
                 continue  # out-of-network billed averages — no negotiated rates
             is_rate_file = "in-network" in low
@@ -1667,6 +1693,8 @@ def expand_blobs_listing(path: Path, max_files: int, base_url: str = "") -> tupl
     if any(excluded.values()):
         log.info("listing: excluded %d allowed-amounts and %d drug-pricing entries (no medical rates)",
                  excluded["allowed-amounts"], excluded["drug-pricing"])
+    if excluded_out is not None:
+        excluded_out.update(excluded)
     return out, truncated
 
 
@@ -1953,7 +1981,8 @@ def _maybe_queue_prev_month(store: Store, rec: dict, err: str) -> None:
 NOT_POSTED_GRACE_DAYS = 10   # payers post monthly files during the first ~week
 
 
-def monthly_refresh_tick(cfg: MrfxConfig, store: Store, today=None) -> dict:
+def monthly_refresh_tick(cfg: MrfxConfig, store: Store, today=None,
+                         dated_sources: bool = True, recheck: bool = True) -> dict:
     """One pass of the OPT-IN monthly refresh (cli._monthly_refresh_loop
     calls it hourly). Returns what it did; idempotent within a month.
 
@@ -1994,6 +2023,25 @@ def monthly_refresh_tick(cfg: MrfxConfig, store: Store, today=None) -> dict:
                 dated.append(s["url"])
         elif s["url"] in done_urls:
             static.append(s["url"])
+    # every OTHER index / page the user pasted and loaded is asked about once a
+    # month too (review 13 item 5.2.5: only catalog sources were, so a
+    # user-pasted static index was never re-checked). Re-fetching an index
+    # costs its own bytes plus ONE 1-byte probe per loaded child.
+    catalog = {s.get("url") for s in sources}
+    with store.connect() as con:
+        pasted = [r[0] for r in con.execute(
+            "SELECT url FROM url_queue WHERE parent_id IS NULL AND status = 'done' "
+            "AND kind IN ('toc', 'page') ORDER BY id").fetchall()]
+    for u in pasted:
+        if u not in catalog and u not in static and not any(
+                _re.fullmatch(_re.escape(s.get("url_template") or "").replace(
+                    _re.escape("{FIRST_OF_MONTH}"), r"\d{4}-\d{2}-01"), u or "")
+                for s in sources if "{FIRST_OF_MONTH}" in (s.get("url_template") or "")):
+            static.append(u)
+    if not dated_sources:
+        dated = []                 # new dated months: opt-in (monthly_refresh)
+    if not recheck:
+        static = []                # re-checking loaded indexes (monthly_recheck)
     out = {"month": month, "dated": len(dated), "static": len(static),
            "queued": 0, "retried": 0, "requeued_static": 0}
     by_url = {r[1]: r for r in top}
@@ -2183,7 +2231,10 @@ def _zip_cd_in_tail(tail: bytes, size: int) -> bool:
 def _remember_identity(dest: Path, hasher, server: dict | None = None) -> None:
     try:
         gz = hasher.gz_members(dest)
+        csha, csize = (hasher.content_identity(dest)
+                       if hasattr(hasher, "content_identity") else (None, None))
         DOWNLOAD_IDENTITY[str(dest)] = {"sha": hasher.hexdigest(),
+                                        "csha": csha, "csize": csize,
                                         "trailer_proves": trailer_proves_for(dest, gz),
                                         "validator": (server or {}).get("validator") or None,
                                         "server_size": (server or {}).get("total") or None}
@@ -2319,7 +2370,9 @@ def file_identity(path: Path, head_mb: int, progress=None) -> dict:
         fp = {"size": size, "head_bytes": head_n, "head_sha": head_h.hexdigest(),
               "tail_bytes": tail_n, "tail_sha": tail_h.hexdigest(),
               "win_sha": wh.hexdigest(), "magic": _magic(first)}
-    return {"sha": full.hexdigest(), "gz_members": full.gz_members(path), "fp": fp}
+    csha, csize = full.content_identity(path)
+    return {"sha": full.hexdigest(), "gz_members": full.gz_members(path), "fp": fp,
+            "csha": csha, "csize": csize}
 
 
 def _range_bytes(client, url: str, start: int, n: int, total: int) -> bytes | None:
@@ -2612,18 +2665,45 @@ def _server_now(cfg: MrfxConfig, url: str) -> dict | None:
     return None
 
 
+def _utcnow_date() -> str:
+    import datetime as _dt
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
+
+
 def _republished(then: dict, now: dict | None) -> bool | None:
-    """True: the server now serves a different file; False: the same one (a
-    validator, or failing that the size, agrees); None: it can't be told."""
+    """True: the server now serves a different file; False: the same one;
+    None: it can't be told. EVERY signal the probe gives is compared and any
+    disagreement is a republication (review 13 item 5.2.2: new bytes AND a new
+    size behind an UNCHANGED ETag were "unchanged" — the validator answered
+    first and the size was never looked at)."""
     if not now:
         return None
     tv, nv = then.get("validator"), now.get("validator")
-    if tv and nv:
-        return tv != nv
     ts, ns = then.get("server_size") or then.get("total"), now.get("total")
+    compared = False
+    if tv and nv:
+        if tv != nv:
+            return True
+        compared = True
     if ts and ns:
-        return int(ts) != int(ns)
-    return None
+        if int(ts) != int(ns):
+            return True
+        compared = True
+    return False if compared else None
+
+
+def _unchanged_by(then: dict, now: dict | None) -> str:
+    """Which evidence said "unchanged", in words (the row says it)."""
+    now = now or {}
+    v = bool(then.get("validator") and now.get("validator"))
+    s = bool((then.get("server_size") or then.get("total")) and now.get("total"))
+    if v and s:
+        return "the same version tag and the same size"
+    if v:
+        return "the same version tag (the server did not state a size)"
+    return ("the same size only — the server sends no version tag, so a change "
+            "inside the file at the same size cannot be seen this way; paste the "
+            "link again to force a fresh copy")
 
 
 def _record_download_fingerprint(cfg: MrfxConfig, store: Store, dest: Path,
@@ -2668,7 +2748,8 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict, lane_max: int = 0
             km = _kept_meta(dest, url) or {}
             then = {"validator": km.get("validator") or then["validator"],
                     "server_size": km.get("server_size") or then["server_size"]}
-        changed = _republished(then, _server_now(cfg, url))
+        now_srv = _server_now(cfg, url)
+        changed = _republished(then, now_srv)
         store.update_url(url_id, revalidate=0)
         if changed:
             log.info("url %s: the payer republished this file — downloading the new "
@@ -2678,8 +2759,8 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict, lane_max: int = 0
         elif changed is False and reval == 1 and \
                 (store.file_status(dest.name) or {}).get("status") == "done":
             store.update_url(url_id, status="done", error=(
-                "checked again: the payer still publishes the same file — already "
-                "loaded, nothing downloaded"))
+                f"checked {_utcnow_date()}: unchanged by {_unchanged_by(then, now_srv)} — "
+                "already loaded, nothing downloaded"))
             log.info("url %s: unchanged since it was loaded", url)
             return False
     if dest.exists():
@@ -2916,7 +2997,7 @@ def _refresh_loaded_children(cfg: MrfxConfig, store: Store, urls: list[str],
     if skipped_late:
         log.info("index re-check: %d loaded file(s) not asked within %d s — they are asked "
                  "again at the next refresh", skipped_late, int(RECHECK_BUDGET_S))
-    changed, unknown = [], []
+    changed, unknown, notes = [], [], []
     for r, now in zip(rows, nows):
         then_size = r["server_size"] or r.get("loaded_size")
         verdict = _republished({"validator": r["server_validator"],
@@ -2928,13 +3009,29 @@ def _refresh_loaded_children(cfg: MrfxConfig, store: Store, urls: list[str],
         # 1.4: a 0.7.4-loaded child behind such a server stayed at its old
         # month with no note; 0.7.5 re-downloaded it)
         told_nothing = now is not None and not now.get("validator") and not now.get("total")
+        then_d = {"validator": r["server_validator"], "server_size": then_size}
         if verdict:
             changed.append(r["id"])
         elif verdict is None and parent_reval == 1 and now is not None \
                 and (told_nothing or (not r["server_validator"] and not then_size)):
             unknown.append(r["id"])
+        elif verdict is False:
+            # every probed child says when it was last checked and on what
+            # evidence (review 13 item 5.2.2 / P3: nothing was written)
+            notes.append((r["id"], f"checked {_utcnow_date()}: unchanged by "
+                                   f"{_unchanged_by(then_d, now)}"))
+        else:
+            notes.append((r["id"], f"checked {_utcnow_date()}: could not tell whether the "
+                                   "payer changed this file (its server did not answer the "
+                                   "check) — asked again at the next refresh; paste the "
+                                   "link again to force a fresh copy"))
     if parent_id is not None and store.url_status(parent_id) != "expanding":
         return None
+    for uid, note in notes:
+        try:
+            store.update_url(uid, only_if_status="done", error=note)
+        except Exception:  # noqa: BLE001 — a note never stops the re-check
+            pass
     for r in rows:
         if r["id"] in changed or r["id"] in unknown:
             # a kept raw copy is the OLD version: never reuse it
@@ -3107,12 +3204,13 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
         try:
             # relative locations resolve against where the index actually came
             # from (post-redirect), not the possibly-redirected pasted URL
+            excluded: dict = {}
             if pf.file_type == "toc":
                 child_urls, truncated, plan_rows = expand_toc_with_plans(
                     dest, cfg.max_toc_files, base_url=final_url)
             else:
                 child_urls, truncated = expand_blobs_listing(
-                    dest, cfg.max_toc_files, base_url=final_url)
+                    dest, cfg.max_toc_files, base_url=final_url, excluded_out=excluded)
         except Exception as e:  # noqa: BLE001
             store.update_url(url_id, status="failed", kind="toc", error=f"index parse failed: {e}")
             unlink_with_retry(dest)
@@ -3140,6 +3238,16 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
             unlink_with_retry(_meta_path(dest))
             return False
         added += rechecked
+        # a loaded file the index no longer lists says so on its row (review
+        # 13 item 5.2 P2: nothing told the user what the payer stopped
+        # publishing). Its loaded months stay — they were published.
+        try:
+            store.note_unlisted_children(
+                url_id, [dedup_key(u) for u in child_urls],
+                f"no longer listed in its index (checked {_utcnow_date()}) — the months "
+                "already loaded from it stay")
+        except Exception:  # noqa: BLE001 — a note never costs the expansion
+            log.debug("unlisted-children note skipped", exc_info=True)
         # which PLANS each queued file serves — the dimension that stops a
         # payer's narrow-network and broad-PPO books blending into one median.
         # Cosmetic-tier: a failure here must never cost the expansion.
@@ -3175,8 +3283,18 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
             # inside" read as an empty index (round 7 P1.6)
             # only while still 'expanding': a "Clear queue" pressed at any
             # point of the expansion keeps the user's status (review 12 1.5)
+            # what the listing left out BY NAME is said on its row (review 13
+            # item 5.2 P2: it was one log line)
+            left = []
+            if excluded.get("allowed-amounts"):
+                left.append(f"{excluded['allowed-amounts']:,} allowed-amounts file(s)")
+            if excluded.get("drug-pricing"):
+                left.append(f"{excluded['drug-pricing']:,} drug-pricing (NDC) file(s)")
+            notes = [cap_note(cfg.max_toc_files)] if truncated else []
+            if left:
+                notes.append("left out by their names (no medical rates): " + " and ".join(left))
             store.update_url(url_id, status="done", kind="toc", child_count=len(child_urls),
-                             error=cap_note(cfg.max_toc_files) if truncated else None,
+                             error="; ".join(notes) or None,
                              revalidate=0, only_if_status="expanding")
         unlink_with_retry(dest)  # the index itself carries no rates
         unlink_with_retry(_meta_path(dest))  # its sidecar too (review 11 2.15)
@@ -3284,7 +3402,17 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
     # same locked step (a caller-side flip would let two racing twins mutually
     # defer and both end skipped with nobody ingesting) — only the bytes are
     # handled here.
-    twin2 = store.claim_content_ingest(content_sha, url_id, pf.file_type, dest.name)
+    # the CONTENT identity too (review 13 item 5.2.1): the same document under
+    # other bytes (another gzip level, a decoded copy, .json vs .json.gz)
+    ident2 = DOWNLOAD_IDENTITY.get(str(dest)) or {}
+    csha = ident2.get("csha")
+    if csha is None and pf.file_type in ("in_network", "provider_reference"):
+        from .identity import content_digest
+        csha, csize = content_digest(dest)
+        if csha and str(dest) in DOWNLOAD_IDENTITY:
+            DOWNLOAD_IDENTITY[str(dest)].update(csha=csha, csize=csize)
+    twin2 = store.claim_content_ingest(content_sha, url_id, pf.file_type, dest.name,
+                                       content_sha2=csha)
     if twin2:
         twin2_url, twin2_status = twin2
         if twin2_status == "done":
