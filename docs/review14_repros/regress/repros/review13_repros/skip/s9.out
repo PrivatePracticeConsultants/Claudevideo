@@ -1,0 +1,44 @@
+-- loaded with codes=[97110]; the file holds 97140 only
+   urls: [{'id': 1, 'status': 'done', 'kind': 'toc', 'rows_emitted': 0, 'error': None}, {'id': 2, 'status': 'done', 'kind': 'in_network', 'rows_emitted': 0, 'error': None}]
+   files: [('aacf2e42_r.json.gz', 'done', 0, '["scanned: none of the target billing codes appear in this file — 0 rows is the ')]
+   fingerprints: [('aacf2e42_r.json.gz', True)]
+   rates: 0
+>>> the user adds 97140 to codes.cpt_codes
+   re-paste the child link: {'added': 0, 'skipped': 1, 'invalid': 0}
+   requests: 0
+   re-paste the index: {'added': 1, 'skipped': 0, 'invalid': 0}
+   requests: [('/index.json', 200), ('/r.json.gz', 206)]
+-- after re-pasting link and index (server unchanged)
+   urls: [{'id': 1, 'status': 'done', 'kind': 'toc', 'rows_emitted': 0, 'error': None}, {'id': 2, 'status': 'done', 'kind': 'in_network', 'rows_emitted': 0, 'error': None}]
+   files: [('aacf2e42_r.json.gz', 'done', 0, '["scanned: none of the target billing codes appear in this file — 0 rows is the ')]
+   fingerprints: [('aacf2e42_r.json.gz', True)]
+   rates: 0
+   monthly refresh (requeue_urls index, revalidate=1): 1
+   requests: [('/index.json', 200), ('/r.json.gz', 206)]
+-- after the monthly refresh (server unchanged)
+   urls: [{'id': 1, 'status': 'done', 'kind': 'toc', 'rows_emitted': 0, 'error': None}, {'id': 2, 'status': 'done', 'kind': 'in_network', 'rows_emitted': 0, 'error': None}]
+   files: [('aacf2e42_r.json.gz', 'done', 0, '["scanned: none of the target billing codes appear in this file — 0 rows is the ')]
+   fingerprints: [('aacf2e42_r.json.gz', True)]
+   rates: 0
+   forget_file: {'rows': 0, 'bytes': 0}
+   re-paste child: {'added': 1, 'skipped': 0, 'invalid': 0}
+-- after forget + re-paste
+   urls: [{'id': 1, 'status': 'done', 'kind': 'toc', 'rows_emitted': 0, 'error': None}, {'id': 2, 'status': 'done', 'kind': 'in_network', 'rows_emitted': 100, 'error': None}]
+   files: [('aacf2e42_r.json.gz', 'done', 100, None)]
+   fingerprints: [('aacf2e42_r.json.gz', True)]
+   rates: 100
+-- INBOX: loaded with codes=[97110]
+   urls: []
+   files: [('acme.json.gz', 'done', 0, '["scanned: none of the target billing codes appear in this file — 0 rows is the ')]
+   fingerprints: [('acme.json.gz', True)]
+   rates: 0
+-- INBOX: codes gained 97140, same file re-dropped (plain scan)
+   urls: []
+   files: [('acme.json.gz', 'done', 0, '["scanned: none of the target billing codes appear in this file — 0 rows is the ')]
+   fingerprints: [('acme.json.gz', True)]
+   rates: 0
+-- INBOX: re-dropped + scan force=True (mrfx ingest --force)
+   urls: []
+   files: [('acme.json.gz', 'done', 100, None)]
+   fingerprints: [('acme.json.gz', True)]
+   rates: 100

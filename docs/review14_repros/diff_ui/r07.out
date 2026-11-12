@@ -1,0 +1,6 @@
+logo image objects in PDF: 1 | MediaBox: [b'0 0 792 612']
+two prints of the same HTML: len 15074 15074 | differing bytes: 2
+   first difference near: b"PDF m153)\n/CreationDate (D:20261112082732+00'00')\n/ModDate (D:20261112"
+40k-row report: 2.7 MB HTML -> 1.4 MB PDF in 20.4 s
+two concurrent PDFs: wall 2.2 s; each ended at {'a': 1.2, 'b': 2.2}
+no Chromium: PdfUnavailable: PDF printing needs the optional built-in browser, which is not available on this computer (BrowserType.launch: Executable doesn't exist at /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/diff_ui/no_browsers). Use "Open printable" and your browser's Print -> Save as PDF meanwhile.

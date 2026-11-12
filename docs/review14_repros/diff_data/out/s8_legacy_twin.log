@@ -1,0 +1,6 @@
+old load: /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/diff_data/old/mrfx/__init__.py
+backfilled: 0
+fingerprint of the 0.7.6 file: [('twin_in-network-rates.json.gz', True, None)]
+files: [('twin_in-network-rates (1).json', 'done'), ('twin_in-network-rates.json.gz', 'done')]
+rate rows: 120 (one document = 60)
+new code: /home/user/Claudevideo/mrfx/__init__.py

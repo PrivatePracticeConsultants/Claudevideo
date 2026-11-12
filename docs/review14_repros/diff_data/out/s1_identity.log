@@ -1,0 +1,5 @@
+raw rows 1811
+rows_per_slice=10000000: slices=6 hash_split=0 spine old=1729 new=1729 identical=True dir old=36 new=36 identical=True
+rows_per_slice=400: slices=9 hash_split=0 spine old=1729 new=1729 identical=True dir old=36 new=36 identical=True
+rows_per_slice=60: slices=55 hash_split=54 spine old=1729 new=1729 identical=True dir old=36 new=36 identical=True
+rows_per_slice=7: slices=287 hash_split=286 spine old=1729 new=1729 identical=True dir old=36 new=36 identical=True

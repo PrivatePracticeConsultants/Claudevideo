@@ -1,0 +1,13 @@
+mrfx from /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit12/agent_diff/old_1064203 body 1300000
+WARNING download http://127.0.0.1:43381/f.json.gz network error: peer closed connection without sending complete message body (received 307200 bytes, expected 1300000) (attempt 1/4)
+WARNING download http://127.0.0.1:43381/f.json.gz network error: peer closed connection without sending complete message body (received 307200 bytes, expected 1037856) (attempt 1/4)
+WARNING download http://127.0.0.1:43381/f.json.gz network error: peer closed connection without sending complete message body (received 307200 bytes, expected 775712) (attempt 1/4)
+WARNING download http://127.0.0.1:43381/f.json.gz network error: peer closed connection without sending complete message body (received 307200 bytes, expected 513568) (attempt 1/4)
+OK sha 8262102207da size 1300000 truth 1300000 in 4.1s
+requests: 5 bytes served: 1480224
+   ('GET', '/f.json.gz', None, 307200, 200)
+   ('GET', '/f.json.gz', 'bytes=262144-', 307200, 206)
+   ('GET', '/f.json.gz', 'bytes=524288-', 307200, 206)
+   ('GET', '/f.json.gz', 'bytes=786432-', 307200, 206)
+   ('GET', '/f.json.gz', 'bytes=1048576-', 251424, 206)
+part left: ['f.json.gz']

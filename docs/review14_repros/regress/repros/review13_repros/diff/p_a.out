@@ -1,0 +1,15 @@
+##### A
+== _val_kind on 0.7.5-shaped records ==
+  '"abc"'                                  -> 'etag'
+  'W/"abc"'                                -> 'etag'
+  'Tue, 03 Nov 2026 10:00:00 GMT'          -> 'last_modified'
+  '5d8c72a5edda8d6a:0'                     -> 'etag'
+  '1731000000'                             -> 'etag'
+  '20261103'                               -> 'etag'
+  'abc'                                    -> 'etag'
+  ''                                       -> ''
+  [ok] last-modified only: sha == truth, requests [(206, 'bytes=300000-')]
+  [ok] quoted etag: sha == truth, requests [(206, 'bytes=300000-')]
+  [ok] unquoted etag: sha == truth, requests [(206, 'bytes=300000-')]
+  [ok] unquoted etag + last-modified: sha == truth, requests [(206, 'bytes=300000-')]
+FAILS: 0
