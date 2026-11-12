@@ -224,8 +224,36 @@ def coverage_sentence(cov: dict | None, *, document: bool = False) -> str:
             f"({int(cov.get('covered_files') or 0):,} of "
             f"{int(cov.get('done_files') or 0):,} files).")
     if document:
-        return (head + " Every number here comes from those; the files loaded since "
-                "are not in the analytics yet, so payers, practices and months they "
-                "add are missing from this document.")
+        # what is TRUE of the rows in place (review 14 items 1.1c / 2.7): a
+        # rebuild of an existing spine still holds every loaded file, so it is
+        # never "the files loaded since are not in the analytics yet"
+        new = int(cov.get("new_files") if cov.get("new_files") is not None
+                  else max(0, int(cov.get("done_files") or 0) - int(cov.get("covered_files") or 0)))
+        part_way = [p for p in (cov.get("part_way") or []) if p]
+        tail = []
+        if new:
+            tail.append("Every number here comes from those; the files loaded since are not "
+                        "in the analytics yet, so payers, practices and months they add are "
+                        "missing from this document.")
+        if part_way:
+            names = ", ".join(part_way[:3]) + (f" and {len(part_way) - 3} more" if len(part_way) > 3 else "")
+            tail.append(f"A rebuild is part-way through {names}: numbers that include "
+                        f"{'it' if len(part_way) == 1 else 'them'} can change when it finishes.")
+        if not new and not part_way:
+            if cov.get("rebuilding") or cov.get("plan_kind"):
+                ps = cov.get("parts_saved") or [0, 0]
+                tail.append("The analytics are being rebuilt"
+                            + (f" ({int(ps[0]):,} of {int(ps[1]):,} parts saved)" if ps and ps[1] else "")
+                            + "; every loaded file is in them, and every number here comes "
+                            "from the rows in place.")
+            elif cov.get("pending_removal"):
+                tail.append("A removed file's numbers are still being taken out of the "
+                            "analytics, so numbers here can still include it.")
+            elif cov.get("needs_full"):
+                tail.append("The analytics are waiting for one full rebuild; every number "
+                            "here comes from the rows in place.")
+            else:
+                tail.append("Every number here comes from those.")
+        return head + " " + " ".join(tail)
     reason = (cov.get("reason") or "").strip()
     return head + (" " + reason if reason else "")

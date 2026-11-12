@@ -4932,8 +4932,70 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     def _analytics_public() -> dict:
         cov = store.analytics_coverage()
         keep = ("state", "reason", "pct", "eta_text", "covered_files", "done_files",
-                "covered_payers", "loaded_payers", "covered_rows", "loaded_rows", "sentence")
+                "covered_payers", "loaded_payers", "covered_rows", "loaded_rows", "sentence",
+                "paused", "rebuilding", "parts_saved", "new_files")
         return {k: cov.get(k) for k in keep}
+
+    # -- the Analytics activity panel (review 14 item 1.2) -----------------------
+    # Async and single-flight: the panel polls every 2 s while open, so it must
+    # never queue behind a saturated request pool (the round-13 progress
+    # channel's rule) — it is computed on its own 2-thread limiter, and a poll
+    # that arrives while one is being computed gets the last answer.
+    _activity = {"at": 0.0, "body": None, "busy": False}
+    _activity_mu = threading.Lock()
+
+    def _activity_compute() -> dict:
+        from . import activity as _act
+        body = _act.build(store)
+        with _activity_mu:
+            _activity.update(at=time.monotonic(), body=body, busy=False)
+        return body
+
+    @app.get("/api/analytics/activity")
+    async def analytics_activity():
+        import anyio
+        import anyio.to_thread
+        with _activity_mu:
+            fresh = _activity["body"] is not None and time.monotonic() - _activity["at"] < 1.0
+            if fresh or _activity["busy"]:
+                if _activity["body"] is not None:
+                    return _activity["body"]
+            _activity["busy"] = True
+        lim = app.state.__dict__.setdefault("activity_limiter", anyio.CapacityLimiter(2))
+        try:
+            return await anyio.to_thread.run_sync(_activity_compute, limiter=lim)
+        finally:
+            with _activity_mu:
+                _activity["busy"] = False
+
+    @app.post("/api/analytics/run-now")
+    def analytics_run_now():
+        """Fold in at the next safe moment, even while downloads continue."""
+        from . import foldin
+        f = foldin.running(store)
+        if f is None:
+            raise HTTPException(409, "the analytics scheduler is not running in this "
+                                     "process — the analytics update when a command finishes")
+        f.request_run_now()
+        with _activity_mu:
+            _activity["at"] = 0.0
+        return {"ok": True, "scheduler": f.state()}
+
+    @app.post("/api/analytics/pause")
+    def analytics_pause(body: dict = Body(default={})):
+        """{"paused": true|false} — hold every analytics update (persisted) or
+        resume. A running build stops between two committed parts."""
+        if not isinstance(body, dict) or not isinstance(body.get("paused"), bool):
+            raise HTTPException(422, 'send {"paused": true} or {"paused": false}')
+        from . import foldin
+        f = foldin.running(store)
+        if f is not None:
+            f.set_paused(body["paused"])
+        else:
+            store.set_analytics_paused(body["paused"])
+        with _activity_mu:
+            _activity["at"] = 0.0
+        return {"ok": True, "paused": store.analytics_paused()}
 
     @app.get("/api/boot")
     @_log_if_slow("/api/boot")
@@ -4976,8 +5038,10 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         # review 13 item 1.2: list what is LOADED; `covered` says which of them
         # the analytics hold (the page greys the others: "loaded, not yet in
         # analytics") — the chips offered 3 payers while the header said 49
-        part_way = store.payers_part_way()
-        covered = [p for p in got["payers"] if p not in part_way]
+        # ONE coverage rule (review 14 items 1.1c / 2.7): the header, these
+        # chips and every document sentence read Store.analytics_coverage()
+        cov = set(store.analytics_coverage().get("covered") or [])
+        covered = [p for p in got["payers"] if p in cov]
         inv = store.loaded_inventory()
         return {"payers": sorted(set(got["payers"]) | set(inv.get("payers") or [])),
                 "covered": covered}

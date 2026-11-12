@@ -3556,36 +3556,12 @@ def add_urls(store: Store, urls: list[str]) -> dict:
     return {"added": added, "skipped": skipped, "invalid": invalid}
 
 
-# The dedup/by-TIN rollups are a FULL rebuild over all rows (an hour+ once the
-# store holds tens of millions). Mid-grind rebuilds are therefore purely
-# TIME-based: at most one per adaptive interval (a multiple of how long the
-# last one took), plus a final one when the queue goes idle. The floor below
-# keeps a small store's dashboard fresh without per-file quadratic cost.
-ROLLUP_MAX_STALE_SECONDS = 90
-
-# Adaptive interval = this multiple of the last rebuild's duration: the disk
-# and CPU spend at most ~1/(N+1) of a long grind rebuilding analytics, and the
-# rest extracting. 2.0 was measured too aggressive on an 86M-row store on a
-# hard drive — rebuilds owned half the disk and chunk progress crawled.
-ROLLUP_INTERVAL_MULTIPLE = 4.0
-
-
-def _rollup_due(pend: int, in_flight: int, since_last: float, min_interval: float) -> bool:
-    """The ONE mid-grind rebuild decision (unit-tested). Rebuild when ingests
-    are pending AND either the queue just went idle (grind over — dashboards
-    must be current) or the adaptive interval has elapsed. There is
-    deliberately NO count-based trigger: on a big store one rebuild outlasts
-    any batch of fresh ingests, so an unconditioned "N files pending" check
-    fired the instant each rebuild finished — rebuilds ran back-to-back for
-    the whole grind, monopolizing the store's disk, and extraction slowed to
-    what users reported as "chunks frozen, CPU busy"."""
-    if pend <= 0:
-        return False
-    return in_flight == 0 or since_last >= min_interval
-
-# how often an IDLE serve queue asks whether the analytics are behind (a
-# part-way build, a failed attempt) when no ingest credit is pending
-STALE_CHECK_SECONDS = 120.0
+# The analytics fold-in is NOT the queue's job any more (review 14 item 1.1):
+# a part-way build or a failed attempt with no queue credit used to wait for
+# an IDLE queue, so one long download starved it for hours; mid-grind the next
+# update came at 4 x the last one. mrfx/foldin.py is the one scheduler: the
+# queue tells it how busy it is (FoldIn.note_queue) and pokes it when a file
+# lands; it decides when to fold in, at a bounded cadence.
 
 # how many files the downloader may fetch ahead of the parser (disk-bounded)
 PREFETCH_AHEAD = 1
@@ -3601,9 +3577,10 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
     """Process queued URLs one at a time until the queue is empty (drain=True,
     for the CLI) or `stop` is set (the serve worker). Returns files processed.
 
-    Rollup rebuilds are time-batched (adaptive interval + once at idle — see
-    _rollup_due): the raw rates land immediately; dashboards catch up in
-    batches instead of the rebuild monopolizing the disk mid-grind."""
+    The analytics are folded in by the store's scheduler (mrfx/foldin.py):
+    this queue pokes it when a file lands and tells it how busy the queue is.
+    When no scheduler runs (a CLI drain, a test), run_queue starts one for its
+    own lifetime and, at the end, folds in whatever is left."""
     recovered = store.recover_stuck_urls()
     if recovered:
         log.info("resumed %d URL(s) left mid-flight by a previous run", recovered)
@@ -3647,108 +3624,16 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
     if orphans:
         log.info("removed %d download record(s) whose download is gone", orphans)
     processed = 0
-    ingests_pending_rollup = 0
     import threading
     state = threading.Lock()
-
-    rollup_failures = 0
-    last_rebuild_at = time.monotonic()
-    rollup_min_interval = float(ROLLUP_MAX_STALE_SECONDS)
-    # review 13 item 1.3: a failing rollup is never given up on for the run —
-    # it is retried at the next idle gap after a back-off that grows with the
-    # failures (the build itself keeps its committed slices and halves the
-    # one that failed), and the dashboard says it stopped and why
-    retry_rollup_at = 0.0
-    last_stale_check = time.monotonic()
-
-    def rebuild_now() -> bool:
-        """Returns True only when a rebuild actually RAN to completion. False on
-        no-op / coalesced-skip / failure so the coordinator backs off (sleeps)
-        instead of hot-spinning: _rollup_due fires unconditionally while the
-        queue is idle with credits pending, so a bare `continue` after a skip
-        would peg a CPU and flood the log for the whole length of a concurrent
-        multi-hour rebuild (audit HIGH-2)."""
-        nonlocal ingests_pending_rollup, rollup_failures, last_rebuild_at, rollup_min_interval
-        nonlocal retry_rollup_at
-        with state:
-            n = ingests_pending_rollup
-        if not n:
-            return False
-        if time.monotonic() < retry_rollup_at:
-            return False        # backing off after a failure (see below)
-        # COALESCE: if a rebuild (e.g. the enrichment name refresh) is already
-        # running, don't queue behind it and then run our OWN multi-hour pass in
-        # turn — the credits stay pending and the next cycle retries. Check
-        # BEFORE logging/attempting so the idle back-off path stays quiet (no
-        # "updating rollups…" line every few seconds for hours). skip_if_busy on
-        # the store calls is the race-safe backstop for the check-then-act gap.
-        from .store import ROLLUP_SKIPPED
-        if store.rollup_in_progress():
-            return False
-        # stamp at attempt time so a failing rebuild doesn't re-fire the
-        # time-based trigger every loop (batch/idle triggers still apply)
-        last_rebuild_at = time.monotonic()
-        log.info("updating analytics rollups (%d newly ingested file(s))...", n)
-        try:
-            try:
-                if not store.rollups_ever_built():
-                    # a fresh store: the incremental's precondition (a prior
-                    # full build) cannot hold — go straight to the full build
-                    # (review 11 item 3.1), and say THAT, not "incremental
-                    # unavailable … running a full rebuild" (review 12 4.1g)
-                    log.info("first analytics build of this store — building them in full")
-                    r = store.rebuild_rollups(skip_if_busy=True)
-                else:
-                    # payer-slice update: cost scales with the new files'
-                    # payers, not the whole store (an hour-long full scan)
-                    r = store.update_rollups_incremental(skip_if_busy=True)
-            except Exception as e:  # noqa: BLE001 — incremental is an
-                # optimization with strict preconditions (prior full build,
-                # current schema, payer recorded); the full rebuild is the
-                # always-correct fallback
-                log.info("incremental analytics update unavailable (%s) — "
-                         "running a full rebuild", e)
-                r = store.rebuild_rollups(skip_if_busy=True)
-            if r == ROLLUP_SKIPPED:
-                # a rebuild is already running; keep the credits pending so the
-                # next _rollup_due fires after it, and don't count this as done
-                return False
-        except Exception:  # noqa: BLE001 — rollups retry at the next idle gap
-            rollup_failures += 1
-            # never hot-loop on a rebuild that keeps failing — and never give
-            # up on it either (review 13 item 1.3: the old "giving up for this
-            # run" after three failures left a 1.16 B-row store answering from
-            # 3 of 49 payers until a restart). The build keeps every slice it
-            # committed and halves the one that ran out of memory; the next
-            # attempt waits for the queue to go idle AND a back-off of 2, 4,
-            # 8 … up to 60 minutes; the dashboard shows the sentence meanwhile.
-            backoff = min(3600.0, 120.0 * (2 ** (rollup_failures - 1)))
-            retry_rollup_at = time.monotonic() + backoff
-            log.exception("analytics update failed (%d in a row) — raw data is safe; "
-                          "the committed part of the build is kept and it is tried "
-                          "again when the queue is idle, in about %.0f min",
-                          rollup_failures, backoff / 60)
-            return False
-        rollup_failures = 0
-        retry_rollup_at = 0.0
-        # Re-stamp at COMPLETION and self-throttle by how long the rebuild
-        # actually took: counting the 90s window from the start would make a
-        # >90s rebuild permanently "stale" the moment it finished — a full
-        # rebuild after every single file, the exact per-file quadratic cost
-        # the batching exists to avoid, each one holding the write lock.
-        duration = time.monotonic() - last_rebuild_at
-        rollup_min_interval = max(float(ROLLUP_MAX_STALE_SECONDS),
-                                  ROLLUP_INTERVAL_MULTIPLE * duration)
-        last_rebuild_at = time.monotonic()
-        if duration > 60:
-            # a long rebuild means a long gap until the next one — say so, or
-            # hours of "numbers not updating" mid-grind reads as a hang
-            log.info("analytics refresh took %.0f min — next mid-grind refresh "
-                     "in ~%.0f min (extraction gets the disk in between; a "
-                     "final refresh always runs when the queue finishes)",
-                     duration / 60, rollup_min_interval / 60)
-        with state:
-            ingests_pending_rollup -= n
+    from . import foldin as _foldin
+    fold = _foldin.ensure(store)
+    # a serving process started the scheduler already; anything else (a CLI
+    # drain, a test) gets one for the life of this queue run
+    own_stop = threading.Event()
+    owns_fold = fold.start(own_stop)
+    if owns_fold:
+        fold.poke("queue start")
 
     # Pipeline: N downloader threads prefetch ahead while the parsers work —
     # network and CPU overlap instead of taking turns, and on many-small-file
@@ -3882,7 +3767,7 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
     active = 0
 
     def processor():
-        nonlocal processed, ingests_pending_rollup, active
+        nonlocal processed, active
         while not dl_stop.is_set() and (stop is None or not stop.is_set()):
             with state:
                 active += 1
@@ -3934,8 +3819,8 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                         log.exception("url worker: could not record the failure; continuing")
                 with state:
                     processed += 1
-                    if ok:
-                        ingests_pending_rollup += 1
+                if ok:
+                    fold.poke("file loaded")
                 holding.pop(threading.current_thread().name, None)
             finally:
                 with state:
@@ -3982,7 +3867,6 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                 continue
             with state:
                 busy = active
-                pend = ingests_pending_rollup
             in_flight = (counts.get("queued", 0) + counts.get("downloading", 0)
                          + counts.get("fetched", 0) + counts.get("expanding", 0)
                          + counts.get("ingesting", 0) + busy)
@@ -3999,29 +3883,9 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                         log.info("resumed %d paused download(s) whose wait is over", woke)
                 except Exception:  # noqa: BLE001 — a wake check must never stop the queue
                     log.exception("could not check paused downloads; will retry")
-            if (not drain and pend == 0 and in_flight == 0
-                    and time.monotonic() - last_stale_check >= STALE_CHECK_SECONDS):
-                # an idle queue with analytics behind (a part-way build after a
-                # restart, a failed attempt, files a stopped run left out):
-                # one credit so the idle-gap rule below picks it up
-                last_stale_check = time.monotonic()
-                try:
-                    if store.rollups_stale() and not store.rollup_in_progress():
-                        with state:
-                            ingests_pending_rollup = max(ingests_pending_rollup, 1)
-                        pend = 1
-                except Exception:  # noqa: BLE001 — a probe never stops the queue
-                    pass
-            if _rollup_due(pend, in_flight, time.monotonic() - last_rebuild_at,
-                           rollup_min_interval):
-                if rebuild_now():
-                    continue   # a rebuild RAN — re-evaluate the queue now
-                # skipped (a rebuild is already running) or failed: fall through
-                # to the wait below so we don't hot-spin _rollup_due (which fires
-                # unconditionally while idle) for the whole concurrent rebuild.
-                # In drain mode there is no concurrent rebuild holder, so this
-                # path is only reached on a genuine failure; the post-loop final
-                # rebuild still handles any pending credits before returning.
+            # the analytics scheduler sees how busy the queue is (it folds in
+            # at its own cadence whatever the answer — review 14 item 1.1)
+            fold.note_queue(in_flight, counts)
             if in_flight == 0 and drain:
                 break
             if stop is not None:
@@ -4049,6 +3913,17 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
 
             _ingest_mod.set_parse_pool(None)
             pool.shutdown()
-    if ingests_pending_rollup:
-        rebuild_now()  # stop was set mid-batch — don't leave dashboards stale
+        fold.note_queue(0, {})
+        if owns_fold:
+            own_stop.set()
+            fold.stop()
+    if owns_fold and not interrupted:
+        # this run owned the scheduler: what is left goes in now, so a CLI
+        # drain (or a stopped test queue) never ends with the analytics behind
+        try:
+            if store.rollups_stale():
+                fold.run_once("the queue finished")
+        except Exception:  # noqa: BLE001 — the files are safely loaded either way
+            log.exception("final analytics update failed — the files are safely "
+                          "loaded and the next start catches up")
     return processed

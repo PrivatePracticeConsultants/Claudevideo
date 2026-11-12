@@ -1025,7 +1025,18 @@
     <div class="view-head">
       <h2>Ingest status</h2>
       <span class="spacer"></span>
+      <button class="btn" id="btn-analytics" title="Watch the newly loaded files go into the numbers every screen reads">Analytics</button>
       <button class="btn" id="btn-scan">Rescan inbox</button>
+    </div>
+    <div id="analytics-panel" class="an-panel" style="display:none" aria-live="polite">
+      <div class="view-head an-head">
+        <h3>Analytics activity</h3>
+        <span class="spacer"></span>
+        <button class="btn" id="an-run" title="Add the waiting files at the next safe moment, even while downloads continue">Run now</button>
+        <button class="btn" id="an-pause" title="Hold every analytics update (for a laptop on battery). Loading continues; nothing new reaches the numbers until you resume.">Pause analytics</button>
+        <button class="btn" id="an-close">Close</button>
+      </div>
+      <div id="an-body"><p class="muted">loading…</p></div>
     </div>
     <div class="url-card">
       <h3>Paste file links — the app does the rest</h3>

@@ -1166,6 +1166,13 @@ def ingest_in_progress(name: str) -> bool:
         return name in _ACTIVE_INGESTS
 
 
+def active_ingest_count() -> int:
+    """In-process ingests running now (the analytics scheduler counts an
+    inbox scan's parse as a busy store — mrfx/foldin.py)."""
+    with _CLAIMS_LOCK:
+        return len(_ACTIVE_INGESTS)
+
+
 def forget_file(cfg: MrfxConfig, store: Store, filename: str) -> dict:
     """Erase one ingested file on the user's request: its rates, provider
     references, files-table row, AND every raw copy on disk (inbox — else the
@@ -1215,50 +1222,33 @@ def _forget_file_locked(cfg: MrfxConfig, store: Store, filename: str) -> dict:
 def _rebuild_rollups_best_effort(store: Store, name: str,
                                  incremental: bool = True) -> None:
     """The parquet part is already durable when this runs: an analytics
-    rebuild failing (disk pressure, memory) must NOT fail the file — hours of
-    parsing would be retried for data that already landed. Rollups refresh on
-    the next successful rebuild, same contract as the queue's batched path.
+    update failing (disk pressure, memory) must NOT fail the file — hours of
+    parsing would be retried for data that already landed.
 
-    Removals are found via the rollup_pending_payers note the removal itself
-    queues (forget_file / drop_rates_part / a replaced part), so the
-    incremental path handles them too. incremental=False remains for callers
-    that explicitly want the full rebuild.
-
-    COALESCED (skip_if_busy): this is best-effort, so if a rebuild is already
-    running we skip rather than BLOCK behind it — a blocking wait here was the
-    last remaining pile-up source (the inbox watcher / a direct ingest queuing
-    behind the queue worker's multi-hour rebuild, seen as "waiting 57 min").
-    The rollup refreshes on the next cycle. ROLLUP_SKIPPED is a normal return,
-    so the incremental's `return` already avoids the full-rebuild fallback."""
+    In a serving process the analytics scheduler (mrfx/foldin.py) owns every
+    update: this only tells it something changed, and it folds in at its own
+    cadence — never skipped for good because another update was running
+    (review 14: an inbox file skipped during a name refresh waited 117 s for
+    the idle probe; "the running one covers it" was not true). With no
+    scheduler (a CLI command) the update runs here, with the same decision
+    tree (`foldin.fold_in`: a full build only when the incremental's
+    precondition fails). incremental=False asks for the full rebuild."""
+    from . import foldin
     from .store import ROLLUP_SKIPPED
-
-    def _skip_kw(fn):
-        try:
-            import inspect
-            return {"skip_if_busy": True} if "skip_if_busy" in inspect.signature(fn).parameters else {}
-        except (TypeError, ValueError):  # C-callable / old test stub
-            return {}
+    if incremental and foldin.poke(store, name):
+        log.debug("%s: the analytics scheduler will fold it in", name)
+        return
     try:
-        if incremental and not getattr(store, "rollups_ever_built", lambda: True)():
-            # a fresh store: say it is the first build (review 12 4.1g)
-            log.info("%s: first analytics build of this store — building them in full", name)
-            incremental = False
-        if incremental:
-            try:
-                if store.update_rollups_incremental(
-                        **_skip_kw(store.update_rollups_incremental)) == ROLLUP_SKIPPED:
-                    log.info("%s: a rebuild is already running — skipping this "
-                             "best-effort refresh (the running one covers it)", name)
-                return
-            except Exception as e:  # noqa: BLE001 — strict-precondition
-                # optimization; the full rebuild is the always-correct fallback
-                log.info("%s: incremental analytics update unavailable (%s) — "
-                         "running a full rebuild", name, e)
-        store.rebuild_rollups(**_skip_kw(store.rebuild_rollups))
+        if not incremental:
+            store.rebuild_rollups()
+            return
+        if foldin.fold_in(store, name) == ROLLUP_SKIPPED:
+            log.info("%s: another analytics update is running — this file goes in "
+                     "with the next one", name)
     except Exception:  # noqa: BLE001
         log.exception(
-            "%s: rollup rebuild failed — the file's rows are safely stored; "
-            "analytics will refresh on the next successful rebuild", name)
+            "%s: analytics update failed — the file's rows are safely stored; "
+            "the analytics catch up on the next successful update", name)
 
 
 def ingest_file(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight | None = None,
@@ -1313,6 +1303,13 @@ def ingest_file(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight | None 
         again = _reread_if_refs_landed(cfg, store, path, refs_before, rebuild_rollups)
         if again is not None:
             return again
+        # the analytics scheduler, when one runs, folds it in at its cadence
+        # (review 14 item 1.1 — every load path, not only the queue's)
+        try:
+            from . import foldin
+            foldin.poke(store, "file loaded")
+        except Exception:  # noqa: BLE001 — cosmetic for the load itself
+            pass
     return result
 
 

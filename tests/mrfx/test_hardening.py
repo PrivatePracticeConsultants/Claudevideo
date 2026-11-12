@@ -738,9 +738,14 @@ def test_no_route_blocks_the_event_loop(cfg, store):
     # other two, for the same reason: they must answer while every worker
     # thread is busy building the report the bar describes, and they read one
     # in-memory object under a lock held for microseconds — never the store.
+    # Since 0.8.0 (review 14 item 1.2) the Analytics activity poll is the
+    # fourth: async so it never queues behind a saturated pool, but its store
+    # reads run OFF the event loop (anyio.to_thread on its own 2-token
+    # limiter) and a poll during a computation returns the last answer.
     offenders = [r.path for r in create_app(cfg, store).routes
                  if isinstance(r, APIRoute) and asyncio.iscoroutinefunction(r.endpoint)
-                 and r.path not in ("/api/debug/stacks", "/api/progress/{token}")]
+                 and r.path not in ("/api/debug/stacks", "/api/progress/{token}",
+                                    "/api/analytics/activity")]
     assert offenders == [], f"async endpoints would block the event loop: {offenders}"
 
 
@@ -889,15 +894,41 @@ def test_rollup_never_rebuilds_back_to_back_mid_grind():
     # The field failure: an unconditioned "10 files pending" trigger meant a
     # big store's hour-long rebuild ended with the next batch already
     # pending, so rebuilds ran back-to-back and extraction starved for the
-    # disk ("chunks frozen, CPU busy"). Mid-grind, ONLY the adaptive
-    # interval may trigger — no pending count, however large, forces it.
-    from mrfx.fetch import _rollup_due
+    # disk ("chunks frozen, CPU busy"). Mid-grind, ONLY the cadence may
+    # trigger — no pending count, however large, forces it.
+    # UPDATED in round 14 (item 1.1): the decision moved from the queue's
+    # `_rollup_due` to the analytics scheduler (mrfx/foldin.py). Same rule —
+    # a busy queue waits a multiple of the last update, counted from its END
+    # — now bounded above as well (BUSY_CAP_S), and an idle queue folds in
+    # after a few seconds instead of only at "the queue is idle".
+    import time as _t
 
-    assert not _rollup_due(500, 3, 10.0, 3600.0)      # huge backlog, interval not passed
-    assert _rollup_due(1, 3, 3600.0, 3600.0)          # interval passed → rebuild
-    assert _rollup_due(1, 0, 0.0, 3600.0)             # queue idle → final rebuild now
-    assert not _rollup_due(0, 0, 99999.0, 1.0)        # nothing pending → never
+    from mrfx import foldin as FI
 
+    class S:                       # a stale store with nothing else going on
+        def rollups_stale(self):
+            return True
+
+        def analytics_paused(self):
+            return False
+
+        def rollup_in_progress(self):
+            return False
+
+    f = FI.FoldIn(S())
+    f.note_queue(3)                                    # a busy queue
+    f.last_duration = 300.0                            # the last update took 5 min
+    f.last_end = _t.monotonic() - 10.0
+    d = f.decide()
+    assert not d["due"] and d["code"] == "cadence"     # backlog never forces it
+    assert f.gap_s(True) == FI.BUSY_MULTIPLE * 300.0
+    f.last_end = _t.monotonic() - FI.BUSY_MULTIPLE * 300.0 - 1
+    assert f.decide()["due"]                           # cadence passed → update
+    f.last_duration = 99999.0
+    assert f.gap_s(True) == FI.BUSY_CAP_S              # bounded above
+    f.note_queue(0)
+    f.last_end = f.last_poke = _t.monotonic() - FI.IDLE_SETTLE_S - 1
+    assert f.decide()["due"]                           # idle → right away
 
 def test_scan_inbox_rebuilds_once_per_pass(cfg, store, monkeypatch):
     # Two files dropped together must cost ONE full analytics rebuild, not

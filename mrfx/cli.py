@@ -241,37 +241,16 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
     store.recover_stuck_urls()
     if n_stuck:
         log.info("recovered %d file(s) left mid-parse by a previous run", n_stuck)
+    # review 14 item 1.1: ONE scheduler owns every analytics update of this
+    # process — the start-up catch-up (a kill between files going 'done' and
+    # their fold-in, a part-way build, a failed attempt), every file the queue,
+    # the inbox or an upload loads, and the user's Run now / Pause. It runs
+    # whenever the analytics are behind, whatever the queue is doing.
     if store.rollups_stale():
-        # a kill landed between files going 'done' and their BATCHED rollup:
-        # the Files tab showed them done while their rates were missing from
-        # every number, and nothing on restart noticed. Catch up now, in the
-        # background so the dashboard is usable meanwhile. Log the REASON so a
-        # slow full rebuild (rollup_needs_full) isn't a silent multi-hour hang.
-        log.info("analytics are behind the ingested files — catching up in the "
+        log.info("analytics are behind the loaded files — catching up in the "
                  "background. Reason: %s", store.rollup_stale_reason())
-
-        def _catch_up() -> None:
-            # COALESCE (skip_if_busy): the URL worker may already be running its
-            # own catch-up rebuild by the time this thread is scheduled. Queuing
-            # behind it (blocking) is what logged "waiting for the previous
-            # rebuild to finish (1000+ min)" and then ran a REDUNDANT second pass
-            # over the same backlog. Skip when one is already in flight — it
-            # covers the data, and rollups_stale() re-triggers if anything is
-            # left. Only run our own pass when nothing else is.
-            from .store import ROLLUP_SKIPPED
-            try:
-                if store.update_rollups_incremental(skip_if_busy=True) == ROLLUP_SKIPPED:
-                    log.info("analytics catch-up: a rebuild is already running — "
-                             "it covers the backlog, so skipping the duplicate "
-                             "startup pass")
-            except Exception as e:  # noqa: BLE001 — incremental is an
-                # optimization; the full rebuild is the always-correct fallback
-                log.info("incremental analytics catch-up unavailable (%s) — "
-                         "running a full rebuild", e)
-                store.rebuild_rollups(skip_if_busy=True)
-
-        threading.Thread(target=_catch_up,
-                         name="mrfx-rollup-catchup", daemon=True).start()
+    from . import foldin
+    foldin.ensure(store).start(stop)
     # files loaded before identities were kept: named from their kept copies
     # (review 13 item 5.2.6), off the start path
     from .ingest import backfill_identities
@@ -780,7 +759,31 @@ def _print_reference_status(cfg: MrfxConfig, store: Store | None = None) -> None
     print("reference:  " + " · ".join(bits))
 
 
+def _status_analytics(cfg: MrfxConfig) -> int:
+    """`mrfx status --analytics`: the dashboard's Analytics activity panel
+    as text (review 14 item 1.2) — asked of a running dashboard when one
+    answers (it owns the store), else built from the store directly."""
+    import httpx as _httpx
+
+    from . import activity
+    try:
+        r = _httpx.get(f"http://localhost:{cfg.port}/api/analytics/activity", timeout=20,
+                       trust_env=False)
+        if r.status_code == 200 and isinstance(r.json(), dict) and "analytics" in r.json():
+            print(activity.text(r.json()))
+            return 0
+    except Exception:  # noqa: BLE001 — no dashboard: read the store ourselves
+        pass
+    if _something_owns_the_port(cfg, "reading the store locally"):
+        return 1
+    store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir)
+    print(activity.text(activity.build(store)))
+    return 0
+
+
 def cmd_status(cfg: MrfxConfig, args) -> int:
+    if getattr(args, "analytics", False):
+        return _status_analytics(cfg)
     _print_code_coverage(cfg)
     if _something_owns_the_port(cfg, "reading the store locally"):
         print("(the dashboard's Files tab shows the same information live)")
@@ -1987,7 +1990,10 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("ingest", help="one-shot ingest of a file or directory (default: inbox)")
     p.add_argument("path", nargs="?")
     p.add_argument("--force", action="store_true", help="ignore confirm_over_gb and done-checkpoints")
-    sub.add_parser("status", help="files table summary")
+    p = sub.add_parser("status", help="files table summary")
+    p.add_argument("--analytics", action="store_true",
+                   help="the Analytics activity panel as text: what is being added to "
+                        "the numbers, what waits and why, what was added recently")
     p = sub.add_parser("export", help="export rates to CSV")
     p.add_argument("out")
     p.add_argument("--payer")

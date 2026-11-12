@@ -287,27 +287,31 @@ def test_1_3_an_out_of_memory_slice_is_halved_and_earlier_slices_kept(cfg, store
 def test_1_3_the_queue_never_gives_up_on_the_analytics(cfg, store, monkeypatch):
     """1.3: three failed attempts used to end the run's analytics ("giving up
     for this run"); now the failure is shown with its sentence and the next
-    idle gap retries. was: after 3 failures the credits were dropped and no
-    further attempt was made (attempts == 3, analytics key absent)."""
+    attempt retries. was: after 3 failures the credits were dropped and no
+    further attempt was made (attempts == 3, analytics key absent).
+
+    UPDATED in round 14 (items 1.1a and 1.1d, deliberately): the retry is
+    the analytics scheduler's (mrfx/foldin.py), not the queue's idle gap, and
+    a failing INCREMENTAL is retried as the incremental — it is no longer
+    escalated to a whole-store full build. The test therefore fails the
+    incremental seven times with an out-of-memory error and lets the eighth
+    succeed (the 0.7.7 version failed the incremental forever and let the
+    eighth FULL build succeed)."""
     import mrfx.fetch as F
+    import mrfx.foldin as FI
     _market(cfg, store, "Alpha Health", "71000", [40, 50, 60])
     store.rebuild_rollups()
     attempts = {"n": 0}
+    real_inc = store.update_rollups_incremental
 
-    def fail(*a, **k):
-        attempts["n"] += 1
-        raise RuntimeError("Out of Memory Error: could not allocate block")
-    monkeypatch.setattr(store, "update_rollups_incremental", fail)
-    real_rebuild = store.rebuild_rollups
-
-    def rebuild(*a, **k):
+    def inc(*a, **k):
         attempts["n"] += 1
         if attempts["n"] < 8:
             store._note_rollup_failure(duckdb.OutOfMemoryException(
                 "Out of Memory Error: could not allocate block"))
             raise duckdb.OutOfMemoryException("could not allocate block")
-        return real_rebuild(*a, **k)
-    monkeypatch.setattr(store, "rebuild_rollups", rebuild)
+        return real_inc(*a, **k)
+    monkeypatch.setattr(store, "update_rollups_incremental", inc)
     a = store.analytics_coverage(max_age_seconds=0)
     assert a["state"] == "current"
     _market(cfg, store, "Beta Health", "72000", [41, 51, 61])    # rollup fails
@@ -315,33 +319,22 @@ def test_1_3_the_queue_never_gives_up_on_the_analytics(cfg, store, monkeypatch):
     a = c.get("/api/stats").json()["analytics"]
     assert a["state"] == "failed" and "ran out of memory" in a["reason"]
     assert "Files tab" in a["reason"]
-    # the queue's own loop: no give-up — after the back-off, the next idle
-    # gap tries again until it works
-    monkeypatch.setattr(F, "STALE_CHECK_SECONDS", 0.0)
+    # the scheduler's own loop: no give-up — after each back-off it tries
+    # again until it works (back-off shortened for the test)
+    monkeypatch.setattr(FI, "BACKOFF_BASE_S", 0.05)
+    monkeypatch.setattr(FI, "BACKOFF_CAP_S", 0.2)
+    monkeypatch.setattr(FI, "TICK_S", 0.05)
     import threading
     import time as _time
-    clock = {"t": _time.monotonic()}
-
-    class Clock:                     # fetch's own clock only: each idle wait
-        def __getattr__(self, k):    # jumps past any back-off
-            return getattr(_time, k)
-
-        @staticmethod
-        def monotonic():
-            return clock["t"]
-    monkeypatch.setattr(F, "time", Clock())
     stop = threading.Event()
-    loops = {"n": 0}
-
-    def tick_wait(timeout=None):
-        clock["t"] += 4000.0
-        loops["n"] += 1
-        if (attempts["n"] >= 8 and not store.rollups_stale()) or loops["n"] > 40:
-            stop.set()
-        return stop.is_set()
-    monkeypatch.setattr(stop, "wait", tick_wait)
-    F.run_queue(cfg, store, stop=stop)
-    assert attempts["n"] >= 8 and loops["n"] <= 40
+    t = threading.Thread(target=F.run_queue, args=(cfg, store), kwargs={"stop": stop})
+    t.start()
+    t_end = _time.monotonic() + 60
+    while _time.monotonic() < t_end and not (attempts["n"] >= 8 and not store.rollups_stale()):
+        _time.sleep(0.1)
+    stop.set()
+    t.join(30)
+    assert attempts["n"] >= 8
     assert store.analytics_coverage(max_age_seconds=0)["state"] == "current"
 
 

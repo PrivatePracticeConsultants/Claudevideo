@@ -270,6 +270,7 @@ function switchView(view) {
   const tt = $("#topbar-title");
   if (active && tt) tt.textContent = active.textContent;
   clearInterval(state.filesTimer);
+  if (view !== "files") stopAnalyticsPoll();
   // the tracker-import poll belongs to the Medicare tab; leaving it stops it
   if (view !== "medicare" && state.trackerPoll) {
     clearInterval(state.trackerPoll); state.trackerPoll = null;
@@ -347,6 +348,7 @@ function hashFromInputs(view) {
 let _openingHash = false;
 async function openFromHash() {
   const { view, params } = parseHash();
+  if (view === "analytics") { openAnalytics(); return; }
   if (!view || !viewExists(view)) return;
   _openingHash = true;
   try {
@@ -373,7 +375,7 @@ function initDeepLinks() {
   });
   window.addEventListener("hashchange", () => {
     const { view } = parseHash();
-    if (!_openingHash && view && viewExists(view)) openFromHash();
+    if (!_openingHash && view && (viewExists(view) || view === "analytics")) openFromHash();
   });
 }
 
@@ -416,13 +418,161 @@ function coverageHtml(a) {
   if (!a || !a.state || a.state === "current") return "";
   const head = `Analytics cover <b>${fmtInt(a.covered_payers)}</b> of <b>${fmtInt(a.loaded_payers)}</b> ` +
     `payer${a.loaded_payers === 1 ? "" : "s"} (${fmtInt(a.covered_files)} of ${fmtInt(a.done_files)} files).`;
-  let tail = esc(a.reason || "");
-  if (/Files tab$/.test(tail)) tail = tail.replace(/Files tab$/, `<a href="#" class="cov-files">Files tab</a>`);
-  return ` <span class="cov-line cov-${esc(a.state)}" id="coverage-line" title="Every screen, report and export answers from the analytics. Payers and files not in them yet are loaded and safe; they appear as the analytics catch up.">${head} ${tail}</span>`;
+  const tail = esc(a.reason || "");
+  return ` <span class="cov-line cov-${esc(a.state)}" id="coverage-line" title="Every screen, report and export answers from the analytics. Payers and files not in them yet are loaded and safe; they appear as the analytics catch up. Click to watch it happen.">${head} ${tail} <a href="#analytics" class="cov-files">details</a></span>`;
 }
 function wireCoverageLink() {
-  const a = $("#coverage-line .cov-files");
-  if (a) a.onclick = (ev) => { ev.preventDefault(); switchView("files"); };
+  const line = $("#coverage-line");
+  if (line) line.onclick = (ev) => { ev.preventDefault(); openAnalytics(); };
+  scheduleCoverageRefresh();
+}
+
+/* ---------- the Analytics activity panel (review 14 item 1.2) ---------- */
+// Watch the newly loaded files go into the numbers every screen reads. Polls
+// the async /api/analytics/activity every 2 s while open (it never waits
+// behind a busy server); every number on it comes from the server's own
+// state — nothing here is computed.
+function stopAnalyticsPoll() {
+  if (state.anTimer) { clearInterval(state.anTimer); state.anTimer = null; }
+}
+function openAnalytics() {
+  if (state.view !== "files") switchView("files");
+  const p = $("#analytics-panel");
+  if (!p) return;
+  p.style.display = "";
+  if (parseHash().view !== "analytics") history.replaceState(null, "", "#analytics");
+  refreshAnalytics();
+  stopAnalyticsPoll();
+  state.anTimer = setInterval(refreshAnalytics, 2000);
+}
+function closeAnalytics() {
+  const p = $("#analytics-panel");
+  if (p) p.style.display = "none";
+  stopAnalyticsPoll();
+  if (parseHash().view === "analytics") history.replaceState(null, "", "#files");
+}
+async function refreshAnalytics() {
+  let d;
+  try { d = await api("/api/analytics/activity"); }
+  catch (e) { const b = $("#an-body"); if (b) b.innerHTML = `<p class="warn-text">${esc(e.message)}</p>`; return; }
+  state.anLast = d;
+  renderAnalytics(d);
+  // the header line follows the panel's answer (one source)
+  if (d && d.analytics) updateCoverageLine(d.analytics);
+}
+function anTable(cols, rows) {
+  if (!rows.length) return `<p class="muted">none</p>`;
+  return `<table><thead><tr>${cols.map((c) => `<th class="${c.num ? "num" : ""}">${esc(c.h)}</th>`).join("")}</tr></thead><tbody>` +
+    rows.map((r) => `<tr>${cols.map((c) => `<td class="${c.num ? "num" : ""}">${c.f(r)}</td>`).join("")}</tr>`).join("") +
+    `</tbody></table>`;
+}
+function renderAnalytics(d) {
+  const body = $("#an-body");
+  if (!body || !d) return;
+  const a = d.analytics || {};
+  const pb = $("#an-pause");
+  if (pb) pb.textContent = d.paused ? "Resume analytics" : "Pause analytics";
+  let html = "";
+  if (d.error) html += `<p class="warn-text">${esc(d.error)}</p>`;
+  const head = `Analytics cover <b>${fmtInt(a.covered_payers)}</b> of <b>${fmtInt(a.loaded_payers)}</b> payers ` +
+    `(${fmtInt(a.covered_files)} of ${fmtInt(a.done_files)} files).`;
+  if (d.paused) html += `<p class="an-paused">Analytics paused — files keep loading, but nothing new reaches the numbers until you press Resume.</p>`;
+  if (d.bar) {
+    const pct = Math.max(0, Math.min(100, d.bar.pct || 0));
+    html += `<div class="an-bar" title="${pct} %"><span style="width:${pct}%"></span></div>` +
+      `<div class="an-words"><b>${pct} %</b> · ${esc(d.bar.words || "")}</div>`;
+  } else if (a.state === "current") {
+    html += `<p class="an-idle an-ok">✓ Every loaded file is in the analytics. ${head}</p>`;
+  } else {
+    const nxt = d.scheduler && d.scheduler.why ? ` Next: ${esc(d.scheduler.why)}.` : "";
+    html += `<p class="an-idle">${head} ${esc(a.reason || "")}${nxt}</p>`;
+  }
+  if (d.bar) html += `<p class="muted" style="margin:0">${head}</p>`;
+  const w = d.waiting || { count: 0, rows: 0, files: [] };
+  html += `<div class="an-sec"><h4>Waiting to be added: ${fmtInt(w.count)} file${w.count === 1 ? "" : "s"}, ${fmtInt(w.rows)} rows</h4>` +
+    anTable([
+      { h: "File", f: (r) => esc(r.file) },
+      { h: "Payer", f: (r) => esc(r.payer || "") },
+      { h: "Rows", num: true, f: (r) => fmtInt(r.rows) },
+      { h: "Loaded", f: (r) => esc(r.loaded_text || "") },
+      { h: "Why it is waiting", f: (r) => esc(r.why || "") },
+    ], (w.files || []).slice(0, 200)) + `</div>`;
+  html += `<div class="an-sec"><h4>Added recently</h4>` +
+    anTable([
+      { h: "File", f: (r) => esc(r.file) },
+      { h: "Payer", f: (r) => esc(r.payer || "") },
+      { h: "Rows", num: true, f: (r) => fmtInt(r.rows) },
+      { h: "On screen since", f: (r) => esc(r.added_text || "") },
+      { h: "Waited", f: (r) => esc(r.waited_text || "") },
+      { h: "By", f: (r) => esc(r.kind || "") },
+    ], d.added || []) + `</div>`;
+  html += `<div class="an-sec"><h4>Per payer</h4>` +
+    anTable([
+      { h: "Payer", f: (r) => esc(r.payer) },
+      { h: "In the analytics?", f: (r) => r.status === "covered" ? `<span class="an-ok">✓</span> ${esc(r.words)}` : esc(r.words) },
+      { h: "Rows in the analytics", num: true, f: (r) => fmtInt(r.rows_in) },
+      { h: "Rows loaded", num: true, f: (r) => fmtInt(r.rows_loaded) },
+      { h: "Last added", f: (r) => esc(r.last_added || "") },
+    ], d.payers || []) + `</div>`;
+  if (d.problems) {
+    const p = d.problems;
+    html += `<div class="an-sec"><h4>Problem</h4><p class="warn-text">${esc(p.sentence || "")}` +
+      `${p.at ? ` (at ${esc(p.at)})` : ""}${p.retry_at ? ` — it tries again at ${esc(p.retry_at)}` : ""}.</p>` +
+      `${p.advice ? `<p>${esc(p.advice)}</p>` : ""}</div>`;
+  }
+  html += `<div class="an-mean"><b>What this means.</b> ${esc(d.what_this_means || "")}</div>`;
+  body.innerHTML = html;
+}
+// the header's coverage line: refreshed from the cheap activity route every
+// 5 s while the analytics are behind (the full header stats stay on 15 s)
+function updateCoverageLine(a) {
+  const wasBehind = state.analytics && state.analytics.state && state.analytics.state !== "current";
+  state.analytics = Object.assign({}, state.analytics || {}, a);
+  const el = $("#coverage-line");
+  if (a.state === "current") {
+    if (el) el.remove();
+    if (wasBehind) loadStats();
+    return;
+  }
+  const html = coverageHtml(a);
+  if (el) el.outerHTML = html;
+  else { const st = $("#dataset-stats"); if (st && !/loading/.test(st.textContent)) st.insertAdjacentHTML("beforeend", html); }
+  const line = $("#coverage-line");
+  if (line) line.onclick = (ev) => { ev.preventDefault(); openAnalytics(); };
+}
+function scheduleCoverageRefresh() {
+  const behind = state.analytics && state.analytics.state && state.analytics.state !== "current";
+  if (behind && !state.covTimer) {
+    state.covTimer = setInterval(async () => {
+      if (state.anTimer) return;          // the open panel already refreshes it
+      try { const d = await api("/api/analytics/activity"); if (d && d.analytics) updateCoverageLine(d.analytics); }
+      catch (e) { /* the 15 s header poll keeps going */ }
+      if (!(state.analytics && state.analytics.state && state.analytics.state !== "current")) {
+        clearInterval(state.covTimer); state.covTimer = null;
+      }
+    }, 5000);
+  }
+}
+function initAnalyticsPanel() {
+  const open = $("#btn-analytics");
+  if (open) open.onclick = () => (($("#analytics-panel") || {}).style || {}).display === "none" ? openAnalytics() : closeAnalytics();
+  const close = $("#an-close");
+  if (close) close.onclick = closeAnalytics;
+  const run = $("#an-run");
+  if (run) run.onclick = async () => {
+    run.disabled = true;
+    try { await postJson("/api/analytics/run-now", {}); } catch (e) { alert(e.message); }
+    finally { run.disabled = false; }
+    refreshAnalytics();
+  };
+  const pause = $("#an-pause");
+  if (pause) pause.onclick = async () => {
+    const paused = !(state.anLast && state.anLast.paused);
+    pause.disabled = true;
+    try { await postJson("/api/analytics/pause", { paused }); } catch (e) { alert(e.message); }
+    finally { pause.disabled = false; }
+    refreshAnalytics();
+  };
 }
 // one renderer for every payer chip list: a loaded payer the analytics do not
 // hold yet is greyed, titled, and still pickable (it answers "no rows" plus why)
@@ -5356,6 +5506,7 @@ function hookOverrideForms(root) {
   catch (e) { console.error("filter init failed — refresh to retry:", e); }
   try { initCptView(); } catch (e) { console.error(e); }
   try { initFilesView(); } catch (e) { console.error(e); }
+  try { initAnalyticsPanel(); } catch (e) { console.error(e); }
   try { initPdfButtons(); } catch (e) { console.error(e); }
   try { initDeepLinks(); initFindBox(); } catch (e) { console.error(e); }
   refresh();

@@ -566,6 +566,61 @@ def _utcnow() -> dt.datetime:
 # scheduled trigger catches anything that landed after it started.
 ROLLUP_SKIPPED = -1.0
 
+
+class RollupNeedsFull(RuntimeError):
+    """The incremental update's PRECONDITION does not hold (no prior full
+    build, rule versions moved, a removal that could not be scoped, rows with
+    no payer …): a full build is the right answer, and the message says which
+    precondition failed (review 14 item 1.1d). Anything ELSE an incremental
+    raises — out of memory at its finest slicing, a disk error — is a failure
+    to retry, never a reason to rebuild the whole store."""
+
+
+class RollupPlanPending(RollupNeedsFull):
+    """A durable build plan is part-way: it must finish first (a `names` plan
+    resumes as a names plan — review 14 Group 3 — a `full` one as full)."""
+
+    def __init__(self, kind: str):
+        super().__init__(f"an analytics build ({kind}) is part-way — it finishes first")
+        self.kind = kind
+
+
+class RollupPaused(Exception):
+    """The user paused the analytics (review 14 item 1.2): a running build
+    stops between two committed parts and continues when resumed. Not a
+    failure — nothing is noted, nothing backs off."""
+
+
+def _run_cancelled() -> bool:
+    """Was the current run stopped (its Progress cancelled)? THE rule for
+    every cache (review 14 item 2.9): a result computed under a Stop is never
+    stored. Never raises."""
+    try:
+        from . import progress
+        return bool(getattr(progress.current(), "cancelled", False))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _needs_full_set(token: str | None) -> bool:
+    """`rollup_needs_full` holds '1' (written before 0.8.0) or '1:<id>' — a
+    fresh id per raise, so a plan clears only the raise it started with
+    (review 14 item 2.6)."""
+    return bool(token) and str(token).startswith("1")
+
+
+def _needs_full_token() -> str:
+    return "1:" + os.urandom(6).hex()
+
+
+def _directory_query(src: str = "rates") -> str:
+    """TIN_DIRECTORY_QUERY reading `src` instead of the whole `rates` view —
+    the same rows for the TINs its {part} predicate selects, as long as `src`
+    holds every part carrying those TINs (review 14 item 1.1e)."""
+    if src == "rates":
+        return TIN_DIRECTORY_QUERY
+    return re.sub(r"\bFROM rates\b(?=\s)", f"FROM {src}", TIN_DIRECTORY_QUERY)
+
 BY_TIN_QUERY = """
     SELECT payer, tin_value, billing_code,
            min(tin_type)                                             AS tin_type,
@@ -1046,6 +1101,11 @@ class Store:
         # failed attempt's sentence (rollup_failure; _MISSING = not read yet)
         self._rollup_job: dict | None = None
         self._rollup_failure = _MISSING
+        # review 14 item 1.2: the user's "Pause analytics" switch (persisted
+        # in meta; _MISSING = not read yet) and the fold-in scheduler that
+        # owns every analytics update of a serving process (mrfx/foldin.py)
+        self._analytics_paused = _MISSING
+        self.foldin = None
         self._sweep_orphan_tmps()
         if memory_limit_gb is not None:
             # explicit override from config (duckdb_memory_gb): trust the user
@@ -2043,7 +2103,7 @@ class Store:
         missing from every dashboard number, and nothing on restart noticed."""
         try:
             with self.connect() as con:
-                if self._meta_get(con, "rollup_needs_full") == "1":
+                if _needs_full_set(self._meta_get(con, "rollup_needs_full")):
                     return True
                 if self._meta_get(con, "rollup_plan"):
                     return True  # a sliced build is part-way: it resumes
@@ -2074,7 +2134,7 @@ class Store:
                     return (f"an analytics build is part-way ({plan.get('next', 0)} of "
                             f"{len(plan['slices'])} parts saved) — it continues where it "
                             "stopped")
-                if self._meta_get(con, "rollup_needs_full") == "1":
+                if _needs_full_set(self._meta_get(con, "rollup_needs_full")):
                     return ("a full rebuild is FLAGGED (rollup_needs_full) — a "
                             "removal that couldn't be scoped, or a prior full "
                             "rebuild that didn't finish; this forces the slow "
@@ -4465,6 +4525,8 @@ class Store:
             took = self._run_plan("names" if names_only else "full", log)
             self._clear_rollup_failure()
             return took
+        except RollupPaused:
+            raise
         except Exception as e:
             self._note_rollup_failure(e)
             raise
@@ -4552,10 +4614,12 @@ class Store:
         try:
             self._rollup_active = True
             self._rollup_job = {"kind": "update", "slice": 0, "slices": 1, "work_done": 0,
-                                "work_total": 1, "rate": None,
-                                "label": "adding newly loaded files", "started": time.time()}
+                                "work_total": 1, "rate": None, "rows_done": 0,
+                                "label": "", "started": time.time(), "files": [],
+                                "payers": [], "con": None}
             with self.connect() as con:
                 t_locked = time.monotonic()
+                self._watch_job_con(con)
                 with self.write_lock:
                     # view (re)registration is a catalog write — racing another
                     # connection's _register_views raises TransactionException,
@@ -4563,19 +4627,19 @@ class Store:
                     # finalize) that marked the DONE file failed
                     self._register_views(con)
                 if self._meta_get(con, "rollup_schema_version") != str(ROLLUP_SCHEMA_VERSION):
-                    raise RuntimeError("rollup tables were built by an older "
-                                       "version (or never built)")
+                    raise RollupNeedsFull("the analytics tables were built by an "
+                                          "older version (or never built)")
                 for tbl in ("rates_by_tin_tbl", "tin_directory_tbl"):
                     if not con.execute(
                             "SELECT count(*) FROM information_schema.tables "
                             "WHERE table_name = ?", [tbl]).fetchone()[0]:
-                        raise RuntimeError(f"{tbl} is not materialized yet")
-                if self._meta_get(con, "rollup_needs_full") == "1":
-                    raise RuntimeError("a data removal could not be scoped — "
-                                       "full rebuild required")
-                if self._meta_get(con, "rollup_plan"):
-                    raise RuntimeError("an analytics build is part-way — it "
-                                       "continues as a full build")
+                        raise RollupNeedsFull(f"{tbl} is not materialized yet")
+                if _needs_full_set(self._meta_get(con, "rollup_needs_full")):
+                    raise RollupNeedsFull("a data removal could not be scoped — "
+                                          "full rebuild required")
+                plan = self._plan_get(con)
+                if plan is not None:
+                    raise RollupPlanPending(str(plan.get("kind") or "full"))
                 covered = self._meta_get(con, "rollup_covered_through") or ""
                 # filenames AT the covered timestamp: a strict `>` alone would
                 # permanently skip a file whose done-upsert committed after the
@@ -4612,12 +4676,16 @@ class Store:
                 payers = [r[0] for r in con.execute(
                     f"SELECT DISTINCT payer FROM rates WHERE {files_pred}").fetchall()]
                 if any(p is None for p in payers):
-                    raise RuntimeError("a new file has rows with no payer")
+                    raise RollupNeedsFull("a new file has rows with no payer")
                 if rate_delta and not payers and not pending:
                     # the delta files contributed no rows after all (rows_emitted
                     # said otherwise — trust the parts); full rebuild sorts it out
-                    raise RuntimeError("no rows found for the new files")
+                    raise RollupNeedsFull("no rows found for the new files")
+                delta_payers = sorted(set(payers))
                 payers = sorted(set(payers) | set(pending))
+                self._rollup_job.update(
+                    kind="update" if rate_delta else ("remove" if pending else "update"),
+                    files=[f for f, _t in rate_delta], payers=payers)
                 # A REMOVAL (forget / re-ingest-to-fewer-rows / replaced part)
                 # queues pending payers. It can change the tin_directory row of
                 # any TIN that lost a SUBSET of its NPIs but still has rates
@@ -4640,7 +4708,10 @@ class Store:
                              len(delta), len(pending), len(payers))
                     self._apply_rollup_delta(con, payer_pred, files_pred, log,
                                              directory_scoped=dir_scoped,
-                                             with_pending_tins=removal)
+                                             with_pending_tins=removal,
+                                             narrow_payers=sorted(set(delta_payers)
+                                                                  - set(pending)),
+                                             wide_payers=sorted(set(pending)))
                 else:
                     log.info("analytics update: %d new reference file(s) — "
                              "no rate slices to recompute", len(delta))
@@ -4689,6 +4760,9 @@ class Store:
                 self._store_stats_cache = None
                 self._states_cache = None
                 self._bump_generation()
+                # the files this update made visible, each with its time
+                # (review 14 item 1.2: the panel's "Added recently")
+                self._note_fold_ins("payer update" if rate_delta else "removal")
                 took = time.monotonic() - t_locked
                 self.last_rollup_build_seconds = took
                 log.info("analytics update finished in %.0fs (payer slice, not "
@@ -4696,6 +4770,14 @@ class Store:
                 if self.rollup_failure():
                     self._clear_rollup_failure()
                 return took
+        except RollupNeedsFull:
+            raise                   # a precondition, not a failure: the caller builds in full
+        except Exception as e:
+            # out of memory at the finest slicing, a disk error: noted with its
+            # sentence (the header and the panel say it) and retried as THIS
+            # update after a back-off — never escalated (review 14 item 1.1d)
+            self._note_rollup_failure(e)
+            raise
         finally:
             self._rollup_active = False
             self._rollup_job = None
@@ -4723,6 +4805,12 @@ class Store:
             return ROLLUP_SKIPPED
         try:
             self._rollup_active = True
+            # the header says what this is (review 14 item 1.1f: it said
+            # "Adding the newly loaded files" during a name refresh)
+            self._rollup_job = {"kind": "names_refresh", "slice": 0, "slices": 1,
+                                "work_done": 0, "work_total": 1, "rate": None,
+                                "label": "practice names", "started": time.time(),
+                                "files": [], "payers": [], "con": None}
             with self.connect() as con:
                 t0 = time.monotonic()
                 with self.write_lock:
@@ -4766,7 +4854,7 @@ class Store:
                     total = con.execute(
                         "SELECT count(*) FROM tin_directory_tbl").fetchone()[0] or 0
                     if total and n_new > max(1000, total // 4):
-                        raise RuntimeError(
+                        raise RollupNeedsFull(
                             f"{n_new:,} of {total:,} TINs affected — the full "
                             "directory rebuild is cheaper")
                     tin_pred = "tin_value IN (SELECT tin_value FROM __delta_tins)"
@@ -4792,6 +4880,7 @@ class Store:
                 return took
         finally:
             self._rollup_active = False
+            self._rollup_job = None
             self.rollup_lock.release()
 
     def rollup_in_progress(self) -> bool:
@@ -4801,16 +4890,30 @@ class Store:
 
     def _apply_rollup_delta(self, con: duckdb.DuckDBPyConnection, payer_pred: str,
                             files_pred: str, log, directory_scoped: bool = True,
-                            with_pending_tins: bool = False) -> None:
+                            with_pending_tins: bool = False,
+                            narrow_payers: list[str] | None = None,
+                            wide_payers: list[str] | None = None) -> None:
         """Delete-and-recompute the affected rollup slices. Same OOM ladder as
         the full build (thread cap first, then finer hash partitions); same
         one-transaction-per-table + CHECKPOINT discipline (a mid-slice failure
         rolls back to that table's previous complete version).
 
+        What is recomputed (review 14 item 1.1e):
+        - the SPINE: a payer with a queued removal (`wide_payers`) in full; a
+          payer that only gained files (`narrow_payers`) only for the TINs
+          those files carry — every spine row and its `is_latest` contract are
+          inside one (payer, TIN), so the rows of a TIN the new files do not
+          touch cannot change. A new 2 GB file of a 300M-row payer used to
+          re-aggregate all 300M rows.
+        - the DIRECTORY: the delta TINs, read only from the parts that hold
+          them (the kept per-part TIN sets) instead of every part of the
+          store (10.3 s of a 11.6 s fold-in on the 99M store).
+
         directory_scoped=False rebuilds ONLY the rate spine here and leaves the
         directory to the caller (an untracked removal needs the FULL directory —
         see update_rollups_incremental). with_pending_tins adds the TINs that
-        queued removals recorded (rollup_pending_tins) to the directory slice."""
+        queued removals recorded (rollup_pending_tins) to the directory slice.
+        Called without narrow/wide payers it keeps the old payer-wide rule."""
         # READ the current thread count for partition sizing — NEVER `SET
         # threads`. SET threads reconfigures the shared instance's GLOBAL task
         # scheduler; on a live store with other connections mid-query (the
@@ -4826,23 +4929,70 @@ class Store:
         except Exception:  # noqa: BLE001 — older duckdb / odd value
             threads = 1
         threads = max(1, threads)
+        q = lambda s: "'" + s.replace("'", "''") + "'"  # noqa: E731
         # affected TINs: computed ONCE from the delta files' parts (per-file
         # parquet stats prune every other file's part from this scan)
+        con.execute("DROP TABLE IF EXISTS __delta_file_tins")
+        con.execute("CREATE TEMP TABLE __delta_file_tins AS "
+                    f"SELECT DISTINCT tin_value FROM rates WHERE {files_pred}")
+        null_tin = bool(con.execute(
+            "SELECT count(*) FROM __delta_file_tins WHERE tin_value IS NULL").fetchone()[0])
         con.execute("DROP TABLE IF EXISTS __delta_tins")
         pending_tins = ("UNION SELECT tin_value FROM rollup_pending_tins "
                         "WHERE tin_value IS NOT NULL") if with_pending_tins else ""
         con.execute("CREATE TEMP TABLE __delta_tins AS "
-                    f"SELECT DISTINCT tin_value FROM rates WHERE {files_pred} "
-                    f"AND tin_value IS NOT NULL {pending_tins}")
+                    "SELECT tin_value FROM __delta_file_tins WHERE tin_value IS NOT NULL "
+                    f"{pending_tins}")
         tin_pred = "tin_value IN (SELECT tin_value FROM __delta_tins)"
-        n_rows = con.execute(
-            f"SELECT count(*) FROM rates WHERE {payer_pred}").fetchone()[0] or 0
+        spine_pred = payer_pred
+        if narrow_payers is not None or wide_payers is not None:
+            ors = []
+            if wide_payers:
+                ors.append("payer IN (" + ", ".join(q(p) for p in wide_payers) + ")")
+            if narrow_payers:
+                tins = "tin_value IN (SELECT tin_value FROM __delta_file_tins)"
+                if null_tin:
+                    tins = f"({tins} OR tin_value IS NULL)"
+                ors.append("(payer IN (" + ", ".join(q(p) for p in narrow_payers)
+                           + f") AND {tins})")
+            spine_pred = "(" + " OR ".join(ors) + ")" if ors else "FALSE"
+        # where the directory reads: only the parts holding a delta TIN when
+        # the kept part sets can say so exactly (else every part, as before)
+        dir_src = "rates"
+        n_rows = None
+        try:
+            if self._part_sets_current(con, 60.0):
+                live = {p.name for p in self.rates_dir.glob("*.parquet")}
+                holding = sorted(r[0] for r in con.execute(
+                    "SELECT DISTINCT part FROM part_tin_set WHERE tin_value IN "
+                    "(SELECT tin_value FROM __delta_tins)").fetchall() if r[0] in live)
+                if directory_scoped and holding and len(holding) < 0.9 * len(live):
+                    files = ", ".join("'" + sql_path(self.rates_dir / h) + "'" for h in holding)
+                    con.execute("CREATE OR REPLACE TEMP VIEW __rates_dir AS "
+                                f"SELECT * FROM read_parquet([{files}])")
+                    dir_src = "__rates_dir"
+                    log.info("analytics update: the name directory reads %d of %d "
+                             "parts (the ones holding the new files' TINs)",
+                             len(holding), len(live))
+                # rows the payer slices cover, from the kept per-part counts
+                # (an upper bound for the TIN-scoped ones: only sizes slices)
+                if payer_pred != "FALSE":
+                    n_rows = con.execute(
+                        f"SELECT coalesce(sum(n), 0) FROM part_payer_set WHERE {payer_pred} "
+                        "AND part IN (SELECT part FROM part_set_parts)").fetchone()[0]
+        except Exception as e:  # noqa: BLE001 — the unscoped read is always right
+            log.debug("part sets unavailable for the delta (%s) — reading every part", e)
+            dir_src = "rates"
+        if n_rows is None:
+            n_rows = con.execute(
+                f"SELECT count(*) FROM rates WHERE {payer_pred}").fetchone()[0] or 0
         # escalate PARTITION fineness on OOM (never thread count) until it fits
         for split in (1, 2, 4, 8, 16, 32, 64):
             try:
-                self._apply_rollup_delta_sliced(con, payer_pred, tin_pred, n_rows,
+                self._apply_rollup_delta_sliced(con, spine_pred, tin_pred, int(n_rows or 0),
                                                 split=split, threads=threads, log=log,
-                                                directory_scoped=directory_scoped)
+                                                directory_scoped=directory_scoped,
+                                                dir_src=dir_src)
                 return
             except duckdb.OutOfMemoryException:
                 if split == 64:
@@ -4850,20 +5000,29 @@ class Store:
                         "analytics update cannot fit in the current memory "
                         "limit even at the finest slicing — raise "
                         "duckdb_memory_gb in config/mrfx.yaml and restart")
-                    raise  # caller falls back to the full rebuild's ladder
+                    raise  # the scheduler retries THIS update after a back-off
                 log.warning("analytics update over the memory limit at split=%d; "
                             "subdividing into finer partitions", split)
 
     def _apply_rollup_delta_sliced(self, con: duckdb.DuckDBPyConnection, payer_pred: str,
                                    tin_pred: str, n_rows: int, split: int,
-                                   threads: int, log, directory_scoped: bool = True) -> None:
+                                   threads: int, log, directory_scoped: bool = True,
+                                   dir_src: str = "rates") -> None:
         rows_per_part = self._rollup_partition_rows(split, threads)
         parts = max(1, -(-n_rows // rows_per_part))
-        specs = [("rates_by_tin_tbl", SPINE_QUERY, "billing_code || coalesce(tin_value, '')", payer_pred)]
+        specs = [("rates_by_tin_tbl", SPINE_QUERY, "billing_code || coalesce(tin_value, '')",
+                  payer_pred, "the payer rates")]
         if directory_scoped:
             # a removal skips this and rebuilds the directory in full afterward
-            specs.append(("tin_directory_tbl", TIN_DIRECTORY_QUERY, "tin_value", tin_pred))
-        for tbl, query, key, pred in specs:
+            specs.append(("tin_directory_tbl", _directory_query(dir_src), "tin_value",
+                          tin_pred, "the practice directory"))
+        job = self._rollup_job if isinstance(self._rollup_job, dict) else {}
+        job.update(work_total=parts * len(specs), work_done=0, slice=0,
+                   slices=parts * len(specs), rows_done=0, rate=None,
+                   unit_t0=time.monotonic(), rows_total=n_rows)
+        t_rows0 = time.monotonic()
+        unit = 0
+        for tbl, query, key, pred, words in specs:
             con.execute("BEGIN TRANSACTION")
             try:
                 # the slice is deleted and re-aggregated inside ONE txn: a
@@ -4874,9 +5033,18 @@ class Store:
                     part = pred if parts == 1 else f"({pred}) AND hash({key}) % {parts} = {i}"
                     if parts > 1:
                         log.info("analytics update %s: partition %d/%d", tbl, i + 1, parts)
+                    job.update(slice=unit, label=words + (f", part {i + 1} of {parts}"
+                                                          if parts > 1 else ""),
+                               unit_t0=time.monotonic())
                     # BY NAME: a spine that gained is_latest in place
                     # (_migrate_latest_flag) has it as its LAST column
                     con.execute(f"INSERT INTO {tbl} BY NAME {query.format(part=part)}")
+                    unit += 1
+                    if tbl == "rates_by_tin_tbl":
+                        job["rows_done"] = int(job.get("rows_done") or 0) + n_rows // parts
+                    el = time.monotonic() - t_rows0
+                    job.update(work_done=unit,
+                               rate=(job["rows_done"] / el) if el > 0 and job.get("rows_done") else None)
                 # (no whole-store ghost prune here: every TIN whose rows could
                 # have vanished — a removed or shrunk part's — is in tin_pred
                 # via rollup_pending_tins, so the DELETE above drops its row
@@ -5295,16 +5463,29 @@ class Store:
                          if plan["slices"] else "—")
             total_work = sum(int(s.get("work", 1)) for s in plan["slices"]) or 1
             session_work, session_t0 = 0, time.monotonic()
+            rows_left = sum(int(s.get("rows", 0) or 0) for s in plan["slices"][plan["next"]:])
             self._rollup_job = {"kind": plan["kind"], "slice": plan["next"],
                                 "slices": len(plan["slices"]),
                                 "work_done": int(plan.get("work_done", 0)),
                                 "work_total": total_work, "rate": None,
-                                "label": "", "started": time.time()}
+                                "label": "", "started": time.time(), "rows_done": 0,
+                                "rows_total": rows_left, "files": [], "payers": [],
+                                "con": None}
+            self._watch_job_con(con)
             while plan["next"] < len(plan["slices"]):
                 idx = plan["next"]
                 sl = plan["slices"][idx]
+                if idx > 0 and self.analytics_paused():
+                    # the user paused the analytics (review 14 item 1.2): stop
+                    # between two committed parts; the plan continues on resume
+                    log.info("analytics paused — the build stops after part %d of %d "
+                             "and continues when the analytics are resumed",
+                             idx, len(plan["slices"]))
+                    raise RollupPaused()
                 self._rollup_job.update(slice=idx, slices=len(plan["slices"]),
-                                        label=rollplan.slice_label(sl))
+                                        label=rollplan.slice_label(sl),
+                                        slice_work=int(sl.get("work", 1)),
+                                        payers=[sl["payer"]] if sl.get("payer") else [])
                 t_slice = time.monotonic()
                 try:
                     self._run_slice(con, plan, idx, log)
@@ -5327,12 +5508,19 @@ class Store:
                 self._rollup_job.update(
                     work_done=int(plan.get("work_done", 0)), slice=plan["next"],
                     rate=(session_work / elapsed) if elapsed > 0 else None,
-                    work_total=total_work)
+                    work_total=total_work, _q_slice=None, _q_frac=0.0,
+                    rows_done=int(self._rollup_job.get("rows_done") or 0)
+                    + int(sl.get("rows", 0) or 0))
+                if sl["t"] == "spine" and plan["kind"] == "full":
+                    # a payer whose last slice just committed is now visible:
+                    # its files get their "added" time (review 14 item 1.2)
+                    self._note_fold_ins("full build part")
                 if len(plan["slices"]) > 1:
                     log.info("analytics build: part %d of %d done (%s, %.0fs)",
                              idx + 1, len(plan["slices"]), rollplan.slice_label(sl),
                              time.monotonic() - t_slice)
             self._finish_plan(con, plan, log)
+            self._note_fold_ins("full build" if plan["kind"] == "full" else "name refresh")
             took = time.monotonic() - t_locked
             self.last_rollup_build_seconds = took
             log.info("analytics build finished in %.0fs", took)
@@ -5479,22 +5667,71 @@ class Store:
             return None
         return self._rollup_failure
 
+    def _watch_job_con(self, con: duckdb.DuckDBPyConnection) -> None:
+        """Let the activity panel read DuckDB's own progress of the running
+        statement (the round-13 progress module's method, on the rollup's own
+        connection only). Cosmetic: never raises."""
+        try:
+            con.execute("SET enable_progress_bar = true")
+            con.execute("SET enable_progress_bar_print = false")
+            con.execute("SET progress_bar_time = 0")
+            if isinstance(self._rollup_job, dict):
+                self._rollup_job["con"] = con
+        except Exception:  # noqa: BLE001
+            pass
+
     def rollup_job(self) -> dict | None:
-        """The running build's progress: {pct, slice, slices, label, eta_s} —
-        None when nothing is building. Percent = work of committed slices over
-        the plan's total (each slice weighted by the raw rows it reads); the
-        ETA is from this session's measured rate. Never raises."""
+        """The running build's progress — None when nothing is building.
+        {kind, pct, slice, slices, label, eta_s, rate_rows_s, rows_done,
+        rows_total, files, payers, started}. Percent = work of committed units
+        over the total (a plan's slices weighted by the raw rows they read; an
+        update's partitions) plus DuckDB's own progress of the running
+        statement inside the current unit; never backwards. The ETA and the
+        rate appear only after one unit was measured (review 14 item 1.2:
+        "about", never a guess). Never raises."""
         job = self._rollup_job
         if not job or not self._rollup_active:
             return None
         try:
             total = max(1, int(job.get("work_total") or 1))
             done = min(total, int(job.get("work_done") or 0))
+            frac = 0.0
+            con = job.get("con")
+            if con is not None and done < total:
+                try:
+                    qp = con.query_progress()
+                    if qp is not None and 0 <= qp <= 100:
+                        cur = int(job.get("slice") or 0)
+                        w = 1
+                        sl = job.get("slice_work")
+                        if sl:
+                            w = max(1, int(sl))
+                        frac = (qp / 100.0) * w
+                        if job.get("_q_slice") == cur:
+                            frac = max(frac, float(job.get("_q_frac") or 0.0))
+                        job["_q_slice"], job["_q_frac"] = cur, frac
+                except Exception:  # noqa: BLE001 — a closed handle
+                    frac = 0.0
+            pct = min(99, int(100 * (done + frac) / total))
+            pct = max(pct, int(job.get("_pct_max") or 0))
+            job["_pct_max"] = pct
             rate = job.get("rate")
-            eta = (total - done) / rate if rate else None
-            return {"kind": job.get("kind"), "pct": min(99, int(100 * done / total)),
+            eta = (total - done) / rate if rate and job.get("kind") in ("full", "names") else None
+            rrate = None
+            el = time.time() - float(job.get("started") or time.time())
+            if job.get("rows_done") and el > 0 and done > 0:
+                rrate = int(job["rows_done"]) / el
+                if job.get("kind") not in ("full", "names") and job.get("rows_total"):
+                    left = max(0, int(job["rows_total"]) - int(job["rows_done"]))
+                    eta = left / rrate if rrate else None
+            return {"kind": job.get("kind"), "pct": pct,
                     "slice": int(job.get("slice") or 0), "slices": int(job.get("slices") or 0),
-                    "label": job.get("label") or "", "eta_s": eta}
+                    "label": job.get("label") or "", "eta_s": eta if done > 0 else None,
+                    "rate_rows_s": rrate, "rows_done": int(job.get("rows_done") or 0),
+                    "rows_total": int(job.get("rows_total") or 0),
+                    "files": list(job.get("files") or []),
+                    "payers": list(job.get("payers") or []),
+                    "started": job.get("started")}
         except Exception:  # noqa: BLE001
             return None
 
@@ -6507,105 +6744,252 @@ class Store:
         self._coverage_cache = (time.monotonic(), out, (self.data_generation, self._rollup_active))
         return out
 
-    def _analytics_coverage(self) -> dict:
-        from . import rollplan
-        inv = self.loaded_inventory()
-        with self.connect() as con:
-            files = con.execute(
-                "SELECT filename, finished_at::VARCHAR, coalesce(rows_emitted, 0), payer "
-                "FROM files WHERE status = 'done' AND rows_emitted > 0 "
-                "AND coalesce(file_type, '') <> 'provider_reference'").fetchall()
-            built = bool(self._meta_get(con, "rollup_schema_version"))
-            marker = self._meta_get(con, "rollup_covered_through") or ""
-            names = set(json.loads(self._meta_get(con, "rollup_covered_names") or "[]"))
-            needs_full = self._meta_get(con, "rollup_needs_full") == "1"
-            pending = self._read_pending_payers(con)[1]
-            plan = self._plan_get(con)
-            part_payers: dict[str, set] = {}
-            for part, payer in con.execute(
-                    "SELECT DISTINCT part, payer FROM part_payer_set").fetchall():
-                part_payers.setdefault(part, set()).add(payer)
+    def _coverage_facts(self, con: duckdb.DuckDBPyConnection) -> dict:
+        """The raw facts every coverage answer is computed from — ONE rule for
+        the header, the payer chips, /api/payers, the activity panel, the
+        fold-in events and every document sentence (review 14 items 1.1c and
+        2.7: the header said 0 of 4 payers while the chips said 3 and every
+        payer was answering)."""
+        files = con.execute(
+            "SELECT filename, finished_at::VARCHAR, coalesce(rows_emitted, 0), payer "
+            "FROM files WHERE status = 'done' AND rows_emitted > 0 "
+            "AND coalesce(file_type, '') <> 'provider_reference'").fetchall()
+        built = bool(self._meta_get(con, "rollup_schema_version"))
+        marker = self._meta_get(con, "rollup_covered_through") or ""
+        names = set(json.loads(self._meta_get(con, "rollup_covered_names") or "[]"))
+        needs_full = _needs_full_set(self._meta_get(con, "rollup_needs_full"))
+        pending = self._read_pending_payers(con)[1]
+        plan = self._plan_get(con)
+        part_payers: dict[str, set] = {}
+        part_rows: dict[tuple, int] = {}
+        for part, payer, n in con.execute(
+                "SELECT part, payer, sum(n) FROM part_payer_set GROUP BY part, payer").fetchall():
+            part_payers.setdefault(part, set()).add(payer)
+            part_rows[(part, payer)] = int(n or 0)
         # files the analytics hold: the coverage marker's (a completed build
         # or update), plus — while a sliced build is part-way — every file
         # whose payers' slices it has committed (and which it snapshotted)
         plan_done: set = set()
+        part_way: set = set()
+        plan_parts: dict = {}
+        p_ts, p_names = "", set()
         if plan is not None:
             last: dict = {}
+            first: dict = {}
+            nxt = int(plan.get("next", 0))
             for i, sl in enumerate(plan["slices"]):
                 if sl.get("t") == "spine":
-                    last[sl.get("payer")] = i
-            plan_done = {p for p, i in last.items() if i < int(plan.get("next", 0))}
+                    p = sl.get("payer")
+                    last[p] = i
+                    first.setdefault(p, i)
+                    tot, dn = plan_parts.get(p, (0, 0))
+                    plan_parts[p] = (tot + 1, dn + (1 if i < nxt else 0))
+            plan_done = {p for p, i in last.items() if i < nxt}
+            # some of the payer's slices committed, not all: its rows in the
+            # spine are a mix of rebuilt and not yet rebuilt (or missing)
+            part_way = {p for p, i in last.items() if i >= nxt and first[p] < nxt} \
+                if plan.get("kind") == "full" else set()
             p_ts, p_names = plan.get("cover_ts") or "", set(plan.get("cover_names") or [])
 
-        def covered(fn: str, ts: str | None) -> bool:
+        def covered(fn: str, ts: str | None, payer: str | None) -> bool:
             if ts is None:      # (no finish time: rollups_stale never counts it either)
                 return built
             if built and (ts < marker or (ts == marker and fn in names)):
                 return True
             if plan is not None and plan.get("kind") == "full" \
                     and (ts < p_ts or (ts == p_ts and fn in p_names)):
-                pp = part_payers.get(f"{file_key(fn)}.parquet")
+                # the part's own payers; while its per-part set is not counted
+                # yet, the file's payer (a sample mid first build read "2 of 2
+                # payers (0 of 2 files)" — review 14 item 1.1f)
+                pp = part_payers.get(f"{file_key(fn)}.parquet") or ({payer} if payer else set())
                 return bool(pp) and pp <= plan_done
             return False
 
-        cov = [f for f in files if covered(f[0], f[1])]
+        return {"files": files, "covered": [covered(f[0], f[1], f[3]) for f in files],
+                "built": built, "needs_full": needs_full, "pending": pending,
+                "plan": plan, "plan_done": plan_done, "part_way": part_way,
+                "plan_parts": plan_parts, "part_payers": part_payers,
+                "part_rows": part_rows}
+
+    def _analytics_coverage(self) -> dict:
+        from . import rollplan
+        inv = self.loaded_inventory()
+        with self.connect() as con:
+            f = self._coverage_facts(con)
+        files, plan = f["files"], f["plan"]
+        cov = [fl for fl, c in zip(files, f["covered"]) if c]
         spine_payers = self.spine_payers()
         loaded = list(inv["payers"]) if inv.get("complete") else sorted(
-            set(inv["payers"]) | set(spine_payers) | {f[3] for f in files if f[3]})
-        covered_list = [p for p in spine_payers if p in set(loaded)]
-        if plan is not None and plan.get("kind") == "full":
-            # a payer whose slices are only part-way committed has SOME rows
-            # in the spine but is not covered: counting it said "1 of 15
-            # payers (0 of 45 files)" mid-build (the 99M UI check)
-            covered_list = [p for p in covered_list if p not in last or p in plan_done]
+            set(inv["payers"]) | set(spine_payers) | {fl[3] for fl in files if fl[3]})
+        # THE payer rule: in the spine and not half-rebuilt. During a rebuild
+        # of an EXISTING spine a payer the plan has not reached still has all
+        # its previous rows, and they answer every screen (review 14 1.1c/2.7)
+        covered_list = [p for p in spine_payers if p in set(loaded) and p not in f["part_way"]]
+        needs_full, pending = f["needs_full"], f["pending"]
         stale = (needs_full or bool(pending) or plan is not None
                  or len(cov) < len(files))
         failure = self.rollup_failure()
         job = self.rollup_job()
+        paused = self.analytics_paused()
         if self._rollup_active:
             state = "building"
-        elif failure:
+        elif failure and stale:
             state = "failed"
         elif stale:
             state = "behind"
         else:
             state = "current"
         pct = job["pct"] if job else None
-        eta = rollplan.eta_text(job["eta_s"]) if job else ""
+        eta = rollplan.eta_text(job["eta_s"]) if job and job.get("eta_s") else ""
         n_new = len(files) - len(cov)
+        rebuilding = plan is not None and plan.get("kind") == "full" and f["built"]
+        parts_saved = (int(plan.get("next", 0)), len(plan["slices"])) if plan is not None else None
+        when = self._foldin_when()
+        kind = (job or {}).get("kind")
         if state == "building":
-            if job and job.get("kind") == "full":
-                reason = (f"Rolling up the rest — {pct} %" + (f", {eta}" if eta else "")
+            if kind == "full":
+                what = "Rebuilding the analytics" if rebuilding else "Building the analytics"
+                reason = (f"{what} — {pct} %" + (f", {eta}" if eta else "")
                           + (f" ({job['label']})" if job.get("label") else ""))
-            elif job and job.get("kind") == "names":
-                reason = "Refreshing practice names and places"
+            elif kind == "names":
+                reason = (f"Refreshing practice names and places — {pct} %"
+                          + (f", {eta}" if eta else ""))
+            elif kind == "names_refresh":
+                reason = "Refreshing the names of newly identified practices"
+            elif kind == "remove":
+                reason = "Taking a removed file's numbers out of the analytics"
             else:
-                reason = "Adding the newly loaded files to the analytics"
+                nf = len((job or {}).get("files") or [])
+                reason = (f"Adding {nf:,} newly loaded file{'s' if nf != 1 else ''} to the "
+                          "analytics" if nf else "Adding the newly loaded files to the analytics")
+                if pct:
+                    reason += f" — {pct} %"
         elif state == "failed":
             reason = failure.get("sentence") or "stopped"
             reason = (reason if reason.startswith("stopped") else "stopped: " + reason) \
                 + " — Files tab"
         elif plan is not None:
-            reason = (f"A full analytics build is part-way ({plan.get('next', 0)} of "
-                      f"{len(plan['slices'])} parts saved) — it continues when the "
-                      "queue is idle")
+            what = ("The analytics are being rebuilt" if rebuilding else
+                    "The analytics build is part-way") if plan.get("kind") == "full" \
+                else "The practice-name build is part-way"
+            reason = (f"{what} ({parts_saved[0]} of {parts_saved[1]} parts saved)"
+                      + (" — the rows in place still answer every screen" if rebuilding else "")
+                      + (f"; it continues {when}" if when else ""))
         elif needs_full:
-            reason = "The analytics need one full rebuild — it runs when the queue is idle"
+            reason = "The analytics need one full rebuild" + (f" — it runs {when}" if when else "")
         elif n_new or pending:
             reason = (f"{n_new:,} newly loaded file{'s' if n_new != 1 else ''} not in the "
-                      "analytics yet — added when the queue is idle") if n_new else \
-                     "A removed file's numbers are being taken out — next analytics update"
+                      "analytics yet" + (f" — added {when}" if when else "")) if n_new else \
+                     ("A removed file's numbers are still in the analytics — they come out "
+                      + (when or "at the next update"))
         else:
             reason = ""
+        if paused and stale and state != "building":
+            reason = "Analytics paused — " + (reason[0].lower() + reason[1:] if reason else
+                                              "nothing is added until you resume")
+        cov_rows = sum(fl[2] for fl in cov)
         return {
             "state": state, "reason": reason, "pct": pct, "eta_text": eta,
             "covered_files": len(cov), "done_files": len(files),
             "covered_payers": len(covered_list), "loaded_payers": len(loaded),
-            "covered_rows": int(sum(f[2] for f in cov)),
-            "loaded_rows": int(sum(f[2] for f in files)),
+            "covered_rows": int(cov_rows),
+            "loaded_rows": int(sum(fl[2] for fl in files)),
             "covered": covered_list, "loaded": loaded,
             "failure": failure, "inventory_complete": bool(inv.get("complete")),
+            "paused": bool(paused), "rebuilding": bool(rebuilding),
+            "part_way": sorted(p for p in f["part_way"] if p is not None),
+            "parts_saved": list(parts_saved) if parts_saved else None,
+            "pending_removal": bool(pending), "needs_full": bool(needs_full),
+            "new_files": int(n_new), "plan_kind": plan.get("kind") if plan else None,
         }
+
+    def _foldin_when(self) -> str:
+        """When the waiting work goes in, from the fold-in scheduler's real
+        state ("in about 4 min (the queue is busy)", "in a few seconds",
+        "when you resume") — '' with no scheduler (a CLI command updates its
+        analytics itself before it returns). Never raises."""
+        try:
+            f = self.foldin
+            return f.when_text() if f is not None and f.is_running() else ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    # -- pause + fold-in events (review 14 item 1.2) ---------------------------
+
+    def analytics_paused(self) -> bool:
+        """The user's "Pause analytics" switch (persisted). Never raises."""
+        if self._analytics_paused is _MISSING:
+            try:
+                with self.connect() as con:
+                    self._analytics_paused = self._meta_get(con, "analytics_paused") == "1"
+            except Exception:  # noqa: BLE001
+                return False
+        return bool(self._analytics_paused)
+
+    def set_analytics_paused(self, paused: bool) -> None:
+        with self.write_lock, self.connect() as con:
+            if paused:
+                con.execute("INSERT OR REPLACE INTO meta VALUES ('analytics_paused', '1')")
+            else:
+                con.execute("DELETE FROM meta WHERE key = 'analytics_paused'")
+        self._analytics_paused = bool(paused)
+        self._coverage_cache = None
+
+    FOLD_EVENTS_KEEP = 200
+
+    def _note_fold_ins(self, kind: str) -> list[dict]:
+        """Record one event per file that the analytics hold now and did not
+        at the last call — the moment the coverage marker or a plan's
+        committed slices first include it — in a ring of the last 200 kept in
+        `meta` (it survives a restart). This is what the panel's "Added
+        recently" shows and what the tests read. Cosmetic: never raises, never
+        fails the update that called it."""
+        try:
+            now = _utcnow()
+            with self.connect() as con:
+                f = self._coverage_facts(con)
+                raw_known = self._meta_get(con, "analytics_known_covered")
+                raw_events = self._meta_get(con, "analytics_events")
+            have = {f"{fl[0]}|{fl[1]}": fl for fl, c in zip(f["files"], f["covered"]) if c}
+            events = json.loads(raw_events) if raw_events else []
+            if raw_known is None:
+                known: set = set(have)          # first run of 0.8.0: no backlog of events
+                fresh = []
+            else:
+                known = set(json.loads(raw_known))
+                fresh = sorted((have[k] for k in have.keys() - known), key=lambda r: (r[1] or "", r[0]))
+            for fn, ts, rows, payer in fresh:
+                waited = None
+                try:
+                    t0 = dt.datetime.fromisoformat(str(ts)).replace(tzinfo=None)
+                    waited = round(max(0.0, (now - t0).total_seconds()), 1)
+                except (TypeError, ValueError):
+                    pass
+                events.append({"file": fn, "payer": payer, "rows": int(rows or 0),
+                               "loaded_at": ts, "added_at": now.isoformat(timespec="seconds"),
+                               "waited_s": waited, "kind": kind})
+            events = events[-self.FOLD_EVENTS_KEEP:]
+            if fresh or raw_known is None or set(have) != known:
+                with self.write_lock, self.connect() as con2:
+                    con2.execute("INSERT OR REPLACE INTO meta VALUES ('analytics_known_covered', ?)",
+                                 [json.dumps(sorted(have))])
+                    con2.execute("INSERT OR REPLACE INTO meta VALUES ('analytics_events', ?)",
+                                 [json.dumps(events)])
+            self._coverage_cache = None
+            return [e for e in events[-len(fresh):]] if fresh else []
+        except Exception as e:  # noqa: BLE001 — cosmetic tier
+            logging.getLogger(__name__).debug("fold-in events not recorded (%s)", e)
+            return []
+
+    def analytics_events(self, limit: int = 50) -> list[dict]:
+        """The last `limit` fold-in events, newest first. Never raises."""
+        try:
+            with self.connect() as con:
+                raw = self._meta_get(con, "analytics_events")
+            ev = json.loads(raw) if raw else []
+            return list(reversed(ev))[:max(0, int(limit))]
+        except Exception:  # noqa: BLE001
+            return []
 
     def analytics_note(self) -> list[str]:
         """The coverage sentence every methodology and CSV sidecar prints while
