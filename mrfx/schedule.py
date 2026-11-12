@@ -25,6 +25,7 @@ import statistics
 from .rounding import half_up
 from . import __version__, progress
 from .benchmark import (
+    PRACTICE_RATE_RULE,
     anchor_state,
     market_in_words,
     basis_note_for,
@@ -329,6 +330,9 @@ def _methodology(store: Store, fee_schedule: dict) -> str:
         f"Market definition: {market_in_words(market)}.",
         *store.analytics_note(),
         fee_schedule["basis_note"],
+        # the peer columns are all-payer practice rates (review 14 Group 3:
+        # round 13 promised the 4.2 rule "with every all-payer figure")
+        PRACTICE_RATE_RULE,
         "Rate for a (payer, code) is the median across the subject's tax IDs of "
         "each tax ID's median published value (variants collapse per the app's "
         "dedup rule).",

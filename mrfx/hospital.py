@@ -449,6 +449,26 @@ def import_hospital_file(store: Store, path: str | Path, *,
                          "therapy line at all"),
                 "caveat": HOSPITAL_CAVEAT}
 
+    # a second hospital with the same NAME in another place (or from another
+    # file) silently REPLACED the first (review 14 Group 3: two "Mercy
+    # Hospital" files in MO, the parity line kept only the second). The same
+    # hospital re-imported (same place) still replaces itself — idempotent.
+    with store.connect() as con:
+        try:
+            prev = con.execute("SELECT state, city, source_file FROM hospital_files "
+                               "WHERE hospital_name = ?", [name]).fetchone()
+        except Exception:  # noqa: BLE001 — no table yet
+            prev = None
+    if prev and prev[2] != path.name and (
+            (prev[0] or None) != (st or None) or (prev[1] or None) != (ct or None)):
+        # (the SAME file loaded again — e.g. with the --state it lacked — is
+        # the same hospital and replaces itself)
+        where = ", ".join(x for x in (prev[1], prev[0]) if x) or "no place recorded"
+        raise HospitalImportError(
+            f"a hospital named {name!r} is already loaded ({where}, from {prev[2]}) — "
+            "this file would replace it. To keep both, give this one its own name "
+            "(mrfx hospital <file> --name \"<name> — <city>\"); to replace it, "
+            "forget the loaded one first")
     out_dir = Path(store.dir) / "hospital"
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / f"{_slug(name)}.parquet"

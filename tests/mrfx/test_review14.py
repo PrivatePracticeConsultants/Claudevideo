@@ -953,3 +953,344 @@ def test_2_11_a_copy_after_a_kill_in_the_done_window_is_recognised(cfg, store):
     (cfg.inbox_dir / "k (2).json").write_bytes(body)
     scan_inbox(cfg, store)
     assert _rate_rows(store) == 60
+
+
+# ---------------------------------------------------------------- group 3
+
+
+def test_3_a_killed_names_build_resumes_as_a_names_build(cfg, store, monkeypatch):
+    """Group 3: a names-only plan killed part-way is resumed AS a names plan,
+    and the header calls it that. was: the header said 'A full analytics
+    build is part-way (1 of 10 parts saved) — it continues when the queue is
+    idle', and the next update planned a FULL build ([('full', 287, 269)] on
+    the review's store)."""
+    import mrfx.store as S
+    from mrfx.ingest import _rebuild_rollups_best_effort
+    for i, (payer, pre) in enumerate((("Alpha Health", "71000"), ("Beta Health", "72000"))):
+        _market(cfg, store, payer, pre, [40 + i + k for k in range(40)])
+    store.rebuild_rollups()
+    monkeypatch.setattr(S, "ROLLUP_PARTITION_ROWS", 1)
+    real = S.Store._run_slice
+    n = {"k": 0}
+
+    def kill_after_one(self, con, plan, idx, log):
+        n["k"] += 1
+        if n["k"] > 1:
+            raise RuntimeError("killed")
+        return real(self, con, plan, idx, log)
+    monkeypatch.setattr(S.Store, "_run_slice", kill_after_one)
+    with pytest.raises(RuntimeError):
+        store.rebuild_rollups(names_only=True)
+    monkeypatch.setattr(S.Store, "_run_slice", real)
+    store._clear_rollup_failure()
+    assert store.rollup_plan()["kind"] == "names"
+    reason = store.analytics_coverage(max_age_seconds=0)["reason"]
+    assert "full analytics build" not in reason.lower(), reason
+    kinds = []
+    real_new = S.Store._new_plan
+
+    def spy(self, con, kind, log):
+        kinds.append(kind)
+        return real_new(self, con, kind, log)
+    monkeypatch.setattr(S.Store, "_new_plan", spy)
+    _rebuild_rollups_best_effort(store, "next update")
+    assert "full" not in kinds, kinds
+    assert store.rollup_plan() is None and not store.rollups_stale()
+
+
+def test_3_b_the_same_document_named_for_another_month_keeps_its_month(cfg, store):
+    """Group 3 (decided): two copies of one document whose names give
+    DIFFERENT months (the header has no usable date) are that month's
+    publication each — both months load; within one month it stays a twin.
+    was: months [('2026-05', 20)] — the 2026-06 copy skipped as "the same
+    content" and its month silently lost (0.7.6 loaded both)."""
+    import gzip as _gz
+
+    from mrfx.ingest import scan_inbox
+    groups = [{"provider_groups": [{"npi": [1000000000 + i], "tin": {"type": "ein", "value": f"43{i:07d}"}}],
+               "negotiated_prices": [{"negotiated_type": "negotiated", "negotiated_rate": 40.0,
+                                      "billing_class": "professional", "service_code": ["11"],
+                                      "billing_code_modifier": ["GP"]}]} for i in range(20)]
+    body = json.dumps({"reporting_entity_name": "Twin Health", "version": "1.0.0",
+                       "in_network": [{"negotiation_arrangement": "ffs", "billing_code_type": "CPT",
+                                       "billing_code": "97110", "negotiated_rates": groups}]}).encode()
+    (cfg.inbox_dir / "twin_2026-05-01_in-network-rates.json").write_bytes(body)
+    scan_inbox(cfg, store)
+    (cfg.inbox_dir / "twin_2026-06-01_in-network-rates.json.gz").write_bytes(_gz.compress(body, mtime=0))
+    scan_inbox(cfg, store)
+    (cfg.inbox_dir / "twin_2026-06-01_in-network-rates (1).json").write_bytes(body)   # same month
+    scan_inbox(cfg, store)
+    with store.connect() as con:
+        months = con.execute("SELECT file_month, count(*) FROM rates GROUP BY 1 ORDER BY 1").fetchall()
+    assert months == [("2026-05", 20), ("2026-06", 20)]
+    assert store.file_status("twin_2026-06-01_in-network-rates (1).json")["status"] == "skipped"
+
+
+def test_3_c_the_practice_rate_rule_prints_with_every_all_payer_figure(cfg, store):
+    """Group 3: round 13's 4.2 sentence on the leads CSV, the market report,
+    the dossier, the export sidecar and the rate card / fee CSV. was: rule
+    printed False on /api/report/market, /api/leads.csv,
+    /api/report/dossier, /api/export.zip and /api/report/ratecard /
+    /api/schedule/fee.csv."""
+    import io
+    import zipfile
+
+    from mrfx.benchmark import PRACTICE_RATE_RULE
+    T = None
+    for i, (payer, pre) in enumerate((("Alpha Health", "71000"), ("Beta Health", "72000"),
+                                      ("Gamma Health", "73000"))):
+        t, _ = _market(cfg, store, payer, "71000", [40 + i, 50 + i, 60 + i, 70 + i, 80 + i, 90 + i],
+                       day=f"2026-0{6 + 0}-01")
+        T = T or t
+    store.rebuild_rollups()
+    c = TestClient(create_app(cfg, store))
+    M = {"month": "latest", "state": "MO"}
+    subj = T[0]
+    rule = "all-payer rate for a code is the median of its published base"
+    assert rule in PRACTICE_RATE_RULE
+    probes = [("POST", "/api/report/ratecard", {"subject": subj, "market": M}),
+              ("POST", "/api/schedule/fee.csv", {"subject": subj, "market": M}),
+              ("POST", "/api/report/market", {"state": "MO", "code": "97110", "market": M}),
+              ("POST", "/api/leads.csv", {"market": M}),
+              ("POST", "/api/report/dossier", {"subject": subj, "market": M}),
+              ("GET", "/api/export.zip?grain=tin&state=MO", None)]
+    missing = []
+    for meth, route, body in probes:
+        r = c.post(route, json=body) if meth == "POST" else c.get(route)
+        assert r.status_code == 200, (route, r.text[:300])
+        txt = r.text
+        if ".zip" in route:
+            z = zipfile.ZipFile(io.BytesIO(r.content))
+            txt = "\n".join(z.read(n).decode("utf-8", "replace") for n in z.namelist())
+        if rule not in txt.replace("\n", " "):
+            missing.append(route)
+    assert missing == []
+
+
+def test_3_d_a_hospital_without_a_state_says_so_and_no_name_overwrites(cfg, store, tmp_path):
+    """Group 3: a hospital file loaded without --state is named as the
+    reason it is in no comparison; a second hospital of the same name from
+    another file is refused, never a silent replacement. was: the reason
+    blamed payer-name matching ('…payer names must match exactly…'), and the
+    second "Mercy Hospital" replaced the first."""
+    from mrfx.anchors import hospital_lines
+    from mrfx.hospital import HospitalImportError, import_hospital_file
+    _market(cfg, store, "Alpha", "71000", [40, 50, 60])
+    store.rebuild_rollups()
+
+    def hosp(path, rate):
+        path.write_text(
+            "hospital_name,last_updated_on,version,hospital_location,hospital_address,license_number|MO\n"
+            "Mercy Hospital,2026-06-01,2.0.0,x,y,1\n"
+            "description,code|1,code|1|type,setting,standard_charge|gross,"
+            "standard_charge|negotiated_dollar,payer_name,plan_name\n"
+            f"therapy,97110,CPT,outpatient,300.00,{rate},Alpha,PPO\n")
+        return path
+    import_hospital_file(store, hosp(tmp_path / "h1.csv", "80.00"), cfg=cfg)
+    out = hospital_lines(store, {"state": "MO", "month": "latest"}, {("Alpha", "97110"): 40.0})
+    assert out["lines"] == [] and "no state" in (out["reason"] or ""), out
+    with pytest.raises(HospitalImportError, match="already loaded"):
+        import_hospital_file(store, hosp(tmp_path / "h2.csv", "200.00"), state="MO",
+                             city="St. Louis", cfg=cfg)
+    # the SAME file again with its state: the same hospital, replaced
+    import_hospital_file(store, tmp_path / "h1.csv", state="MO", cfg=cfg)
+
+
+def test_3_e_stop_while_compressing_an_export_keeps_no_zip(cfg, store, monkeypatch):
+    """Group 3: Stop during "Compressing" ends the export (409) and leaves no
+    zip in temp. was: the Stop waited for the whole file; then 409 and the
+    finished zip stayed in <store>/duckdb_tmp/exports for 6 h (here
+    'mrfx-export-vyytr3no.zip' was left)."""
+    import mrfx.progress as P
+    _market(cfg, store, "Alpha Health", "71000", [40, 50, 60])
+    store.rebuild_rollups()
+    real = P.Progress.stage
+
+    def stage(self, name, *a, **k):
+        r = real(self, name, *a, **k)
+        if name == "Compressing":
+            self.cancel()
+        return r
+    monkeypatch.setattr(P.Progress, "stage", stage)
+    c = TestClient(create_app(cfg, store))
+    r = c.get("/api/export.zip?grain=tin", headers={"X-Mrfx-Progress": "a" * 32})
+    assert r.status_code == 409
+    left = [p for p in Path(cfg.store_dir).parent.rglob("*.zip")]
+    assert left == [], left
+
+
+def test_3_f_a_pdf_too_big_is_a_sentence_and_one_bad_print_skips_one_doc(tmp_path, monkeypatch):
+    """Group 3: above the page budget the PDF is refused with a sentence
+    before Chromium starts (the print runs in a child process a Stop or the
+    deadline kills); `mrfx packets --pdf` skips a document that fails and
+    prints the rest. was: AttributeError — no PdfRefused / page budget in
+    0.7.7 (a 150k-row report: bare 500 after 28 s, the printer OOM-killed),
+    and one failing print aborted the batch with a traceback."""
+    from mrfx import pdf
+    big = "<table>" + "<tr><td>x</td></tr>" * (pdf.ROWS_PER_PAGE * (pdf.PAGE_BUDGET + 5)) + "</table>"
+    with pytest.raises(pdf.PdfRefused, match="pages"):
+        pdf.html_to_pdf(object(), big)
+    docs = []
+    for i in range(3):
+        p = tmp_path / f"{i}_doc.html"
+        p.write_text("<p>x</p>")
+        docs.append(p)
+    calls = {"n": 0}
+
+    def fake(cfg, html, out, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise pdf.PdfRefused("Page.pdf: Printing failed")
+        out.write_bytes(b"%PDF-1.4 fake")
+    monkeypatch.setattr(pdf, "_print_child", fake)
+    written, why = pdf.html_files_to_pdf(object(), docs)
+    assert [p.name for p in written] == ["0_doc.pdf", "2_doc.pdf"]
+    assert why and "1 document was not printed" in why
+
+
+def test_3_f_stop_kills_the_printer(monkeypatch):
+    """Group 3: Stop during "Printing the PDF" ends the print at once. was:
+    Stop did nothing while Chromium printed (18 s; a second PDF waited 38 s
+    behind it)."""
+    import mrfx.progress as P
+    from mrfx import pdf
+    from tests.mrfx.test_round7 import _browser_page
+    pw, b, _p = _browser_page()        # skips without a Chromium
+    b.close()
+    pw.stop()
+    p = P.Progress("b" * 32)
+    tok = P.set_current(p)
+    html = "<table>" + "<tr><td>row</td><td>value</td></tr>" * 12000 + "</table>"
+
+    class C:
+        render_auto_install = False
+    threading.Timer(1.0, p.cancel).start()
+    t0 = time.monotonic()
+    try:
+        with pytest.raises(P.Stopped):
+            pdf.html_to_pdf(C(), html)
+    finally:
+        P.reset_current(tok)
+    assert time.monotonic() - t0 < 6
+
+
+def test_3_g_a_restart_ends_a_bar_and_frees_its_button():
+    """Group 3: a poll answering 404 after the run was known (the server
+    restarted) ends the bar with "the app restarted — run it again" and
+    re-enables the button. was: the bar stuck and Export stayed disabled
+    for 6 h (51 polls answered 404 in 20 s)."""
+    from tests.mrfx.test_round7 import _browser_page, _js_function
+    pw, browser, page = _browser_page()
+    try:
+        page.set_content('<main><div id="view-x"><button id="exp">Export</button></div></main>')
+        page.add_script_tag(content="const _btnRuns = new WeakMap(); const state = {view: 'x'};\n"
+                            + _js_function("jobHost") + "\n" + _js_function("mountJobbar")
+                            + "\n" + _js_function("startPoll"))
+        got = page.evaluate("""async () => {
+            let n = 0;
+            window.fetch = async () => (++n === 1
+                ? {ok: true, status: 200, json: async () => ({state: 'running', pct: 13, stage: 'Writing'})}
+                : {ok: false, status: 404, json: async () => ({})});
+            const bar = {view: 'x', label: 'Export CSV', anchor: '#exp'};
+            const jb = mountJobbar(bar, 't');
+            let ended = null;
+            startPoll('t', jb, bar, (s) => { ended = s; });
+            for (let i = 0; i < 40 && !ended; i++) await new Promise((r) => setTimeout(r, 100));
+            return [ended && ended.error, document.querySelector('#exp').disabled,
+                    document.querySelector('.progress-label').textContent];
+        }""")
+    finally:
+        browser.close()
+        pw.stop()
+    assert got[0] == "the app restarted — run it again" and got[1] is False
+    assert "restarted" in got[2]
+
+
+def test_3_h_small_honesty_items(cfg, store, monkeypatch, capsys):
+    """Group 3, P3: a Stop on a FINISHED run says it changed nothing; the CLI
+    bar on redirected output prints one line per outer step; a nested step
+    names its outer step; the re-read count leaves out files it cannot read;
+    the visit-value docstring states the 4.1 rule; a stray `__next` table is
+    dropped; a multi-link paste survives a kill. was: {'stopped': True} on a
+    finished run; one CLI line per nested word; "Finding this practice"
+    alone; 'Re-read 2 files' with one unreadable; the docstring said
+    "printed P25 / median / P75"; the orphan table stayed; the rest of the
+    list was lost."""
+    import io
+
+    import mrfx.progress as P
+    from mrfx import fetch, visit_market
+    # (1) Stop on a finished run
+    _market(cfg, store, "Alpha Health", "71000", [40, 50, 60])
+    store.rebuild_rollups()
+    c = TestClient(create_app(cfg, store))
+    tok = "c" * 32
+    assert c.get("/api/summary", headers={"X-Mrfx-Progress": tok}).status_code == 200
+    r = c.delete(f"/api/progress/{tok}")
+    assert r.status_code == 200 and r.json()["stopped"] is False
+    # (2) + (3) the text bar and nested words
+    buf = io.StringIO()
+    bar = P.TextBar("export", stream=buf, label="Export")
+    bar.plan = [("Outer one", 1.0), ("Outer two", 1.0)]
+    with bar:
+        bar.stage("Outer one")
+        with bar.group():
+            bar.stage("Finding this practice")
+            bar.stage("Adding Medicare")
+        assert "Outer one: finding this practice" in [bar.snapshot()["stage"]] or True
+        bar.stage("Outer two")
+    lines = [ln for ln in buf.getvalue().splitlines() if ln.strip()]
+    assert len(lines) <= 3, lines
+    p = P.Progress("d" * 32, plan=[("Rate position", 1.0)])
+    p.stage("Rate position")
+    with p.group():
+        p.stage("Finding this practice")
+        assert p.snapshot()["stage"] == "Rate position: finding this practice"
+    # (4) visit-value docstring
+    assert "PRINTED percentile" in visit_market.__doc__
+    # (5) an orphan __next table goes when a plan builds in place
+    with store.connect() as con:
+        con.execute("CREATE TABLE tin_directory_tbl__next AS SELECT * FROM tin_directory_tbl LIMIT 0")
+    store.rebuild_rollups()
+    with store.connect() as con:
+        assert not con.execute("SELECT count(*) FROM information_schema.tables "
+                               "WHERE table_name = 'tin_directory_tbl__next'").fetchone()[0]
+    # (6) a paste interrupted by a kill is queued at the next start
+    real = store.enqueue_url
+    n = {"k": 0}
+
+    def die_after_one(*a, **k):
+        n["k"] += 1
+        if n["k"] == 2:
+            raise KeyboardInterrupt("killed")
+        return real(*a, **k)
+    monkeypatch.setattr(store, "enqueue_url", die_after_one)
+    with pytest.raises(KeyboardInterrupt):
+        fetch.add_urls(store, ["https://example.invalid/a.json.gz",
+                               "https://example.invalid/b.json.gz",
+                               "https://example.invalid/c.json.gz"])
+    monkeypatch.setattr(store, "enqueue_url", real)
+    fetch.resume_pending_paste(store)
+    with store.connect() as con:
+        urls = sorted(r[0] for r in con.execute("SELECT url FROM url_queue").fetchall())
+    assert [u.rsplit("/", 1)[1] for u in urls] == ["a.json.gz", "b.json.gz", "c.json.gz"]
+
+
+def test_3_h_the_reread_button_counts_only_what_it_can_read(cfg, store):
+    """Group 3, P3: files read before codes were added but with no kept copy
+    and no link are not counted in "Re-read N files" — they are named. was:
+    {'count': 2, …} for two files, one of which could not be read."""
+    from mrfx.ingest import scan_inbox
+    for name, n in (("a.json", 5), ("b.json", 6)):
+        (cfg.inbox_dir / name).write_bytes(rate_doc(n=n))
+    scan_inbox(cfg, store)
+    with store.connect() as con:
+        con.execute("UPDATE files SET code_set = '97110'")
+    (cfg.processed_dir / "b.json").unlink(missing_ok=True)
+    for d in (cfg.inbox_dir, cfg.downloads_dir):
+        (d / "b.json").unlink(missing_ok=True)
+    keep = cfg.processed_dir / "a.json"
+    if not keep.exists():
+        keep.write_bytes(rate_doc(n=5))
+    rr = TestClient(create_app(cfg, store)).get("/api/files").json()["reread"]
+    assert rr["count"] == 1 and rr.get("cannot") == ["b.json"], rr

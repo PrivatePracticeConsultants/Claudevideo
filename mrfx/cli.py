@@ -125,10 +125,11 @@ def _url_worker_loop(cfg: MrfxConfig, store: Store, stop: threading.Event) -> No
 
 
 def _monthly_refresh_loop(cfg: MrfxConfig, store: Store, stop: threading.Event) -> None:
-    """OPT-IN (monthly_refresh). Re-queue the tested payer indexes once per
-    calendar month so vintages stay current without the user remembering to
-    re-paste links — everything downstream (rate changes, the Clients digest,
-    month="latest") is only as fresh as the last ingest.
+    """The monthly pass: the RE-CHECK of every loaded index (monthly_recheck,
+    on by default — probes the loaded files, downloads only the changed ones,
+    names new ones without downloading them) and the OPT-IN queueing of new
+    dated months (monthly_refresh). Everything downstream (rate changes, the
+    Clients digest, month="latest") is only as fresh as the last ingest.
 
     ONCE PER MONTH, durably: the last month it ran is written to the store's
     meta table, so a restart (or five restarts) in the same month re-queues

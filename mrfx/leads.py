@@ -19,7 +19,7 @@ import datetime as dt
 from decimal import ROUND_HALF_UP, Decimal
 
 from . import __version__
-from .benchmark import (BenchmarkError, _market_where, _rates_relation, is_latest, market_in_words,
+from .benchmark import (PRACTICE_RATE_RULE, BenchmarkError, _market_where, _rates_relation, is_latest, market_in_words,
                         normalize_market, practice_base_sql, resolve_subject_tins)
 from .store import Store, defuse_csv, generation_cached, mask_tin
 
@@ -592,6 +592,7 @@ def leads_csv(store: Store, result: dict) -> str:
         f"at least {result['min_codes']} codes with a real market (≥2 providers).",
         f"Market definition: {market_in_words(m)}.",
         LEADS_RULE,
+        PRACTICE_RATE_RULE,
         *([f"List CUT at {result['limit']:,} leads; the market holds more. Narrow it "
            "(state, payer, discipline) or raise the minimum code count to see the rest."]
           if result.get("truncated") else []),

@@ -124,14 +124,16 @@ class MrfxConfig(BaseModel):
     # re-paste links. Everything downstream (rate changes, the Clients digest,
     # month="latest") is only as fresh as the last ingest. Off by default: it
     # spends bandwidth and disk on your machine, so it should be your choice.
-    # Content-hash dedup means a payer that republished nothing costs one HEAD
-    # per file, not a re-ingest.
+    # Content-hash dedup means a payer that republished nothing costs one
+    # 1-byte ranged GET per loaded file (the re-check's probe), not a re-ingest.
     monthly_refresh: bool = False
     # on (review 13 item 5.2.5): once a month every LOADED index — catalog or
     # pasted by the user — is fetched again and each of its loaded files asked
     # (one tiny request) whether the payer changed it; only changed files
-    # download. monthly_refresh above is the separate, opt-in queueing of NEW
-    # dated months of catalog sources.
+    # download. A file the index lists for the FIRST time is named on the
+    # index row, never downloaded by the check (review 14 item 2.8): paste
+    # the index again, or turn on monthly_refresh above (the opt-in queueing
+    # of NEW files and dated months), to load it.
     monthly_recheck: bool = True
     # Where `mrfx packets` writes client packets. Relative paths anchor to the
     # project folder; unset means <store_dir>/../packets.

@@ -162,9 +162,23 @@ def hospital_lines(store: Store, market: dict,
         out["lines"].append({"billing_code": code, "payers": by_code[code],
                              "text": f"{code}: " + "; ".join(parts) + "."})
     if not out["lines"]:
-        out["reason"] = (f"no loaded hospital file in {st} lists a rate from this "
-                         "practice's payers for these codes (payer names must match "
-                         "exactly between the two sources)")
+        # a file loaded without --state is in no state's comparison: say THAT
+        # (review 14 Group 3: the reason blamed payer-name matching)
+        try:
+            with store.connect() as con:
+                no_state = con.execute("SELECT count(*) FROM hospital_files WHERE "
+                                       "state IS NULL OR state = ''").fetchone()[0]
+        except Exception:  # noqa: BLE001
+            no_state = 0
+        if no_state:
+            out["reason"] = (f"{no_state} loaded hospital file{'s have' if no_state != 1 else ' has'} "
+                             f"no state, so {'they are' if no_state != 1 else 'it is'} in no "
+                             f"state's comparison — load {'them' if no_state != 1 else 'it'} "
+                             f"again with its state (mrfx hospital <file> --state {st})")
+        else:
+            out["reason"] = (f"no loaded hospital file in {st} lists a rate from this "
+                             "practice's payers for these codes (payer names must match "
+                             "exactly between the two sources)")
     return out
 
 

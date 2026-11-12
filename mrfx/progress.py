@@ -121,8 +121,14 @@ class Progress:
         with self._lock:
             if self._groups:
                 # nested stages only change the words; the group's slot moves
-                # by the nested run's own ticks / DuckDB readings
-                self._stage_name = name
+                # by the nested run's own ticks / DuckDB readings. The words
+                # keep the outer step in front (review 14 Group 3: "Finding
+                # this practice" flashed alone inside the dossier)
+                g = self._groups[0]
+                outer = (self.plan[g.parent_stage][0]
+                         if 0 <= getattr(g, "parent_stage", -1) < len(self.plan) else "")
+                self._stage_name = (f"{outer}: {name[:1].lower()}{name[1:]}"
+                                    if outer and outer != name else name)
                 self._q_max = 0.0
                 self._q_last = -1.0
                 self._emit_locked()
@@ -474,11 +480,14 @@ class TextBar(Progress):
                 if line != self._last_line:
                     self.stream.write("\r" + line.ljust(90))
                     self.stream.flush()
-            elif stage != self._last_stage or snap.get("state") == "done":
+            elif (snap.get("stage_index"), snap.get("stage_count")) != self._last_stage \
+                    or snap.get("state") == "done":
+                # redirected output: one line per OUTER step (review 14 Group
+                # 3, P3 — a line per nested word: ~10 per client in packets)
                 self.stream.write(line + "\n")
                 self.stream.flush()
             self._last_line = line
-            self._last_stage = stage
+            self._last_stage = (snap.get("stage_index"), snap.get("stage_count"))
         except Exception:  # noqa: BLE001
             pass
 

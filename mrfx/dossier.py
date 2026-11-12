@@ -31,6 +31,7 @@ from . import __version__, progress
 from .config import MrfxConfig
 from .sqlfn import modal_zip_of
 from .rounding import signed_pct
+from .benchmark import PRACTICE_RATE_RULE
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -386,7 +387,8 @@ def build_prospect_dossier(cfg: MrfxConfig, store: Store, subject: str,
         f"Generated {dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} "
         f"by MRF Explorer v{__version__}. Market: "
         f"{market_in_words({'month': 'latest', **market})}.\n"
-        + "".join(f"{x}\n" for x in store.analytics_note()) + DOSSIER_NOTE)
+        + "".join(f"{x}\n" for x in store.analytics_note()) + PRACTICE_RATE_RULE + "\n"
+        + DOSSIER_NOTE)
     title = f"Practice profile — {facts.get('display_name') or subject}"
     return {"subject": subject, "html": _doc(cfg, title, "\n".join(parts), footer),
             "facts": facts, "skipped": skipped, "note": DOSSIER_NOTE}
@@ -543,7 +545,7 @@ def build_market_report(cfg: MrfxConfig, store: Store, *, state: str,
     footer = (
         f"Generated {dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} "
         f"by MRF Explorer v{__version__}. As of {asof}. Market: {market_in_words(m)}.\n"
-        + "".join(f"{x}\n" for x in store.analytics_note())
+        + "".join(f"{x}\n" for x in store.analytics_note()) + PRACTICE_RATE_RULE + "\n"
         + DOSSIER_NOTE.replace("this dossier", "this report"))
     return {"state": st, "code": code,
             "html": _doc(cfg, f"Therapy market report — {st}",

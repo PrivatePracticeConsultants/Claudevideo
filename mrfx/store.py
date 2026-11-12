@@ -4954,7 +4954,10 @@ class Store:
                     "CREATE TEMP TABLE __delta_tins AS "
                     "SELECT DISTINCT r.tin_value FROM rates r "
                     "JOIN npi_directory d ON d.npi = r.npi "
-                    "WHERE r.tin_value IS NOT NULL AND d.enriched_at::VARCHAR >= ?",
+                    # the directory holds no NPI-in-the-TIN-slot rows: they
+                    # made the log say "4,007 of 3,511 TINs" (review 14 G3)
+                    "WHERE r.tin_value IS NOT NULL AND NOT r.tin_is_really_npi "
+                    "AND d.enriched_at::VARCHAR >= ?",
                     [covered])
                 n_new = con.execute("SELECT count(*) FROM __delta_tins").fetchone()[0]
                 if n_new:
@@ -5522,6 +5525,10 @@ class Store:
                         targets[tbl] = tbl
                     elif sorted(have) == sorted(want):
                         targets[tbl] = tbl
+                    if targets.get(tbl) == tbl:
+                        # a dropped plan of another rules version may have
+                        # left its shadow table (review 14 Group 3, P3)
+                        con.execute(f"DROP TABLE IF EXISTS {tbl}__next")
                     else:
                         con.execute(f"CREATE OR REPLACE TABLE {tbl}__next ({ddl})")
                         targets[tbl] = f"{tbl}__next"

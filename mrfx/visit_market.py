@@ -40,7 +40,8 @@ tests/mrfx/test_review12.py's hand-worked case):
   with the subject counted once in place of its own TINs ("this practice
   included", Leads' wording); $ and % against the mean and the median are
   computed from the unrounded mean / median and rounded once; its quartile is
-  read from the printed P25 / median / P75.
+  read from the PRINTED percentile (<25 Q1, <50 Q2, <75 Q3, else Q4 — review
+  13 item 4.1; P25 / median / P75 disagree with the percentile on ties).
 - Every printed number goes through rounding.half_up; rows are listed by
   payer name (unique), the all-payers row last; the screen, the printable
   card and the CSV are rendered from this one dict.

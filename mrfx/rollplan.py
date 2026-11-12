@@ -190,14 +190,16 @@ def failure_sentence(exc: BaseException, memory_gb: int | None = None) -> str:
     if "outofmemory" in name or "out of memory" in low or "could not allocate" in low \
             or "failed to pin block" in low:
         at = f" at {memory_gb} GB" if memory_gb else ""
-        return (f"ran out of memory{at} — it retries with smaller pieces when the "
-                "queue is idle; raising duckdb_memory_gb in config/mrfx.yaml helps")
+        # (review 14: "when the queue is idle" was never true — the analytics
+        # scheduler retries after a back-off, downloads or not)
+        return (f"ran out of memory{at} — it tries again by itself in a few minutes, "
+                "in smaller pieces; raising duckdb_memory_gb in config/mrfx.yaml helps")
     if "max_temp_directory_size" in low or "no space left" in low or "disk full" in low \
             or "not enough space" in low:
         return ("ran out of disk space for its temporary files — free some space "
-                "on the store's drive; it retries when the queue is idle")
+                "on the store's drive; it tries again by itself in a few minutes")
     first = msg.strip().splitlines()[0] if msg.strip() else exc.__class__.__name__
-    return f"stopped: {first[:160]} — it retries when the queue is idle"
+    return f"stopped: {first[:160]} — it tries again by itself in a few minutes"
 
 
 def eta_text(seconds: float | None) -> str:

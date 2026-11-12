@@ -177,15 +177,23 @@ function mountJobbar(bar, token) {
   };
 }
 function startPoll(token, jb, bar, onTerminal) {
-  let stopped = false, timer = null;
+  let stopped = false, timer = null, seenOk = false, misses = 0;
   const tick = async () => {
     if (stopped) return;
     try {
       const r = await fetch(`/api/progress/${token}`);
       if (r.ok) {
+        seenOk = true; misses = 0;
         const s = await r.json();
         jb.update(s);
         if (onTerminal && ["done", "failed", "stopped"].includes(s.state)) { onTerminal(s); return; }
+      } else if (r.status === 404 && (seenOk || ++misses >= 25)) {
+        // the server no longer knows this run: it restarted (review 14
+        // Group 3 — an iframe download's bar stuck and Export stayed
+        // disabled for 6 h). The bar ends and the button comes back.
+        jb.failed("the app restarted — run it again");
+        if (onTerminal) onTerminal({ state: "failed", error: "the app restarted — run it again" });
+        return;
       }
     } catch (_) { /* the request's own outcome decides */ }
     const slow = document.hidden || (bar.view && state.view && bar.view !== state.view);
@@ -277,7 +285,7 @@ function switchView(view) {
   state.view = view;
   // the address bar follows the screen (review 13 6.4); a link's own
   // subject/state stay while that link is being opened
-  if (!_openingHash && parseHash().view !== view) setHash(view);
+  if (!_openingHash && parseHash().view !== view) setHash(view, undefined, true);
   $$("nav button").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
   $$(".view").forEach((v) => v.classList.toggle("active", v.id === `view-${view}`));
   const active = $$("nav button").find((b) => b.dataset.view === view);
@@ -354,9 +362,12 @@ function hashFor(view, params) {
   const qs = q.toString();
   return "#" + view + (qs ? "?" + qs : "");
 }
-function setHash(view, params) {
+function setHash(view, params, push) {
   const h = hashFor(view, params);
-  if (location.hash !== h) history.replaceState(null, "", h);
+  // a tab switch the user made is a history entry, so Back returns to the
+  // previous tab instead of leaving the app (review 14 Group 3, P3); filling
+  // a screen's boxes replaces its own entry
+  if (location.hash !== h) (push ? history.pushState : history.replaceState).call(history, null, "", h);
 }
 // the screen's current boxes -> the address bar (on Run)
 function hashFromInputs(view) {
@@ -393,10 +404,16 @@ function initDeepLinks() {
     const b = $(sel);
     if (b) b.addEventListener("click", () => hashFromInputs(v));
   });
-  window.addEventListener("hashchange", () => {
+  // Back / Forward fire popstate (and hashchange); a pasted link fires
+  // hashchange — follow each new address once
+  const follow = () => {
     const { view } = parseHash();
+    if (location.hash === state.lastFollowed) return;
+    state.lastFollowed = location.hash;
     if (!_openingHash && view && (viewExists(view) || view === "analytics")) openFromHash();
-  });
+  };
+  window.addEventListener("hashchange", follow);
+  window.addEventListener("popstate", follow);
 }
 
 // "Find a practice": a TIN, an NPI or a name -> the practice's drawer
@@ -2394,7 +2411,9 @@ function downloadInFrame(url, bar) {
     if (text && text.trim()) {
       let msg = text;
       try { const j = JSON.parse(text); msg = j.detail || j.error || text; } catch (_) { /* plain text */ }
-      alert("The export was not built.\n\n" + msg);
+      // the user pressed Stop: the bar already says "stopped" — no alert
+      // (review 14 Group 3, P3)
+      if (String(msg).trim().toLowerCase() !== "stopped") alert("The export was not built.\n\n" + msg);
     }
     setTimeout(() => f.remove(), 1000);
   });
@@ -4880,8 +4899,9 @@ async function loadFilesNow() {
       `you added billing code${rr.added.length === 1 ? "" : "s"} ${esc(rr.added.join(", "))} — ` +
       (rr.running ? "re-reading them now…" :
         `<button class="btn" id="files-reread" style="padding:2px 8px;font-size:12px">Re-read ${fmtInt(rr.count)} file${rr.count === 1 ? "" : "s"} for the new codes</button>`) +
+      (rr.cannot_count ? ` <span class="muted">${fmtInt(rr.cannot_count)} more ha${rr.cannot_count === 1 ? "s" : "ve"} no kept copy and no link — drop ${rr.cannot_count === 1 ? "it" : "them"} in again: ${esc((rr.cannot || []).join(", "))}</span>` : "") +
       `</div>`
-    : "";
+    : (rr && rr.cannot_count ? `<div class="muted">${fmtInt(rr.cannot_count)} loaded file${rr.cannot_count === 1 ? " was" : "s were"} read before you added billing codes and ha${rr.cannot_count === 1 ? "s" : "ve"} no kept copy and no link — drop ${rr.cannot_count === 1 ? "it" : "them"} in again to read the new codes: ${esc((rr.cannot || []).join(", "))}</div>` : "");
   // automatic backups (review 13 Group 6.3): off, or the last one taken
   const bk = d.backup;
   const bkLine = bk && bk.sentence

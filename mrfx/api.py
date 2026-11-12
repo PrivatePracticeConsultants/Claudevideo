@@ -34,6 +34,7 @@ from fastapi.staticfiles import StaticFiles
 from .rounding import half_up
 from . import __version__
 from .benchmark import (
+    PRACTICE_RATE_RULE,
     BenchmarkError,
     clean_volumes,
     compute_benchmark,
@@ -1319,6 +1320,7 @@ def methodology_text(cfg: MrfxConfig, store: Store, grain: str, fs: FilterSet,
         "source_count is the number of distinct files behind that row.",
         *([_pooled] if (_pooled := _pooled_line(store)) else []),
         *store.analytics_note(),
+        PRACTICE_RATE_RULE,
         "Rate files in the store at export time (the export above draws on the "
         "subset matching its filters, NOT necessarily all of these): "
         f"{'; '.join(f'{f[0]} ({f[1]}, month {f[2]}, updated {f[3]})' for f in files) or 'none'}",
@@ -1682,6 +1684,14 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                     p.finish("failed")
                     raise
                 if p.cancelled:
+                    # a built file the Stop keeps from being sent is not kept
+                    # either (review 14 Group 3: the zip stayed 6 h in temp)
+                    path = getattr(out, "path", None)
+                    if path:
+                        try:
+                            Path(path).unlink(missing_ok=True)
+                        except OSError:
+                            pass
                     raise stopped()
                 p.finish("done")
                 return out
@@ -1701,11 +1711,16 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             return HTMLResponse(html, headers=headers or None)
         from fastapi.responses import Response
 
-        from .pdf import PdfUnavailable, html_to_pdf
+        from .pdf import FAILED, PdfRefused, PdfUnavailable, html_to_pdf
         try:
             data = html_to_pdf(cfg, html)
-        except PdfUnavailable as e:
+        except (PdfUnavailable, PdfRefused) as e:
             raise HTTPException(422, str(e))
+        except _progress.Stopped:
+            raise
+        except Exception as e:  # noqa: BLE001 — a print failure is a sentence, never a bare 500
+            log.exception("PDF print failed")
+            raise HTTPException(422, FAILED.format(why=type(e).__name__))
         name = f"{base}_{dt.date.today().isoformat()}.pdf"
         return Response(data, media_type="application/pdf", headers={
             "Content-Disposition": f'attachment; filename="{name}"', **(headers or {})})
@@ -1731,6 +1746,10 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         p = progress_registry.get(token)
         if p is None:
             raise HTTPException(404, "unknown run")
+        if p.ended is not None and not p.cancelled:
+            # it already finished: the Stop changed nothing (review 14 Group 3,
+            # P3 — it answered {"stopped": true} and the document arrived)
+            return {"stopped": False, "state": p.state}
         p.cancel("stopped")
         return {"stopped": True}
     registry = Registry(cfg)
@@ -2743,7 +2762,20 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         except Exception:  # noqa: BLE001 — a note never fails the poll
             return {"count": 0, "added": []}
         added = sorted({c for r in rows for c in r["added"]})
-        return {"count": len(rows), "added": added[:20], "running": bool(reread_job.get("running"))}
+        # only files the button CAN read again: a kept copy, or a link to
+        # download it from (review 14 Group 3, P3 — it offered N files and
+        # one of them had neither); the others are named
+        def readable(fn: str) -> bool:
+            if any((d / fn).exists() for d in (cfg.processed_dir, cfg.inbox_dir, cfg.downloads_dir)):
+                return True
+            try:
+                return bool(store.url_for_filename(fn))
+            except Exception:  # noqa: BLE001
+                return False
+        can = [r for r in rows if readable(r["filename"])]
+        cannot = [r["filename"] for r in rows if r not in can]
+        return {"count": len(can), "added": added[:20], "running": bool(reread_job.get("running")),
+                "cannot": cannot[:20], "cannot_count": len(cannot)}
 
     reread_job: dict = {"running": False, "result": None}
 
@@ -3185,6 +3217,10 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                         m.write(buf)
                         done += len(buf)
                         _prog.tick(done / total)
+                        # a Stop is honoured here too (review 14 Group 3: it
+                        # waited for the whole file, then the zip stayed in
+                        # temp for 6 h) — the except below removes both files
+                        _progress.check_cancelled()
                 z.writestr(f"mrfx_{view}_{stamp}_methodology.txt", method)
         except BaseException as e:
             if isinstance(e, OSError) and _is_disk_full(e):
@@ -4295,6 +4331,11 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 info = zipfile.ZipInfo(member, date_time=day)
                 info.compress_type = zipfile.ZIP_DEFLATED
                 z.writestr(info, data)
+        if _progress.current().cancelled:
+            # stopped while compressing: the zip is not delivered, so it is not
+            # kept either (review 14 Group 3)
+            out.unlink(missing_ok=True)
+            _progress.check_cancelled()
         background.add_task(out.unlink, missing_ok=True)
         return FileResponse(out, filename=f"mrfx_outreach_{stamp}.zip", media_type="application/zip")
 

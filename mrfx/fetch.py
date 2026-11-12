@@ -1983,7 +1983,8 @@ NOT_POSTED_GRACE_DAYS = 10   # payers post monthly files during the first ~week
 
 def monthly_refresh_tick(cfg: MrfxConfig, store: Store, today=None,
                          dated_sources: bool = True, recheck: bool = True) -> dict:
-    """One pass of the OPT-IN monthly refresh (cli._monthly_refresh_loop
+    """One pass of the monthly re-check (on by default) and the OPT-IN
+    monthly refresh (cli._monthly_refresh_loop
     calls it hourly). Returns what it did; idempotent within a month.
 
     Scope: only the catalog sources the user has actually LOADED (a 'done'
@@ -3200,7 +3201,12 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
     try:
         pf = preflight(dest, cfg, store)
     except Exception as e:  # noqa: BLE001 — classification must never crash the worker
-        store.update_url(url_id, status="failed", error=f"could not read file: {e}")
+        # in words, like the inbox (review 14 Group 3: a damaged gz via a
+        # link still read "could not read file: CRC check failed 0x…")
+        from .ingest import plain_parse_error
+        store.update_url(url_id, status="failed", error=plain_parse_error(e)
+                         if plain_parse_error(e) != f"{type(e).__name__}: {e}"
+                         else f"could not read file: {e}")
         unlink_with_retry(dest)
         unlink_with_retry(meta_p)
         # twins that deferred to this row were promised an automatic retry if
@@ -3587,6 +3593,15 @@ def add_urls(store: Store, urls: list[str]) -> dict:
     from .known_sources import expand_placeholders
 
     added = skipped = invalid = 0
+    # a multi-link paste is DURABLE before its first row is queued: a kill
+    # in the middle used to drop the rest of the list (review 14 Group 3);
+    # the next start queues what is left (resume_pending_paste)
+    pending = [str(u) for u in urls if str(u or "").strip()]
+    if len(pending) > 1:
+        try:
+            store.meta_set(PENDING_PASTE_KEY, json.dumps(pending))
+        except Exception:  # noqa: BLE001 — the paste itself still runs
+            pass
     for raw in urls:
         u = _normalize_url(expand_placeholders(raw.strip()))
         if not u:
@@ -3596,7 +3611,33 @@ def add_urls(store: Store, urls: list[str]) -> dict:
             added += 1
         else:
             skipped += 1
+    if len(pending) > 1:
+        try:
+            store.meta_set(PENDING_PASTE_KEY, "")
+        except Exception:  # noqa: BLE001
+            pass
     return {"added": added, "skipped": skipped, "invalid": invalid}
+
+
+PENDING_PASTE_KEY = "pending_paste"
+
+
+def resume_pending_paste(store: Store) -> int:
+    """Queue the rest of a paste a kill interrupted (every link of it is
+    added again: the ones already queued are answered as already there).
+    Returns how many were newly added. Never raises."""
+    try:
+        raw = store.meta_get(PENDING_PASTE_KEY)
+        urls = json.loads(raw) if raw else []
+        if not urls:
+            return 0
+        n = add_urls(store, urls)["added"]
+        store.meta_set(PENDING_PASTE_KEY, "")
+        if n:
+            log.info("queued %d link(s) of a paste the last run was stopped in the middle of", n)
+        return n
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 # The analytics fold-in is NOT the queue's job any more (review 14 item 1.1):
@@ -3627,6 +3668,7 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
     recovered = store.recover_stuck_urls()
     if recovered:
         log.info("resumed %d URL(s) left mid-flight by a previous run", recovered)
+    resume_pending_paste(store)
     woke = store.wake_paused_urls()
     if woke:
         log.info("resumed %d paused download(s) whose wait is over", woke)
