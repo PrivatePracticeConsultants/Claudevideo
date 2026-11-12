@@ -49,6 +49,8 @@ DOSSIER_NOTE = (
 _DOSSIER_STAGE = {"Identity": "Who they are", "Medicare volume": "How big they are vs the market",
                   "Rate position": "Where their rates sit", "Weakest payer": "Their weakest payer",
                   "Negotiating leverage": "Who else the payers contract nearby",
+                  "Medicaid floor": "Against the Medicaid floor",
+                  "Hospital parity": "What the payers pay hospitals",
                   "Referral sources": "Who refers to them", "Market size": "The market around them"}
 _MARKET_STAGE = {"City rate map": "Rates by city", "Payer concentration": "Who holds the contracts",
                  "Payer posture": "Which payers negotiate",
@@ -263,6 +265,8 @@ def build_prospect_dossier(cfg: MrfxConfig, store: Store, subject: str,
                 f"<p class='note'>{e(b.get('basis_note') or '')}</p>")
 
     # 4. which payer is weakest for them
+    neg_rates: dict = {}
+
     def _weakest():
         from .benchmark import compute_payer_negotiation
         require_geographic_scope(market, "prospect dossier")
@@ -284,6 +288,10 @@ def build_prospect_dossier(cfg: MrfxConfig, store: Store, subject: str,
             f"<td class='num'>{_below(s)}</td></tr>"
             for s in secs[:6])
         facts["weakest_payer"] = secs[0]["payer"]
+        # the rates this section ranked, for the Medicaid / hospital lines
+        neg_rates.update({(s["payer"], r["billing_code"]): r["subject_rate"]
+                          for s in secs for r in s["benchmark"]["rows"]
+                          if r.get("subject_rate") is not None})
         return ("<h2>Which payer is weakest for them</h2>"
                 "<p>Ordered by their position among each payer's practices, lowest "
                 "first — the contract with the most room. (The Leads list's "
@@ -354,6 +362,19 @@ def build_prospect_dossier(cfg: MrfxConfig, store: Store, subject: str,
     section("Rate position", _rates)
     section("Weakest payer", _weakest)
     section("Negotiating leverage", _leverage)
+
+    # 4b. the floor under each payer's rate and what the same payer pays
+    # hospitals (review 13 6.2) — omitted with the reason when nothing loaded
+    def _anchor(kind):
+        from .anchors import hospital_html, hospital_lines, medicaid_html, medicaid_lines
+        if not neg_rates:
+            raise BenchmarkError("no per-payer rates to set beside it (see Weakest payer)")
+        a = (medicaid_lines if kind == "medicaid" else hospital_lines)(store, market, neg_rates)
+        if not a["lines"]:
+            raise BenchmarkError(a["reason"] or "nothing to show")
+        return medicaid_html(a) if kind == "medicaid" else hospital_html(a)
+    section("Medicaid floor", lambda: _anchor("medicaid"))
+    section("Hospital parity", lambda: _anchor("hospital"))
     section("Referral sources", _referrals)
     section("Market size", _market)
 

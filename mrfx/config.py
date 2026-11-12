@@ -137,6 +137,21 @@ class MrfxConfig(BaseModel):
     # project folder; unset means <store_dir>/../packets.
     packets_dir: Path | None = None
 
+    # Automatic backups while `mrfx serve` runs (review 13 Group 6.3): OFF
+    # until backup_dir names a folder (best on another drive). Every
+    # backup_every_days a checksummed zip of the store is written there without
+    # stopping the app, checked, and only the newest backup_keep are kept.
+    backup_dir: Path | None = None
+    backup_every_days: int = Field(default=7, ge=1)
+    backup_keep: int = Field(default=4, ge=1)
+
+    @field_validator("backup_dir", mode="before")
+    @classmethod
+    def _empty_backup_dir_is_none(cls, v):
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
     @field_validator("packets_dir", mode="before")
     @classmethod
     def _empty_packets_dir_is_none(cls, v):
@@ -318,7 +333,7 @@ class MrfxConfig(BaseModel):
 # empty after an update" — the real store was intact, just not looked at).
 _ANCHORED_FIELDS = ("inbox_dir", "processed_dir", "failed_dir", "store_dir",
                     "downloads_dir", "entity_map_path", "mpfs_path",
-                    "duckdb_temp_dir", "tracker_dir", "packets_dir", "registry_path",
+                    "duckdb_temp_dir", "tracker_dir", "packets_dir", "backup_dir", "registry_path",
                     "registry_overrides_path", "known_sources_path")
 
 

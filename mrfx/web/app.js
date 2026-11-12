@@ -261,6 +261,9 @@ function hideTip() { tip.style.display = "none"; }
 $$("nav button").forEach((b) => b.addEventListener("click", () => switchView(b.dataset.view)));
 function switchView(view) {
   state.view = view;
+  // the address bar follows the screen (review 13 6.4); a link's own
+  // subject/state stay while that link is being opened
+  if (!_openingHash && parseHash().view !== view) setHash(view);
   $$("nav button").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
   $$(".view").forEach((v) => v.classList.toggle("active", v.id === `view-${view}`));
   const active = $$("nav button").find((b) => b.dataset.view === view);
@@ -301,6 +304,107 @@ function switchView(view) {
   // dropdown still shows the state, and re-picking the same option fires no change)
   if (view === "sources") loadSources($("#src-state")?.value || "");
   if (view === "overview") initOverview();
+}
+
+/* ---------- bookmarkable links + the header search box (review 13 Group 6.4) ---------- */
+// The address bar names the screen and, on the client screens, the practice
+// and state: #benchmark?subject=ACME%20REHAB&state=MO opens the Benchmark
+// with both filled and run — bookmark it, or send it to yourself. No new
+// numbers: the link only fills the same boxes the user would.
+const DEEP = {
+  benchmark: { subject: "#b-subject", state: "#b-state", ready: "#b-month", run: () => runBenchmark() },
+  negotiate: { subject: "#ng-subject", state: "#ng-state", payer: "#ng-payer", ready: "#ng-month", run: () => runNegotiate() },
+  ratecard: { subject: "#rc-subject", state: "#rc-state", ready: "#rc-month", run: () => buildRatecard() },
+  changes: { subject: "#ch-subject", ready: "#ch-month", run: () => runChanges() },
+  medicare: { subject: "#md-subject", run: () => runMedicareOrg() },
+};
+function viewExists(v) { return $$("nav button").some((b) => b.dataset.view === v); }
+function parseHash(h) {
+  const raw = (h == null ? location.hash : h).replace(/^#/, "");
+  const i = raw.indexOf("?");
+  const view = decodeURIComponent(i < 0 ? raw : raw.slice(0, i));
+  const params = {};
+  new URLSearchParams(i < 0 ? "" : raw.slice(i + 1)).forEach((v, k) => { params[k] = v; });
+  return { view, params };
+}
+function hashFor(view, params) {
+  const q = new URLSearchParams();
+  for (const [k, v] of Object.entries(params || {})) if (v) q.set(k, v);
+  const qs = q.toString();
+  return "#" + view + (qs ? "?" + qs : "");
+}
+function setHash(view, params) {
+  const h = hashFor(view, params);
+  if (location.hash !== h) history.replaceState(null, "", h);
+}
+// the screen's current boxes -> the address bar (on Run)
+function hashFromInputs(view) {
+  const d = DEEP[view];
+  if (!d) { setHash(view); return; }
+  const val = (sel) => (sel && $(sel) ? String($(sel).value || "").trim() : "");
+  setHash(view, { subject: val(d.subject), state: val(d.state).toUpperCase(), payer: val(d.payer) });
+}
+let _openingHash = false;
+async function openFromHash() {
+  const { view, params } = parseHash();
+  if (!view || !viewExists(view)) return;
+  _openingHash = true;
+  try {
+    switchView(view);
+    const d = DEEP[view];
+    if (!d || !params.subject) return;
+    for (let i = 0; i < 40; i++) {           // the tab's pickers load on first visit
+      const ok = (!d.ready || ($(d.ready) && $(d.ready).options.length > 0)) &&
+                 (!d.payer || !params.payer || ($(d.payer) && $(d.payer).options.length > 0));
+      if (ok) break;
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    if (d.state && params.state && $(d.state)) $(d.state).value = params.state;
+    if (d.payer && params.payer && $(d.payer)) $(d.payer).value = params.payer;
+    $(d.subject).value = params.subject;
+    d.run();
+  } finally { _openingHash = false; }
+}
+function initDeepLinks() {
+  // the Run buttons write the link (the jump-throughs do it in clientJump)
+  [["#b-run", "benchmark"], ["#ng-run", "negotiate"], ["#rc-run", "ratecard"]].forEach(([sel, v]) => {
+    const b = $(sel);
+    if (b) b.addEventListener("click", () => hashFromInputs(v));
+  });
+  window.addEventListener("hashchange", () => {
+    const { view } = parseHash();
+    if (!_openingHash && view && viewExists(view)) openFromHash();
+  });
+}
+
+// "Find a practice": a TIN, an NPI or a name -> the practice's drawer
+async function findPractice(raw) {
+  const v = String(raw || "").trim();
+  const msg = $("#find-msg");
+  if (msg) msg.textContent = "";
+  if (!v) return;
+  const digits = v.replace(/[\s-]/g, "");
+  if (/^\d{9}$/.test(digits)) return openEntity("tin", digits);
+  if (/^\d{10}$/.test(digits)) return openEntity("npi", digits);
+  let d;
+  try { d = await api(`/api/benchmark/subjects?q=${encodeURIComponent(v)}&limit=50`); }
+  catch (e) { if (msg) msg.textContent = e.message; return; }
+  const lc = v.toLowerCase();
+  const ents = d.entities || [], tins = d.tins || [];
+  const ent = ents.find((e) => e.toLowerCase() === lc);
+  if (ent) return openEntity("entity", ent);
+  const exact = tins.filter((t) => (t.display_name || "").toLowerCase() === lc);
+  if (exact.length === 1) return openEntity("tin", exact[0].tin_value);
+  if (exact.length > 1) return openEntity("entity", exact[0].display_name);
+  const n = ents.length + tins.length;
+  if (n === 1) return ents.length ? openEntity("entity", ents[0]) : openEntity("tin", tins[0].tin_value);
+  if (msg) msg.textContent = n ? `${n}${n >= 50 ? "+" : ""} practices match — pick one from the list` : "no practice matches";
+}
+function initFindBox() {
+  const input = $("#find-practice");
+  if (!input) return;
+  wireSubjectSearch("#find-practice", "#find-list");
+  input.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); findPractice(input.value); } });
 }
 
 /* ---------- header stats ---------- */
@@ -2128,8 +2232,47 @@ function downloadInFrame(url, bar) {
   document.body.appendChild(f);
 }
 
+// "Save as PDF" (review 13 Group 6.1): every printable button gets a twin
+// that runs the SAME handler with this set, so the PDF is built from exactly
+// the payload the printable page would be — openReportWith then downloads
+// `?format=pdf` instead of opening a tab. Set and cleared around a
+// synchronous .click(): every handler reaches openReportWith before its
+// first await. A window property, not a module `let`: openReportWith is
+// also lifted alone into test pages (tests/mrfx/test_round7.py).
+window.mrfxPdfBase = null;
+const PDF_REPORTS = [
+  ["#b-report", "pitch_report"], ["#b-negotiation", "negotiation_one_pager"],
+  ["#ng-report", "payer_comparison"], ["#ng-proposal-report", "rate_proposal"],
+  ["#rc-report", "rate_card"], ["#vv-report", "visit_value"],
+  ["#ds-run", "practice_profile"], ["#mr-run", "market_report"],
+];
+function initPdfButtons() {
+  for (const [sel, base] of PDF_REPORTS) {
+    const main = $(sel);
+    if (!main || document.getElementById(main.id + "-pdf")) continue;
+    const b = document.createElement("button");
+    b.className = "btn"; b.id = main.id + "-pdf"; b.type = "button";
+    b.textContent = "Save as PDF";
+    b.title = "The same report as a PDF file (printed by the built-in browser)";
+    b.disabled = main.disabled;
+    main.insertAdjacentElement("afterend", b);
+    new MutationObserver(() => { b.disabled = main.disabled; })
+      .observe(main, { attributes: true, attributeFilter: ["disabled"] });
+    b.addEventListener("click", () => {
+      window.mrfxPdfBase = base;
+      try { main.click(); } finally { window.mrfxPdfBase = null; }
+    });
+  }
+}
+
 async function openReportWith(url, payload, onError, bar) {
   if (!payload) return;  // e.g. national-confirm cancelled
+  if (window.mrfxPdfBase) {
+    const name = `${window.mrfxPdfBase}_${new Date().toISOString().slice(0, 10)}.pdf`;
+    const pb = bar ? { ...bar, label: bar.label + " (PDF)" } : bar;
+    await postDownload(url + (url.includes("?") ? "&" : "?") + "format=pdf", payload, name, pb);
+    return null;
+  }
   const fail = (msg) => (onError ? onError(msg) : alert("Can't build this report.\n\n" + msg));
   // Open the tab SYNCHRONOUSLY, still inside the click's user-activation window
   // (any confirm() before this call is synchronous, so activation is preserved).
@@ -2798,7 +2941,7 @@ async function clientJump(view, inputSel, runFn, subject, readySel) {
     await new Promise((r) => setTimeout(r, 150));
   }
   const input = $(inputSel);
-  if (input) { input.value = subject; runFn(); }
+  if (input) { input.value = subject; hashFromInputs(view); runFn(); }
 }
 
 async function loadClientDigest() {
@@ -4564,7 +4707,14 @@ async function loadFilesNow() {
         `<button class="btn" id="files-reread" style="padding:2px 8px;font-size:12px">Re-read ${fmtInt(rr.count)} file${rr.count === 1 ? "" : "s"} for the new codes</button>`) +
       `</div>`
     : "";
-  stateEl.innerHTML = anLine + rrLine + ruLine + pmLine + (d.total > d.files.length
+  // automatic backups (review 13 Group 6.3): off, or the last one taken
+  const bk = d.backup;
+  const bkLine = bk && bk.sentence
+    ? `<div class="${bk.on && bk.last && bk.last.error ? "warn-text" : "muted"}" id="files-backup">${esc(bk.sentence)}` +
+      (bk.on ? ` <button class="btn" id="files-backup-now" style="padding:2px 8px;font-size:12px">Back up now</button>` : "") +
+      `</div>`
+    : "";
+  stateEl.innerHTML = anLine + rrLine + ruLine + pmLine + bkLine + (d.total > d.files.length
     ? `<div class="muted">Showing the newest ${fmtInt(d.files.length)} of ${fmtInt(d.total)} files.
         <button class="btn" id="files-more" style="padding:2px 8px;font-size:12px">show ${fmtInt(Math.min(d.total, (state.filesLimit || 500) * 4))}</button></div>`
     : "");
@@ -4572,6 +4722,15 @@ async function loadFilesNow() {
   if (rrBtn) rrBtn.onclick = async () => {
     rrBtn.disabled = true;
     try { await postJson("/api/files/reread", {}); } catch (e) { alert(e.message); }
+    loadFiles();
+  };
+  const bkBtn = document.getElementById("files-backup-now");
+  if (bkBtn) bkBtn.onclick = async () => {
+    bkBtn.disabled = true;
+    try {
+      const r = await postJson("/api/backup", {}, { view: "files", label: "Backup", anchor: "#files-backup" });
+      if (r && r.verdict) alert(`Backup written: ${r.path}\n${r.verdict}`);
+    } catch (e) { alert(e.message); }
     loadFiles();
   };
   const more = $("#files-more");
@@ -5192,6 +5351,10 @@ function hookOverrideForms(root) {
   catch (e) { console.error("filter init failed — refresh to retry:", e); }
   try { initCptView(); } catch (e) { console.error(e); }
   try { initFilesView(); } catch (e) { console.error(e); }
+  try { initPdfButtons(); } catch (e) { console.error(e); }
+  try { initDeepLinks(); initFindBox(); } catch (e) { console.error(e); }
   refresh();
+  // a bookmarked link opens its screen (and runs it) once the page is wired
+  if (parseHash().view && parseHash().view !== "explorer") openFromHash().catch((e) => console.error(e));
   setInterval(() => { loadStats(); loadStateOptions(); }, 15000);
 })();

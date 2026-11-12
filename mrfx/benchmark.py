@@ -1566,6 +1566,19 @@ def contract_gaps_book(store: Store, subjects: list[str], market: dict, *,
     return out
 
 
+def _anchors_section(store: Store, market: dict, subject_rates: dict) -> str:
+    """Medicaid-floor and hospital-parity lines for a negotiation document
+    (review 13 6.2): the rates the document already prints, beside the
+    state's Medicaid rate and what the same payer pays hospitals. Never fails
+    the document (invariant 3)."""
+    try:
+        from .anchors import anchors_html, negotiation_anchors
+        return anchors_html(negotiation_anchors(store, market, subject_rates))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("negotiation anchors failed: %s", exc)
+        return ""
+
+
 def render_payer_compare_report(cfg: MrfxConfig, store: Store, comp: dict) -> str:
     """Print-ready payer-negotiation comparison: the document the owner hands
     the payer. Per-code table (subject vs this payer's market vs named
@@ -1679,6 +1692,7 @@ and P75, and the best rate this payer already pays one of your named comparables
 <table><thead><tr><th>Code</th><th class="num">Current</th><th class="num">At median</th>
 <th class="num">At P75</th><th class="num">Best comparable</th></tr></thead>
 <tbody>{asks_html}</tbody></table>
+{_anchors_section(store, comp["market"], {(comp["payer"], r["billing_code"]): r.get("subject_rate") for r in comp["rows"]})}
 <footer>METHODOLOGY\n{e(footer)}</footer>
 </body></html>"""
 
@@ -1855,6 +1869,7 @@ def render_proposal_report(cfg: MrfxConfig, store: Store, prop: dict) -> str:
 <th class="num">Change</th><th class="num">Annual units</th><th class="num">Annual value</th>
 <th class="num">Peers</th></tr></thead>
 <tbody>{rows_html}</tbody></table>
+{_anchors_section(store, prop["market"], {(prop["payer"], r["billing_code"]): r.get("current") for r in prop["rows"]})}
 <footer>METHODOLOGY\n{e(footer)}</footer>
 </body></html>"""
 
@@ -2044,6 +2059,7 @@ def render_negotiation_report(cfg: MrfxConfig, store: Store, neg: dict) -> str:
 {geo_banner}
 {summary}
 {body_sections}
+{_anchors_section(store, neg["market"], {(sec["payer"], r["billing_code"]): r.get("subject_rate") for sec in neg["sections"] for r in sec["benchmark"]["rows"]})}
 <footer>METHODOLOGY\n{e(footer)}</footer>
 </body></html>"""
 

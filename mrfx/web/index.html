@@ -51,6 +51,11 @@
 <header>
   <div id="topbar-title">Explorer</div>
   <span class="topbar-spacer"></span>
+  <div id="find-box" title="Type a practice name, a 9-digit tax ID or a 10-digit NPI, then Enter: its rates open on the right">
+    <input type="search" id="find-practice" list="find-list" placeholder="Find a practice — name, tax ID or NPI" autocomplete="off" aria-label="Find a practice">
+    <datalist id="find-list"></datalist>
+    <span id="find-msg" class="muted"></span>
+  </div>
   <div id="dataset-stats">loading…</div>
 </header>
 

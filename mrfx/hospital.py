@@ -551,6 +551,27 @@ def hospital_status(store: Store) -> dict:
     }
 
 
+def hospital_filters(m: dict, payer: str | None = None,
+                     state: str | None = None) -> tuple[list[str], list]:
+    """The hospital side's WHERE over `hospital_rates h`: ONE rule for the
+    parity table and the negotiation documents' parity lines (review 13 6.2)."""
+    where = ["h.rate IS NOT NULL"]
+    if m.get("base_only", True):
+        # the practice side reads base modifiers only (the house basis); the
+        # hospital side pooled every modifier — a 59/KX line beside a base
+        # rate (round 7 P1.11). One rule on both sides.
+        where.append(base_sql("coalesce(h.modifiers, '')",
+                              bool(m.get("include_assistant"))))
+    params: list = []
+    if payer:
+        where.append("h.payer = ?")
+        params.append(payer)
+    if state:
+        where.append("h.state = ?")
+        params.append(state_code_or_none(state))
+    return where, params
+
+
 def hospital_parity(store: Store, market: dict | None = None, *,
                     payer: str | None = None, state: str | None = None,
                     subject: str | None = None, limit: int = 200) -> dict:
@@ -597,20 +618,7 @@ def hospital_parity(store: Store, market: dict | None = None, *,
                                           bool(m.get("include_non_dollar")))
         s_rel = _rates_relation(s_m)
 
-    hosp_where = ["h.rate IS NOT NULL"]
-    if m.get("base_only", True):
-        # the practice side reads base modifiers only (the house basis); the
-        # hospital side pooled every modifier — a 59/KX line beside a base
-        # rate (round 7 P1.11). One rule on both sides.
-        hosp_where.append(base_sql("coalesce(h.modifiers, '')",
-                                   bool(m.get("include_assistant"))))
-    hosp_params: list = []
-    if payer:
-        hosp_where.append("h.payer = ?")
-        hosp_params.append(payer)
-    if state or m.get("state"):
-        hosp_where.append("h.state = ?")
-        hosp_params.append(state_code_or_none(state or m["state"]))
+    hosp_where, hosp_params = hospital_filters(m, payer, state or m.get("state"))
 
     sql = f"""
     WITH practice AS (

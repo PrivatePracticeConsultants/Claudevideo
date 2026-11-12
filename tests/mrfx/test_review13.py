@@ -869,3 +869,265 @@ def test_5_2_p2_a_child_the_index_no_longer_lists_says_so(cfg, store):
                         [i, k, k])
     assert store.note_unlisted_children(1, ["https://x/a.json"], "no longer listed") == 1
     assert _q(store, "SELECT id FROM url_queue WHERE error = 'no longer listed'") == [(3,)]
+
+
+# ---------------------------------------------------------------- group 6
+
+
+def test_6_1_every_printable_report_saves_as_a_pdf(cfg, store, monkeypatch):
+    """6.1. The pitch report as `?format=pdf` is a real PDF printed from the
+    same HTML; with no browser the answer is a 422 sentence and the HTML
+    still opens. was: `format` ignored — text/html (no PDF anywhere)."""
+    T, _ = _market(cfg, store, "Alpha Health", "41000", [80, 90, 100, 110, 120])
+    store.rebuild_rollups()
+    c = TestClient(create_app(cfg, store))
+    body = {"subject": T[0], "market": {"month": "latest", "state": "MO"}}
+    r = c.post("/api/report/pitch?format=pdf", json=body)
+    assert r.status_code == 200, r.text[:300]
+    assert r.headers["content-type"] == "application/pdf"
+    assert r.content[:5] == b"%PDF-" and len(r.content) > 2000
+    assert 'filename="pitch_report_' in r.headers["content-disposition"]
+    from mrfx import render
+
+    def no_browser(pw):
+        raise RuntimeError("no Chromium here")
+    monkeypatch.setattr(render, "_launch", no_browser)
+    r = c.post("/api/report/pitch?format=pdf", json=body)
+    assert r.status_code == 422
+    assert "Open printable" in r.json()["detail"] and "no Chromium here" in r.json()["detail"]
+    assert c.post("/api/report/pitch", json=body).headers["content-type"].startswith("text/html")
+
+
+def test_6_1_packets_pdf_prints_every_document_beside_it(cfg, tmp_path):
+    """6.1 (`mrfx packets --pdf`). was: no html_files_to_pdf (ImportError)."""
+    from mrfx.pdf import html_files_to_pdf
+    a, b = tmp_path / "1_rate_card.html", tmp_path / "2_market.html"
+    a.write_text("<html><body><h1>Rate card</h1></body></html>", encoding="utf-8")
+    b.write_text("<html><body><p>Market</p><img src='https://example.invalid/x.png'></body></html>",
+                 encoding="utf-8")
+    written, why = html_files_to_pdf(cfg, [a, b])
+    assert why is None
+    assert [p.name for p in written] == ["1_rate_card.pdf", "2_market.pdf"]
+    assert all(p.read_bytes()[:5] == b"%PDF-" for p in written)
+
+
+def _hosp_csv(tmp_path, name, rows):
+    import csv as _csv
+    p = tmp_path / f"{name.replace(' ', '_')}.csv"
+    with p.open("w", newline="") as f:
+        w = _csv.writer(f)
+        w.writerow(["hospital_name", "last_updated_on", "version"])
+        w.writerow([name, "2026-04-01", "2.0.0"])
+        w.writerow(["description", "code|1", "code|1|type", "setting", "payer_name",
+                    "plan_name", "standard_charge|gross", "standard_charge|discounted_cash",
+                    "standard_charge|negotiated_dollar", "standard_charge|methodology",
+                    "estimated_amount", "modifiers"])
+        for code, payer, plan, rate in rows:
+            w.writerow(["x", code, "CPT", "outpatient", payer, plan, "300", "150",
+                        rate, "fee schedule", "", ""])
+    return p
+
+
+def test_6_2_medicaid_and_hospital_lines_in_the_negotiation_documents(cfg, store, tmp_path):
+    """6.2, hand-worked. Practice T[0]: Alpha Health pays 97110 $28.00, 97112
+    $29.00. MO Medicaid: 97110 $30.00, 97112 $25.00. Hospitals (Alpha Health,
+    outpatient): St Mary's 97110 two plans $90/$100 -> $95.00 for that
+    hospital; Mercy 97110 $120.00 -> median of hospitals $107.50; Mercy 97112
+    $80.00 (one hospital, named). Nothing loaded -> both halves omitted with
+    the reason. was: neither line in any document (no anchors module)."""
+    from mrfx.anchors import medicaid_lines
+    from mrfx.floors import import_fee_schedule
+    from mrfx.hospital import import_hospital_file
+    T, _ = _market(cfg, store, "Alpha Health", "51000", [28, 40, 50, 60])
+    store.rebuild_rollups()
+    c = TestClient(create_app(cfg, store))
+    body = {"subject": T[0], "market": {"month": "latest", "state": "MO"}}
+    h = c.post("/api/report/negotiation", json=body)
+    assert h.status_code == 200, h.text[:300]
+    assert ("Not included, and why — Medicaid floor: no Medicaid schedule is loaded"
+            in h.text)
+    assert "Hospital parity: no hospital standard-charges file is loaded" in h.text
+
+    sched = tmp_path / "mo_medicaid.csv"
+    sched.write_text("Procedure Code,Maximum Allowable\n97110,30.00\n97112,25.00\n")
+    import_fee_schedule(store, sched, kind="medicaid", state="MO", year="2026")
+    import_hospital_file(store, _hosp_csv(tmp_path, "St Mary's Regional", [
+        ("97110", "Alpha Health", "PPO", "90.00"), ("97110", "Alpha Health", "HMO", "100.00")]),
+        state="MO", cfg=cfg)
+    import_hospital_file(store, _hosp_csv(tmp_path, "Mercy Hospital", [
+        ("97110", "Alpha Health", "PPO", "120.00"), ("97112", "Alpha Health", "PPO", "80.00")]),
+        state="MO", cfg=cfg)
+    want = [
+        "Medicaid pays $30.00 for 97110 in MO; Alpha Health pays you $28.00 (below Medicaid).",
+        "Medicaid pays $25.00 for 97112 in MO; Alpha Health pays you $29.00 (116% of Medicaid).",
+        "97110: Alpha Health pays 2 MO hospitals a median $107.50 ($95.00–$120.00; you: $28.00).",
+        "97112: Alpha Health pays Mercy Hospital $80.00 (you: $29.00).",
+    ]
+    import html as _h
+    for route in ("/api/report/negotiation", "/api/report/dossier"):
+        r = c.post(route, json=body)
+        assert r.status_code == 200, (route, r.text[:300])
+        for line in want:
+            assert _h.escape(line) in r.text, (route, line)
+        assert "Not included, and why — Medicaid floor" not in r.text
+    # the proposal and the payer comparison carry the same lines for their payer
+    p = c.post("/api/report/proposal", json={**body, "payer": "Alpha Health", "target": "p75"})
+    assert p.status_code == 200, p.text[:300]
+    assert _h.escape(want[0]) in p.text and _h.escape(want[3]) in p.text
+    # two payers on one code: one line, lowest first, the rest by name
+    two = medicaid_lines(store, {"state": "MO"}, {("Beta Health", "97110"): 35.0,
+                                                  ("Alpha Health", "97110"): 28.0})
+    assert [x["text"] for x in two["lines"]] == [
+        "Medicaid pays $30.00 for 97110 in MO; Alpha Health pays you $28.00 "
+        "(below Medicaid), Beta Health $35.00 (116.7% of Medicaid)."]
+    assert medicaid_lines(store, {"state": "KS"}, {("A", "97110"): 1.0})["reason"] == (
+        "no Medicaid schedule is loaded for KS (loaded: MO)")
+
+
+def test_6_3_hot_backup_from_serve_is_consistent_checked_and_kept_n(cfg, store, tmp_path,
+                                                                    monkeypatch):
+    """6.3. A backup taken while the app runs: the database copied by DuckDB
+    under the write lock, the parts pinned by hard links (a part replaced
+    mid-backup is still the OLD bytes in the zip), the zip checked against its
+    manifest, the newest backup_keep kept (a file the app did not name is
+    never touched), a drive without room refused with a sentence, and the
+    Files tab says all of it. was: no backup_dir setting, no hot backup
+    (`mrfx backup` refuses while the server runs)."""
+    import datetime as _dt
+    import zipfile
+
+    from mrfx import backup as bk
+    _market(cfg, store, "Alpha Health", "61000", [40, 50, 60])
+    c = TestClient(create_app(cfg, store))
+    assert "Automatic backups are off" in c.get("/api/files").json()["backup"]["sentence"]
+    cfg.backup_dir = tmp_path / "bk"
+    cfg.backup_keep = 2
+    (tmp_path / "bk").mkdir()
+    (tmp_path / "bk" / "notes.zip").write_bytes(b"mine")
+    part = sorted(store.rates_dir.glob("*.parquet"))[0]
+    original = part.read_bytes()
+    real_write = bk.write_zip
+
+    def write_after_a_replace(dest, entries, **k):
+        # a re-ingest replaces the part the moment the lock is released
+        tmp = part.with_name(part.name + ".new")
+        tmp.write_bytes(b"replaced")
+        tmp.replace(part)
+        return real_write(dest, entries, **k)
+    monkeypatch.setattr(bk, "write_zip", write_after_a_replace)
+    t0 = _dt.datetime(2026, 11, 1, 9, 0, tzinfo=_dt.timezone.utc)
+    res = bk.hot_backup(cfg, store, now=t0)
+    monkeypatch.setattr(bk, "write_zip", real_write)
+    assert part.read_bytes() == b"replaced"
+    part.write_bytes(original)                          # the store is whole again
+    z = zipfile.ZipFile(res["path"])
+    rel = part.relative_to(store.dir).as_posix()
+    assert z.read(f"store/{rel}") == original          # the pinned bytes
+    assert bk.verify_zip(res["path"])[0]
+    db = tmp_path / "restored.duckdb"
+    db.write_bytes(z.read("store/mrfx.duckdb"))
+    with duckdb.connect(str(db), read_only=True) as con2:
+        assert con2.execute("SELECT count(*) FROM files WHERE status = 'done'").fetchone()[0] == 1
+    assert not (store.dir / bk.SNAPSHOT).exists()
+    assert not any(p.name.endswith(".tmp") for p in (tmp_path / "bk").iterdir())
+    line = c.get("/api/files").json()["backup"]
+    assert line["on"] and line["sentence"].startswith("Last backup: 2026-11-01 09:00 UTC")
+    assert "(checked OK)" in line["sentence"]
+    # not due for a week; due after it
+    assert not bk.backup_due(cfg, store, now=t0 + _dt.timedelta(days=6))
+    assert bk.backup_due(cfg, store, now=t0 + _dt.timedelta(days=7))
+    for d in (8, 15):
+        bk.hot_backup(cfg, store, now=t0 + _dt.timedelta(days=d))
+    names = sorted(p.name for p in (tmp_path / "bk").iterdir())
+    assert names == ["mrfx-backup-2026-11-09_0900.zip", "mrfx-backup-2026-11-16_0900.zip",
+                     "notes.zip"]
+    # a drive without room: refused, recorded, nothing written
+    monkeypatch.setattr(bk.shutil, "disk_usage",
+                        lambda p: type("U", (), {"free": 10 << 20})())
+    with pytest.raises(bk.BackupRefused, match="not enough space"):
+        bk.hot_backup(cfg, store, now=t0 + _dt.timedelta(days=22))
+    assert len(list((tmp_path / "bk").iterdir())) == 3
+    assert "was not taken: not enough space" in c.get("/api/files").json()["backup"]["sentence"]
+    # a failed attempt waits a day, not an hour
+    assert not bk.backup_due(cfg, store, now=t0 + _dt.timedelta(days=22, hours=1))
+
+
+def test_6_3_mrfx_verify_reads_the_hot_backup(cfg, store, tmp_path, capsys):
+    """6.3: `mrfx verify <zip>` and the hot backup share one check; a flipped
+    byte is CORRUPT. was: no hot backup to verify (AttributeError)."""
+    import argparse
+    import zipfile
+
+    from mrfx import backup as bk
+    from mrfx.cli import cmd_verify
+    _market(cfg, store, "Alpha Health", "62000", [40, 50, 60])
+    cfg.backup_dir = tmp_path / "bk"
+    res = bk.hot_backup(cfg, store)
+    assert cmd_verify(cfg, argparse.Namespace(target=res["path"])) == 0
+    assert "backup OK:" in capsys.readouterr().out
+    bad = tmp_path / "bad.zip"
+    with zipfile.ZipFile(res["path"]) as src, zipfile.ZipFile(bad, "w") as dst:
+        for i in src.infolist():
+            data = src.read(i)
+            if i.filename == "store/mrfx.duckdb":
+                data = data[:-1] + bytes([data[-1] ^ 1])
+            dst.writestr(i, data)
+    assert cmd_verify(cfg, argparse.Namespace(target=str(bad))) == 1
+    out = capsys.readouterr().out
+    assert "CORRUPT: mrfx.duckdb" in out and "FAILED the checksum" in out
+
+
+def _app_in_chromium(cfg, store):
+    """The real dashboard (index.html, app.js, the API) in headless Chromium,
+    every request answered in-process by the app (no port, no network)."""
+    from tests.mrfx.test_round7 import _browser_page
+    pw, browser, page = _browser_page()
+    client = TestClient(create_app(cfg, store))
+
+    def handler(route):
+        req = route.request
+        path = req.url.split("http://mrfx.test", 1)[1] or "/"
+        r = client.request(req.method, path, content=req.post_data_buffer,
+                           headers={k: v for k, v in req.headers.items()
+                                    if k.lower() in ("content-type", "x-mrfx-progress")})
+        route.fulfill(status=r.status_code, body=r.content,
+                      headers={k: v for k, v in r.headers.items()
+                               if k.lower() not in ("content-length", "content-encoding")})
+    page.route("http://mrfx.test/**", handler)
+    return pw, browser, page
+
+
+def test_6_4_a_bookmarked_link_opens_and_runs_and_the_search_box_finds(cfg, store):
+    """6.4 in real Chromium: #benchmark?subject=<TIN>&state=MO opens the
+    Benchmark with both boxes filled and the benchmark run; switching screens
+    writes the address bar; the header box opens the practice's drawer for a
+    tax ID, an NPI and a name, and says when a name matches several. was: the
+    hash was ignored (Explorer opened, nothing filled) and there was no box."""
+    T, _ = _market(cfg, store, "Alpha Health", "64000", [40, 50, 60, 70])
+    store.rebuild_rollups()
+    pw, browser, page = _app_in_chromium(cfg, store)
+    try:
+        page.goto(f"http://mrfx.test/#benchmark?subject={T[0]}&state=MO")
+        page.wait_for_function(
+            "document.querySelector('#b-out') && /97110/.test(document.querySelector('#b-out').innerText)",
+            timeout=20000)
+        assert page.input_value("#b-subject") == T[0] and page.input_value("#b-state") == "MO"
+        assert page.evaluate("location.hash") == f"#benchmark?subject={T[0]}&state=MO"
+        page.click("nav button[data-view='files']")
+        assert page.evaluate("location.hash") == "#files"
+        for query in (T[1], f"1{T[2]}", "ALPHA HEALTH P4 REHAB"):
+            page.evaluate("closeDrawer()")
+            page.fill("#find-practice", query)
+            page.press("#find-practice", "Enter")
+            page.wait_for_function("document.querySelector('#drawer').classList.contains('open') "
+                                   "&& /97110/.test(document.querySelector('#drawer').innerText)",
+                                   timeout=20000)
+        page.evaluate("closeDrawer()")
+        page.fill("#find-practice", "ALPHA HEALTH P")
+        page.press("#find-practice", "Enter")
+        page.wait_for_function("/practices match/.test(document.querySelector('#find-msg').innerText)",
+                               timeout=10000)
+        assert page.inner_text("#find-msg") == "4 practices match — pick one from the list"
+    finally:
+        browser.close()
+        pw.stop()

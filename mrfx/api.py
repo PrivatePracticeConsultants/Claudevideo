@@ -1689,6 +1689,23 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             return wrapper
         return deco
 
+    def _html_or_pdf(html: str, fmt: str, base: str, headers: dict | None = None):
+        """A printable report as its HTML page, or — `?format=pdf` — printed
+        to PDF by the optional headless browser (review 13 Group 6.1). No
+        browser is a 422 sentence: the HTML is still one click away."""
+        if str(fmt or "").lower() != "pdf":
+            return HTMLResponse(html, headers=headers or None)
+        from fastapi.responses import Response
+
+        from .pdf import PdfUnavailable, html_to_pdf
+        try:
+            data = html_to_pdf(cfg, html)
+        except PdfUnavailable as e:
+            raise HTTPException(422, str(e))
+        name = f"{base}_{dt.date.today().isoformat()}.pdf"
+        return Response(data, media_type="application/pdf", headers={
+            "Content-Disposition": f'attachment; filename="{name}"', **(headers or {})})
+
     @app.get("/api/progress/{token}")
     async def progress_poll(token: str):
         """How far a run is (review 13 Group 2). async on purpose: it must
@@ -2666,7 +2683,29 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 "analytics": _analytics_public(),
                 # loaded files read without billing codes the list now has
                 # (review 13 item 5.2.4): the Files tab offers to read them again
-                "reread": _reread_summary()}
+                "reread": _reread_summary(),
+                # automatic backups (review 13 Group 6.3): off, or the last one
+                "backup": _backup_line()}
+
+    def _backup_line() -> dict:
+        try:
+            from .backup import backup_status
+            return backup_status(cfg, store)
+        except Exception:  # noqa: BLE001 — a note never fails the poll
+            return {"on": False, "sentence": ""}
+
+    @app.post("/api/backup")
+    @_progress_route("backup")
+    def backup_now():
+        """Take a backup now (review 13 Group 6.3) — the store keeps answering;
+        new data waits only while the database itself is copied."""
+        from .backup import BackupRefused, hot_backup
+        try:
+            res = hot_backup(cfg, store)
+        except BackupRefused as e:
+            raise HTTPException(422, f"backup not taken: {e}")
+        return {"ok": True, "path": res["path"], "bytes": res["bytes"],
+                "files": res["files"], "verdict": res["verdict"], "deleted": res["deleted"]}
 
     def _reread_summary() -> dict:
         try:
@@ -3539,7 +3578,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     @app.post("/api/report/dossier")
     @_progress_route("dossier")
-    def api_dossier(body: dict = Body(...)):
+    def api_dossier(body: dict = Body(...), fmt: str = Query("", alias="format")):
         """One branded page about a practice you have never spoken to."""
         from .dossier import build_prospect_dossier
         try:
@@ -3554,7 +3593,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         # the omitted sections ride along, so the page builds the dossier ONCE
         # (it also fetched dossier.json — a second full build — review 13)
         from urllib.parse import quote
-        return HTMLResponse(res["html"], headers={
+        return _html_or_pdf(res["html"], fmt, "practice_profile", headers={
             "X-Mrfx-Skipped": quote(json.dumps(res.get("skipped") or []))})
 
     @app.post("/api/report/dossier.json")
@@ -3575,7 +3614,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     @app.post("/api/report/market")
     @_progress_route("market_report")
-    def api_market_report(body: dict = Body(...)):
+    def api_market_report(body: dict = Body(...), fmt: str = Query("", alias="format")):
         """The metro-level story as one sellable branded document."""
         from .dossier import build_market_report
         try:
@@ -3589,7 +3628,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
         except (TypeError, ValueError) as e:
             raise HTTPException(422, f"bad input: {e}")
-        return HTMLResponse(res["html"])
+        return _html_or_pdf(res["html"], fmt, "market_report")
 
     # -- practice growth + service-line gaps ----------------------------------------------
 
@@ -4267,9 +4306,12 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 if len(ql) == 10 and ql.isdigit():
                     # the box invites an NPI: offer the practices it bills
                     # under (it matched nothing before — review 10 item 1.9)
+                    # the kept (TIN, NPI) pairs, not a scan of every rate row:
+                    # the header search box sends NPIs here (review 13 6.4)
                     tins += _dicts(con.execute(
                         "SELECT tin_value, display_name, npi_count, states FROM tin_directory "
-                        "WHERE tin_value IN (SELECT DISTINCT tin_value FROM rates WHERE npi = ?) "
+                        f"WHERE tin_value IN (SELECT DISTINCT tin_value FROM {store.pairs_relation()} "
+                        "WHERE npi = ?) "
                         "ORDER BY npi_count DESC NULLS LAST, display_name, tin_value LIMIT ?",
                         [ql, limit]))
             else:
@@ -4317,7 +4359,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     @app.post("/api/report/pitch", response_class=HTMLResponse)
     @_progress_route("pitch")
-    def pitch_report(body: dict = Body(...)):
+    def pitch_report(body: dict = Body(...), fmt: str = Query("", alias="format")):
         try:
             _prog = _progress.current()
             _prog.stage("Comparing with peers")
@@ -4329,7 +4371,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             if volumes:
                 opp = compute_opportunity(bench, volumes,
                                           int(body.get("conservative_percentile", 40)))
-            return HTMLResponse(render_pitch_report(cfg, store, bench, opp))
+            return _html_or_pdf(render_pitch_report(cfg, store, bench, opp), fmt, "pitch_report")
         except (BenchmarkError, ValueError, TypeError) as e:
             # ValueError/TypeError: a non-numeric or null volume/percentile in
             # the JSON body (int()/float()/None) — a client input error, so 422.
@@ -4337,7 +4379,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     @app.post("/api/report/negotiation", response_class=HTMLResponse)
     @_progress_route("negotiation")
-    def negotiation_report(body: dict = Body(...)):
+    def negotiation_report(body: dict = Body(...), fmt: str = Query("", alias="format")):
         try:
             volumes = clean_volumes(body.get("volumes"))
             neg = compute_payer_negotiation(
@@ -4345,7 +4387,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 volumes=volumes or None,
                 conservative_percentile=int(body.get("conservative_percentile", 40)),
             )
-            return HTMLResponse(render_negotiation_report(cfg, store, neg))
+            return _html_or_pdf(render_negotiation_report(cfg, store, neg), fmt, "negotiation_one_pager")
         except (BenchmarkError, ValueError, TypeError) as e:
             # ValueError/TypeError: a non-numeric or null volume/percentile in
             # the JSON body (int()/float()/None) — a client input error, so 422.
@@ -4366,14 +4408,14 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     @app.post("/api/report/payer-compare", response_class=HTMLResponse)
     @_progress_route("compare")
-    def payer_compare_report(body: dict = Body(...)):
+    def payer_compare_report(body: dict = Body(...), fmt: str = Query("", alias="format")):
         try:
             comp = compute_payer_comparison(
                 store, str(body.get("subject", "")), str(body.get("payer", "")),
                 body.get("market") or {},
                 comparables=_comparables_arg(body.get("comparables")) or [],
             )
-            return HTMLResponse(render_payer_compare_report(cfg, store, comp))
+            return _html_or_pdf(render_payer_compare_report(cfg, store, comp), fmt, "payer_comparison")
         except (BenchmarkError, ValueError, TypeError) as e:
             raise HTTPException(422, str(e))
 
@@ -4393,7 +4435,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     @app.post("/api/report/proposal", response_class=HTMLResponse)
     @_progress_route("proposal")
-    def report_proposal(body: dict = Body(...)):
+    def report_proposal(body: dict = Body(...), fmt: str = Query("", alias="format")):
         from .benchmark import compute_rate_proposal, render_proposal_report
         try:
             prop = compute_rate_proposal(
@@ -4401,7 +4443,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 body.get("market") or {}, body.get("target") or {},
                 volumes=body.get("volumes") or None,
                 comparables=_comparables_arg(body.get("comparables")))
-            return render_proposal_report(cfg, store, prop)
+            return _html_or_pdf(render_proposal_report(cfg, store, prop), fmt, "rate_proposal")
         except (BenchmarkError, ValueError, TypeError) as e:
             raise HTTPException(422, str(e))
 
@@ -4480,24 +4522,25 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     @app.post("/api/report/visitvalue", response_class=HTMLResponse)
     @_progress_route("visit_market")
-    def report_visit_value(body: dict = Body(...)):
+    def report_visit_value(body: dict = Body(...), fmt: str = Query("", alias="format")):
         from .visit import VisitError
         from .visit_market import render_report
         try:
-            return HTMLResponse(render_report(cfg, store, _visit_market(body)))
+            return _html_or_pdf(render_report(cfg, store, _visit_market(body)), fmt, "visit_value")
         except (VisitError, BenchmarkError, ValueError, TypeError) as e:
             raise HTTPException(422, str(e))
 
     @app.post("/api/report/ratecard", response_class=HTMLResponse)
     @_progress_route("ratecard_report")
-    def ratecard_report(body: dict = Body(...)):
+    def ratecard_report(body: dict = Body(...), fmt: str = Query("", alias="format")):
         try:
             fs = compute_fee_schedule(store, str(body.get("subject", "")), body.get("market") or {})
             _progress.current().stage("Pricing a standard visit across the state")
             vm, why = _visit_market_or_refusal(body)
             _progress.current().stage("Drawing trends and listing sources")
-            return HTMLResponse(render_rate_card(cfg, store, fs, payer_scorecard(fs),
-                                                 visit_market=vm, visit_market_refusal=why))
+            return _html_or_pdf(render_rate_card(cfg, store, fs, payer_scorecard(fs),
+                                                 visit_market=vm, visit_market_refusal=why),
+                                fmt, "rate_card")
         except (BenchmarkError, ValueError, TypeError) as e:
             # ValueError/TypeError: a non-numeric or null volume/percentile in
             # the JSON body — a client input error (422), never a 500.

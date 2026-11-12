@@ -287,6 +287,17 @@ confirm_over_gb: 5.0          # files above this wait for confirmation in the Fi
 # The index row on the Files tab says when it was last checked. On by default.
 # monthly_recheck: true
 #
+# Automatic backups. Your store took weeks of downloads to build and lives
+# only on this computer. Name a folder here — best on an external or second
+# drive, e.g. D:/mrfx-backups — and while the dashboard runs it writes a
+# backup there every 7 days without stopping anything, checks it, and keeps
+# the newest 4 (older ones it made are deleted). It never fills the drive:
+# when there is not enough room it skips and says so on the Files tab.
+# Off until you set the folder.
+# backup_dir: D:/mrfx-backups
+# backup_every_days: 7
+# backup_keep: 4
+#
 # Medicare Order & Referring Tracker: where its data lives if it is not in the
 # usual place, and whether a newer eligibility roster it downloaded is loaded
 # automatically at start (off: the Medicare tab offers a button instead).

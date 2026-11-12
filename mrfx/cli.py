@@ -290,6 +290,11 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
     if getattr(cfg, "monthly_refresh", False) or getattr(cfg, "monthly_recheck", True):
         threading.Thread(target=_monthly_refresh_loop, args=(cfg, store, stop),
                          name="mrfx-monthly-refresh", daemon=True).start()
+    if getattr(cfg, "backup_dir", None):
+        # review 13 Group 6.3: the weekly hot backup, ten minutes after start
+        from .backup import backup_loop
+        threading.Thread(target=backup_loop, args=(cfg, store, stop),
+                         name="mrfx-backup", daemon=True).start()
     app = create_app(cfg, store)
     spill_line = ""
     if store.spill_is_relocated:
@@ -1189,6 +1194,17 @@ def cmd_packets(cfg: MrfxConfig, args) -> int:
         if p["skipped"]:
             line += f" — omitted: {'; '.join(x.split(':')[0] for x in p['skipped'])}"
         print(line)
+    if getattr(args, "pdf", False):
+        # review 13 Group 6.1: every document beside itself as .pdf, printed
+        # by ONE headless browser; no browser is a sentence, the HTML stays
+        from pathlib import Path as _P
+
+        from .pdf import html_files_to_pdf
+        paths = [_P(p["dir"]) / f for p in res["packets"] for f in p["written"]]
+        written, why = html_files_to_pdf(cfg, paths)
+        print(f"PDF: {len(written)} of {len(paths)} document(s) printed")
+        if why:
+            print(f"  {why}")
     return 0
 
 
@@ -1519,9 +1535,8 @@ def cmd_backup(cfg: MrfxConfig, args) -> int:
     if not root.is_dir():
         print(f"no store at {root}")
         return 1
-    files = sorted(p for p in root.rglob("*")
-                   if p.is_file() and not p.name.endswith((".tmp", ".part"))
-                   and "duckdb_tmp" not in p.parts and "diagnostics" not in p.parts)
+    from .backup import store_files
+    files = store_files(root)
     manifest: dict = {"created": dt.datetime.now(dt.timezone.utc).isoformat(),
                       "store_dir": str(root), "files": {}}
     total = 0
@@ -1563,10 +1578,6 @@ def cmd_verify(cfg: MrfxConfig, args) -> int:
     byte-for-byte against its own manifest; the live store is checked by
     binding every view and reading every parquet footer — the failures that
     otherwise surface only when a report needs the data."""
-    import hashlib
-    import json as _json
-    import zipfile
-
     from .store import sql_path
 
     target = Path(args.target) if args.target else None
@@ -1574,38 +1585,10 @@ def cmd_verify(cfg: MrfxConfig, args) -> int:
         if not target.is_file():
             print(f"no such backup file: {target}")
             return 1
-        bad = 0
-        try:
-            with zipfile.ZipFile(target) as z:
-                manifest = _json.loads(z.read("manifest.json"))
-                for rel, meta in manifest["files"].items():
-                    h = hashlib.sha256()
-                    try:
-                        with z.open(f"store/{rel}") as fh:
-                            for chunk in iter(lambda: fh.read(1 << 20), b""):
-                                h.update(chunk)
-                        ok = h.hexdigest() == meta["sha256"]
-                    except (zipfile.BadZipFile, KeyError, OSError) as e:
-                        ok = False
-                        print(f"  ({rel}: {e})")
-                    if not ok:
-                        bad += 1
-                        print(f"CORRUPT: {rel}")
-        except (zipfile.BadZipFile, KeyError, ValueError, OSError) as e:
-            # a torn central directory / missing manifest is corruption too —
-            # report it as the verdict, never a traceback
-            print(f"this backup is not readable ({e}) — it is damaged; "
-                  "take a fresh one.")
-            return 1
-        n = len(manifest["files"])
-        if bad:
-            print(f"\n{bad} of {n} files FAILED the checksum — this backup is "
-                  "damaged; take a fresh one.")
-            return 1
-        print(f"backup OK: {n} files match their checksums"
-              + (f"; recorded {manifest.get('counts', {}).get('rates', '?'):,} "
-                 "rate rows" if manifest.get("counts") else ""))
-        return 0
+        from .backup import verify_zip
+        ok, verdict = verify_zip(target, out=print)
+        print(verdict)
+        return 0 if ok else 1
 
     # live store: structural integrity, not checksums (it changes by design)
     if _something_owns_the_port(cfg, "verifying the store locally"):
@@ -2060,6 +2043,8 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("packets", help="write a monthly packet for every watchlist client")
     p.add_argument("--out", default=None, help="output folder (default: packets_dir, else <store>/../packets)")
+    p.add_argument("--pdf", action="store_true",
+                   help="also save every document as a PDF beside it (needs the optional built-in browser)")
     p = sub.add_parser("renewals", help="contracts with a real published end date, soonest first")
     p.add_argument("--subject", default=None, help="one practice (entity/TIN/NPI)")
     p.add_argument("--clients", action="store_true", help="only your watchlist clients")
