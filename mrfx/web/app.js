@@ -89,7 +89,122 @@ const maskTin = (t) => {
   return /^[0-9]{9}$/.test(s) && SSN_PREFIXES.has(s.slice(0, 2)) ? "MASKED-SSN" : s;
 };
 
+/* ---------- progress bars (review 13 Group 2) ----------
+   Every output keeps its request; with a bar it carries a per-run token
+   (X-Mrfx-Progress, or ?progress= on an iframe download) and the page polls
+   GET /api/progress/<token> while the request is pending. The percentage is
+   the SERVER's (stage weights + DuckDB's own progress inside a stage) — the
+   page never advances it on a clock; 100 % only once the result is in hand. */
+const newToken = () => {
+  const r = (globalThis.crypto && crypto.randomUUID) ? crypto.randomUUID()
+    : Math.random().toString(36).slice(2) + Date.now().toString(36) + Math.random().toString(36).slice(2);
+  return r.replace(/-/g, "").slice(0, 32).padEnd(16, "0");
+};
+function jobHost(bar) {
+  const id = `jobbar-${bar.view}`;
+  let host = document.getElementById(id);
+  if (host) return host;
+  host = document.createElement("div");
+  host.className = "jobbar-host";
+  host.id = id;
+  const a = bar.anchor ? (typeof bar.anchor === "string" ? document.querySelector(bar.anchor) : bar.anchor) : null;
+  const row = a ? a.parentElement : null;
+  if (row && row.parentElement) row.parentElement.insertBefore(host, row.nextSibling);
+  else (document.getElementById(`view-${bar.view}`) || document.querySelector("main") || document.body).prepend(host);
+  return host;
+}
+function mountJobbar(bar, token) {
+  const host = jobHost(bar);
+  const el = document.createElement("div");
+  el.className = "jobbar";
+  el.innerHTML = `<div class="progress"><div class="progress-fill" style="width:0%"></div>` +
+    `<div class="progress-label"></div></div><a href="#" class="jobbar-stop" title="stop this run — nothing half-built is delivered">Stop</a>`;
+  host.appendChild(el);
+  const fill = el.querySelector(".progress-fill"), lab = el.querySelector(".progress-label");
+  lab.title = "weighted by how long each step typically takes on a store this size; the bar moves as DuckDB reports its progress";
+  const btn = bar.anchor ? (typeof bar.anchor === "string" ? document.querySelector(bar.anchor) : bar.anchor) : null;
+  const wasDisabled = btn ? btn.disabled : false;
+  if (btn) btn.disabled = true;
+  let pct = 0, ended = false;
+  // a cached answer arrives in a blink: no flicker under 250 ms
+  const showTimer = setTimeout(() => el.classList.add("on"), 250);
+  const say = (t) => { lab.textContent = t; if (bar.tab) { try { bar.tab.document.body.textContent = t; } catch (_) { /* cosmetic */ } } };
+  say(`${bar.label} · starting…`);
+  el.querySelector(".jobbar-stop").onclick = (ev) => {
+    ev.preventDefault();
+    if (ended) return;
+    fetch(`/api/progress/${token}`, { method: "DELETE" }).catch(() => {});
+    say(`${bar.label} · stopping…`);
+  };
+  const finish = (cls, text, keepMs) => {
+    if (ended) return;
+    ended = true;
+    clearTimeout(showTimer);
+    if (btn) btn.disabled = wasDisabled;
+    el.classList.add(cls);
+    if (text) say(text);
+    if (cls === "done") { fill.style.width = "100%"; el.classList.add("on"); }
+    setTimeout(() => el.remove(), keepMs);
+  };
+  return {
+    update(s) {
+      if (ended || !s) return;
+      pct = Math.max(pct, Math.min(99, Number(s.pct) || 0));    // never backwards, never 100 here
+      fill.style.width = pct + "%";
+      el.classList.toggle("indeterminate", !!s.indeterminate);
+      const where = s.stage_count ? ` (${s.stage_index} of ${s.stage_count})` : "";
+      if (s.state === "waiting") say(`${bar.label} · ${s.stage || "waiting"} · ${Math.round((s.elapsed_ms || 0) / 1000)} s`);
+      else say(`${bar.label} · ${s.stage || "working"}${where} · ${s.indeterminate ? "at least " : "about "}${pct} %`);
+    },
+    built() { finish("done", `${bar.label} · built — your browser is downloading it`, 4000); },
+    done() { finish("done", `${bar.label} · done`, bar.keepMs || 600); },
+    stopped() { finish("stopped", `${bar.label} · stopped`, 2500); },
+    failed(msg) { finish("failed", `${bar.label} · ${msg || "failed"}`, 5000); },
+  };
+}
+function startPoll(token, jb, bar, onTerminal) {
+  let stopped = false, timer = null;
+  const tick = async () => {
+    if (stopped) return;
+    try {
+      const r = await fetch(`/api/progress/${token}`);
+      if (r.ok) {
+        const s = await r.json();
+        jb.update(s);
+        if (onTerminal && ["done", "failed", "stopped"].includes(s.state)) { onTerminal(s); return; }
+      }
+    } catch (_) { /* the request's own outcome decides */ }
+    const slow = document.hidden || (bar.view && state.view && bar.view !== state.view);
+    timer = setTimeout(tick, slow ? 1500 : 400);
+  };
+  timer = setTimeout(tick, 400);
+  return { stop() { stopped = true; clearTimeout(timer); } };
+}
+// run `work(opts)` (a fetch carrying the token in opts.headers) with a bar
+async function withBar(bar, work) {
+  const token = newToken();
+  const jb = mountJobbar(bar, token);
+  const poll = startPoll(token, jb, bar);
+  try {
+    const res = await work({ "X-Mrfx-Progress": token });
+    poll.stop();
+    jb.done();
+    return res;
+  } catch (e) {
+    poll.stop();
+    if (e && e.status === 409) jb.stopped();
+    else if (e && e.name === "AbortError") jb.stopped();
+    else jb.failed(e && e.message && /Failed to fetch|NetworkError/.test(e.message)
+      ? "the server restarted — run it again" : (e && e.message) || "failed");
+    throw e;
+  }
+}
+
 async function api(path, opts) {
+  if (opts && opts.bar) {
+    const { bar, ...rest } = opts;
+    return withBar(bar, (h) => api(path, { ...rest, headers: { ...(rest.headers || {}), ...h } }));
+  }
   const r = await fetch(path, opts);
   if (!r.ok) {
     let msg = `HTTP ${r.status}`;
@@ -120,8 +235,9 @@ function supersede(view) {
   const c = (_viewCtl[view] = new AbortController());
   return { signal: c.signal, headers: { "X-Mrfx-View": `${VIEW_ID}:${view}` } };
 }
-const postJson = (path, body) =>
-  api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+const postJson = (path, body, bar) =>
+  api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+              ...(bar ? { bar } : {}) });
 
 function debounce(fn, ms) {
   let t;
@@ -184,12 +300,62 @@ function switchView(view) {
 }
 
 /* ---------- header stats ---------- */
+// Review 13 item 1.2: the counts above are what was LOADED; every screen reads
+// the analytics, which can be behind (a billion-row rollup takes hours). When
+// they are, the same line says how far: "Analytics cover 3 of 49 payers (3 of
+// 615 files). Rolling up the rest — 41 %, about 2 h left", in the warn colour.
+function coverageHtml(a) {
+  if (!a || !a.state || a.state === "current") return "";
+  const head = `Analytics cover <b>${fmtInt(a.covered_payers)}</b> of <b>${fmtInt(a.loaded_payers)}</b> ` +
+    `payer${a.loaded_payers === 1 ? "" : "s"} (${fmtInt(a.covered_files)} of ${fmtInt(a.done_files)} files).`;
+  let tail = esc(a.reason || "");
+  if (/Files tab$/.test(tail)) tail = tail.replace(/Files tab$/, `<a href="#" class="cov-files">Files tab</a>`);
+  return ` <span class="cov-line cov-${esc(a.state)}" id="coverage-line" title="Every screen, report and export answers from the analytics. Payers and files not in them yet are loaded and safe; they appear as the analytics catch up.">${head} ${tail}</span>`;
+}
+function wireCoverageLink() {
+  const a = $("#coverage-line .cov-files");
+  if (a) a.onclick = (ev) => { ev.preventDefault(); switchView("files"); };
+}
+// one renderer for every payer chip list: a loaded payer the analytics do not
+// hold yet is greyed, titled, and still pickable (it answers "no rows" plus why)
+function payerChipsHtml(resp, on) {
+  const payers = (resp && resp.payers) || [];
+  const cov = resp && Array.isArray(resp.covered) ? new Set(resp.covered) : null;
+  if (cov) state.coveredPayers = cov;
+  const sel = on || new Set();
+  return payers.map((p) => {
+    const un = cov && !cov.has(p);
+    return `<button class="chip${sel.has(p) ? " on" : ""}${un ? " uncovered" : ""}" data-payer="${esc(p)}"` +
+      `${un ? ` title="loaded, not yet in analytics"` : ""}>${esc(p)}</button>`;
+  }).join("");
+}
+function payerOptionsHtml(resp) {
+  const cov = resp && Array.isArray(resp.covered) ? new Set(resp.covered) : null;
+  return ((resp && resp.payers) || []).map((p) =>
+    `<option value="${esc(p)}"${cov && !cov.has(p) ? ` label="${esc(p)} — loaded, not yet in analytics"` : ""}>`).join("");
+}
+function monthOptionsHtml(resp) {
+  const cov = resp && Array.isArray(resp.covered) ? new Set(resp.covered) : null;
+  return ((resp && resp.months) || []).map((m) => cov && !cov.has(m)
+    ? `<option value="${esc(m)}" class="uncovered" title="loaded, not yet in analytics">${esc(m)} — loaded, not yet in analytics</option>`
+    : `<option>${esc(m)}</option>`).join("");
+}
+// "no rows" for a picked payer the analytics do not hold yet says why
+function uncoveredNote(payers) {
+  if (!state.coveredPayers || !payers || !payers.length) return "";
+  const un = payers.filter((p) => !state.coveredPayers.has(p));
+  if (!un.length) return "";
+  return `<p class="warn-text">${un.map(esc).join(", ")} ${un.length === 1 ? "is" : "are"} loaded but not in the analytics yet — ` +
+    `${esc((state.analytics && state.analytics.sentence) || "they appear as the analytics catch up.")}</p>`;
+}
 async function loadStats(given) {
   try {
     const s = given || await api("/api/stats");
     let html =
       `<b>${fmtInt(s.rates)}</b> rate rows · <b>${fmtInt(s.tins)}</b> TINs · ` +
       `<b>${s.payers}</b> payer${s.payers === 1 ? "" : "s"} · <b>${fmtInt(s.files_done)}</b> files`;
+    state.analytics = s.analytics || null;
+    html += coverageHtml(s.analytics);
     const e = s.enrichment;
     if (e && e.total > 0) {
       // names + states come from NPPES enrichment, which runs in the
@@ -230,6 +396,7 @@ async function loadStats(given) {
       state.dataGen = s.data_generation;
     }
     $("#dataset-stats").innerHTML = html;
+    wireCoverageLink();
   } catch { $("#dataset-stats").textContent = "API unreachable"; }
 }
 
@@ -257,25 +424,33 @@ function onNamesUpdated() {
 async function onDataUpdated() {
   loadStateOptions();
   try {
-    const [{ payers }, { months }] = await Promise.all([
+    const [payersResp, monthsResp] = await Promise.all([
       api("/api/payers").catch(() => ({ payers: null })),
       api("/api/months").catch(() => ({ months: null })),
     ]);
+    const { payers } = payersResp, { months } = monthsResp;
     if (payers) {
       const chips = $("#f-payer-chips");
       const on = new Set(state.filters.payers || []);
       if (chips) chips.innerHTML = payers.length
-        ? payers.map((p) => `<button class="chip${on.has(p) ? " on" : ""}" data-payer="${esc(p)}">${esc(p)}</button>`).join("")
+        ? payerChipsHtml(payersResp, on)
         : `<span class="muted">none ingested yet</span>`;
-      const opts = payers.map((p) => `<option value="${esc(p)}">`).join("");
+      const opts = payerOptionsHtml(payersResp);
       for (const id of ["#mk-payer-opts", "#ro-payer-opts"]) { const dl = $(id); if (dl) dl.innerHTML = opts; }
+      // the other tabs' chip lists keep what is picked and refresh their greying
+      for (const id of ["#b-payer-chips", "#rc-payer-chips", "#ld-payer-chips", "#ch-payer-chips"]) {
+        const el = $(id);
+        if (!el || !el.children.length) continue;
+        const keep = new Set($$(".chip.on", el).map((c) => c.dataset.payer));
+        el.innerHTML = payerChipsHtml(payersResp, keep);
+      }
     }
     if (months) {
       const sel = $("#f-month");
       if (sel) {
         const keep = sel.value;
         sel.innerHTML = `<option value="latest">latest — each contract's newest file</option><option value="">all months (pooled)</option>` +
-          months.map((m) => `<option>${esc(m)}</option>`).join("");
+          monthOptionsHtml(monthsResp);
         sel.value = months.includes(keep) || keep === "" ? keep : "latest";
       }
     }
@@ -336,7 +511,7 @@ async function loadOverview(stateCode = "") {
   }, 4000);
   let d;
   const isFresh = ticket("overview");
-  try { d = await api(`/api/overview${stateCode ? `?state=${encodeURIComponent(stateCode)}` : ""}`); }
+  try { d = await api(`/api/overview${stateCode ? `?state=${encodeURIComponent(stateCode)}` : ""}`, { bar: { view: "overview", label: "Market overview", anchor: "#ov-refresh" } }); }
   catch (e) {
     clearTimeout(slow);
     if (!isFresh()) return;
@@ -726,7 +901,7 @@ async function initRoster() {
     } catch { /* free text still works */ }
     $("#ro-run").addEventListener("click", loadRoster);
     $("#ro-payer").addEventListener("keydown", (e) => { if (e.key === "Enter") loadRoster(); });
-    $("#ro-csv").addEventListener("click", () => { if (lastRosterBody) postDownload("/api/roster.csv", lastRosterBody, "payer_roster.csv"); });
+    $("#ro-csv").addEventListener("click", () => { if (lastRosterBody) postDownload("/api/roster.csv", lastRosterBody, "payer_roster.csv", { view: "roster", label: "Roster CSV", anchor: "#ro-csv" }); });
   }
 }
 
@@ -751,7 +926,7 @@ async function loadRoster() {
   if (!body.payer) { out.innerHTML = `<div class="empty">Pick a payer first.</div>`; return; }
   out.innerHTML = `<div class="loading">Finding organizations contracted with ${esc(body.payer)}</div>`;
   let d;
-  try { d = await postJson("/api/roster", body); }
+  try { d = await postJson("/api/roster", body, { view: "roster", label: "Payer roster", anchor: "#ro-run" }); }
   catch (e) { out.innerHTML = `<div class="empty"><h3>Couldn't load the roster</h3>${esc(e.message)}</div>`; return; }
   lastRosterBody = body;
   $("#ro-csv").disabled = false;
@@ -842,7 +1017,7 @@ async function loadRates() {
   const q = filterQuery({ sort: state.sort.col, dir: state.sort.dir, page: state.page, page_size: state.pageSize });
   const fresh = ticket("rates");
   let data;
-  try { data = await api(`/api/rates?${q}`, supersede("rates")); }
+  try { data = await api(`/api/rates?${q}`, { ...supersede("rates"), bar: { view: "explorer", label: "Rates table", keepMs: 300 } }); }
   catch (e) {
     if (!fresh()) return;
     body.innerHTML = "";
@@ -857,10 +1032,11 @@ async function loadRates() {
   if (!data.total) {
     body.innerHTML = "";
     body.classList.remove("stale");
+    const why = uncoveredNote(state.filters.payers);
     stateEl.innerHTML = data.hint
-      ? `<div class="empty"><h3>No rates match</h3>${esc(data.hint)}</div>`
-      : `<div class="empty"><h3>No rates match</h3>
-      Drop MRF files into <code class="inline">data/inbox/</code> or loosen the filters.</div>`;
+      ? `<div class="empty"><h3>No rates match</h3>${esc(data.hint)}${why}</div>`
+      : `<div class="empty"><h3>No rates match</h3>${why ||
+      `Drop MRF files into <code class="inline">data/inbox/</code> or loosen the filters.`}</div>`;
     $("#pg-label").textContent = "–";
     $("#pg-prev").disabled = true;   // stale-enabled buttons on the old branch
     $("#pg-next").disabled = true;   // let a click page a nonexistent table
@@ -931,7 +1107,7 @@ async function loadSummary() {
   const fresh = ticket("summary");
   const asked = filterQuery().toString();
   try {
-    const s = await api(`/api/summary?${asked}`, supersede("summary"));
+    const s = await api(`/api/summary?${asked}`, { ...supersede("summary"), bar: { view: "explorer", label: "Summary strip", keepMs: 300 } });
     if (!fresh()) return;
     const stat = (k, v) => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`;
     el.innerHTML =
@@ -1033,10 +1209,11 @@ async function initFilters() {
   // which left a filterless, unpaginable Explorer until a manual reload.
   // both pickers at once (they were fetched one after the other)
   const monthsP = api("/api/months").catch(() => null);
-  const payers = (await api("/api/payers").catch(() => null))?.payers ?? [];
+  const payersResp = await api("/api/payers").catch(() => null);
+  const payers = payersResp?.payers ?? [];
   const payerChips = $("#f-payer-chips");
   payerChips.innerHTML = payers.length
-    ? payers.map((p) => `<button class="chip" data-payer="${esc(p)}">${esc(p)}</button>`).join("")
+    ? payerChipsHtml(payersResp)
     : `<span class="muted">none ingested yet</span>`;
   payerChips.addEventListener("click", (ev) => {
     const b = ev.target.closest(".chip");
@@ -1062,9 +1239,9 @@ async function initFilters() {
     refreshFromFirstPage();
   });
 
-  const months = (await monthsP)?.months ?? [];
+  const monthsResp = await monthsP;
   $("#f-month").innerHTML = `<option value="latest">latest — each contract's newest file</option><option value="">all months (pooled)</option>` +
-    months.map((m) => `<option>${esc(m)}</option>`).join("");
+    monthOptionsHtml(monthsResp);
   $("#f-month").value = state.filters.month;
   $("#f-month").addEventListener("change", (e) => { state.filters.month = e.target.value; state.page = 1; refresh(); });
 
@@ -1128,15 +1305,15 @@ async function initFilters() {
     refreshFromFirstPage();
   });
   $("#btn-export").addEventListener("click", () => {
-    downloadInFrame(`/api/export.csv?${filterQuery({ sort: state.sort.col, dir: state.sort.dir, view: "explorer" })}`);
+    downloadInFrame(`/api/export.csv?${filterQuery({ sort: state.sort.col, dir: state.sort.dir, view: "explorer" })}`, { view: "explorer", label: "Export CSV", anchor: "#btn-export" });
   });
   $("#btn-export-zip").addEventListener("click", () => {
-    downloadInFrame(`/api/export.zip?${filterQuery({ sort: state.sort.col, dir: state.sort.dir, view: "explorer" })}`);
+    downloadInFrame(`/api/export.zip?${filterQuery({ sort: state.sort.col, dir: state.sort.dir, view: "explorer" })}`, { view: "explorer", label: "Export + methodology", anchor: "#btn-export-zip" });
   });
   $("#btn-outreach").addEventListener("click", () => {
     // .zip: the outreach CSV + its methodology sidecar together (comment lines
     // inside the CSV itself would break the mail-merge import it exists for)
-    downloadInFrame(`/api/export/outreach.zip?${filterQuery()}`);
+    downloadInFrame(`/api/export/outreach.zip?${filterQuery()}`, { view: "explorer", label: "Outreach file", anchor: "#btn-outreach" });
   });
 
   $$("#rates-table thead th[data-sort]").forEach((th) =>
@@ -1173,7 +1350,7 @@ async function openEntity(grain, unitId) {
   overlay.onclick = closeDrawer;
   let d;
   const isFresh = ticket("drawer");
-  try { d = await api(`/api/entity/${grain}/${encodeURIComponent(unitId)}`); }
+  try { d = await api(`/api/entity/${grain}/${encodeURIComponent(unitId)}`, { bar: { view: "explorer", label: "Practice details", keepMs: 300 } }); }
   catch (e) {
     if (!isFresh()) return;
     drawer.innerHTML = `<button class="close">×</button><div class="empty">${esc(e.message)}</div>`;
@@ -1406,7 +1583,7 @@ function initCptView() {
     if ($("#cpt-base-only").checked) p.set("modifier", "base");
     if ($("#cpt-class").value) p.set("billing_class", $("#cpt-class").value);
     if (cptState.value.trim()) p.set("state", cptState.value.trim().toUpperCase());
-    downloadInFrame(`/api/export.zip?${p}`);
+    downloadInFrame(`/api/export.zip?${p}`, { view: "cpt", label: "Code export", anchor: "#cpt-export" });
   });
 }
 
@@ -1457,7 +1634,7 @@ async function selectCpt(code) {
   const trendReq = api(`/api/trend?${trendP}`, { signal: ctl.signal }).catch(() => null);
   let d;
   try {
-    d = await api(`/api/code/${code}?${p}`, { signal: ctl.signal });
+    d = await api(`/api/code/${code}?${p}`, { signal: ctl.signal, bar: { view: "cpt", label: "Code comparison", keepMs: 300 } });
   } catch (e) {
     if (!current()) return;            // superseded by a newer click (it owns the gate)
     $("#cpt-payer-rank").innerHTML = "";
@@ -1594,8 +1771,7 @@ async function initBenchmark() {
   if (subjects) $("#b-subjects").innerHTML = subjectOptionsHtml(subjects);
   wireSubjectSearch("#b-subject", "#b-subjects");
   fillMonthSelect("#b-month", months, LATEST_MONTH_OPT);
-  if (payers) $("#b-payer-chips").innerHTML = payers.payers.map((p) =>
-    `<button class="chip" data-payer="${esc(p)}">${esc(p)}</button>`).join("");
+  if (payers) $("#b-payer-chips").innerHTML = payerChipsHtml(payers);
   state.plans = plans;
   renderPlanField();
   $("#b-payer-chips").addEventListener("click", (ev) => {
@@ -1654,7 +1830,7 @@ async function runContractGaps() {
   catch (e) { el.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
   el.innerHTML = `<div class="loading">Finding contract gaps</div>`;
   let d;
-  try { d = await postJson("/api/contract-gaps", { subject: payload.subject, market: payload.market }); }
+  try { d = await postJson("/api/contract-gaps", { subject: payload.subject, market: payload.market }, { view: "benchmark", label: "Contract gaps", anchor: "#b-gaps-run" }); }
   catch (e) { el.innerHTML = `<div class="empty">Couldn't find gaps (${esc(e.message)}).</div>`; return; }
   if (!d.count) {
     el.innerHTML = `<div class="ov-block"><h3>Contract gaps</h3><div class="muted">No codes found that ≥${d.min_peers} peers price and ${esc(d.subject)} doesn't — the subject is priced on everything its peers are (under this market basis).</div></div>`;
@@ -1758,8 +1934,8 @@ async function runBenchmark() {
   const isFresh = ticket("benchmark");
   try {
     data = Object.keys(payload.volumes).length
-      ? await postJson("/api/benchmark/opportunity", payload)
-      : { benchmark: await postJson("/api/benchmark/market", payload) };
+      ? await postJson("/api/benchmark/opportunity", payload, { view: "benchmark", label: "Benchmark", anchor: "#b-run" })
+      : { benchmark: await postJson("/api/benchmark/market", payload, { view: "benchmark", label: "Benchmark", anchor: "#b-run" }) };
   } catch (e) {
     if (!isFresh()) return;
     out.innerHTML = `<div class="empty"><h3>Benchmark failed</h3>${esc(e.message)}</div>`; return;
@@ -1917,9 +2093,21 @@ async function refusalText(r) {
 // never "loads" the frame; a REFUSAL does (a JSON page), and its sentence is
 // shown here. `location.href` replaced the whole dashboard with
 // {"detail": …} and the user had to press Back (round 7 P1.21).
-function downloadInFrame(url) {
+function downloadInFrame(url, bar) {
   const f = document.createElement("iframe");
   f.style.display = "none";
+  if (bar) {
+    // the page cannot see a frame's bytes arrive: the bar ends at "built —
+    // your browser is downloading it" when the server finished the file
+    const token = newToken();
+    url += (url.includes("?") ? "&" : "?") + "progress=" + token;
+    const jb = mountJobbar(bar, token);
+    const poll = startPoll(token, jb, bar, (s) => {
+      poll.stop();
+      if (s.state === "done") jb.built(); else if (s.state === "stopped") jb.stopped(); else jb.failed("not built");
+    });
+    setTimeout(() => poll.stop(), 6 * 3600 * 1000);
+  }
   f.addEventListener("load", () => {
     let text = "";
     try { text = (f.contentDocument && f.contentDocument.body) ? f.contentDocument.body.innerText : ""; }
@@ -1935,7 +2123,7 @@ function downloadInFrame(url) {
   document.body.appendChild(f);
 }
 
-async function openReportWith(url, payload, onError) {
+async function openReportWith(url, payload, onError, bar) {
   if (!payload) return;  // e.g. national-confirm cancelled
   const fail = (msg) => (onError ? onError(msg) : alert("Can't build this report.\n\n" + msg));
   // Open the tab SYNCHRONOUSLY, still inside the click's user-activation window
@@ -1944,13 +2132,25 @@ async function openReportWith(url, payload, onError) {
   // window.open past the activation window and the browser would silently
   // block the popup — the report would just never appear.
   const w = window.open("about:blank", "_blank");
+  let jb = null, poll = null;
+  const headers = { "Content-Type": "application/json" };
+  if (bar) {
+    const token = newToken();
+    headers["X-Mrfx-Progress"] = token;
+    const b = { ...bar, tab: w };
+    jb = mountJobbar(b, token);
+    poll = startPoll(token, jb, b);
+  }
   try {
     const r = await fetch(url, {
-      method: "POST", headers: { "Content-Type": "application/json" },
+      method: "POST", headers,
       body: JSON.stringify(payload),
     });
+    if (poll) poll.stop();
     if (!r.ok) {
+      if (jb) { if (r.status === 409) jb.stopped(); else jb.failed("not built"); }
       if (w) w.close();
+      if (r.status === 409) return null;
       // The refusals here are deliberate, plain-language guards (no state
       // scope, no rates for this subject) that the user is meant to ACT on —
       // so show the message, not the raw {"detail": …} JSON wrapper.
@@ -1958,20 +2158,24 @@ async function openReportWith(url, payload, onError) {
       return;
     }
     const objUrl = URL.createObjectURL(await r.blob());
+    if (jb) jb.done();                // 100 %: the page is in hand
     if (w) w.location = objUrl; else window.location = objUrl;  // popup blocked -> same tab
     setTimeout(() => URL.revokeObjectURL(objUrl), 60000);  // let the tab load, then free it
+    return r;
   } catch (e) {
+    if (poll) poll.stop();
+    if (jb) jb.failed("the server restarted — run it again");
     if (w) w.close();
     fail("report failed: " + e.message);
   }
 }
 
 async function openPitchReport() {
-  await openReportWith("/api/report/pitch", reportPayloadOrConfirmNational());
+  await openReportWith("/api/report/pitch", reportPayloadOrConfirmNational(), null, { view: "benchmark", label: "Pitch report", anchor: "#b-report" });
 }
 
 async function openNegotiationReport() {
-  await openReportWith("/api/report/negotiation", reportPayloadOrConfirmNational());
+  await openReportWith("/api/report/negotiation", reportPayloadOrConfirmNational(), null, { view: "benchmark", label: "Negotiation one-pager", anchor: "#b-negotiation" });
 }
 
 /* =======================================================================
@@ -2047,7 +2251,7 @@ async function initNegotiate() {
       if (!confirm("No state set — the proposal will pool every loaded state into one national comparison. Continue?")) return;
       p.market.allow_national = true;
     }
-    openReportWith("/api/report/proposal", p);
+    openReportWith("/api/report/proposal", p, null, { view: "negotiate", label: "Printable proposal", anchor: "#ng-proposal-report" });
   });
   $("#ng-report").addEventListener("click", () => {
     if (!state.lastNegotiatePayload) return;
@@ -2057,7 +2261,7 @@ async function initNegotiate() {
       if (!confirm("No state set — the report will pool every loaded state into one national comparison. Continue?")) return;
       p.market.allow_national = true;  // on the COPY: next click re-confirms
     }
-    openReportWith("/api/report/payer-compare", p);
+    openReportWith("/api/report/payer-compare", p, null, { view: "negotiate", label: "Printable report", anchor: "#ng-report" });
   });
 }
 
@@ -2084,7 +2288,7 @@ async function runProposal() {
   out.classList.remove("empty");
   out.innerHTML = `<div class="loading">Building the proposal</div>`;
   let d;
-  try { d = await postJson("/api/negotiate/proposal", payload); }
+  try { d = await postJson("/api/negotiate/proposal", payload, { view: "negotiate", label: "Proposal", anchor: "#ng-proposal-run" }); }
   catch (e) { out.innerHTML = `<div class="empty"><h3>Could not build</h3>${esc(e.message)}</div>`; return; }
   const s = d.summary;
   const rows = d.rows.map((r) => `<tr>
@@ -2139,7 +2343,7 @@ async function runNegotiate() {
   $("#ng-report").disabled = true;
   let d;
   const isFresh = ticket("negotiate");
-  try { d = await postJson("/api/negotiate/compare", payload); }
+  try { d = await postJson("/api/negotiate/compare", payload, { view: "negotiate", label: "Comparison", anchor: "#ng-run" }); }
   catch (e) {
     if (!isFresh()) return;
     out.innerHTML = `<div class="empty"><h3>Couldn't compare</h3>${esc(e.message)}</div>`; return;
@@ -2198,21 +2402,20 @@ async function initRatecard() {
   if (states) $("#rc-states").innerHTML = (states.states || []).map((s) => `<option value="${esc(s)}">`).join("");
   wireSubjectSearch("#rc-subject", "#rc-subjects");
   fillMonthSelect("#rc-month", months, LATEST_MONTH_OPT);
-  if (payers) $("#rc-payer-chips").innerHTML = payers.payers.map((p) =>
-    `<button class="chip" data-payer="${esc(p)}">${esc(p)}</button>`).join("");
+  if (payers) $("#rc-payer-chips").innerHTML = payerChipsHtml(payers);
   $("#rc-payer-chips").addEventListener("click", (ev) => {
     const b = ev.target.closest(".chip");
     if (b) b.classList.toggle("on");
   });
   $("#rc-run").addEventListener("click", buildRatecard);
   $("#rc-report").addEventListener("click", () =>
-    openReportWith("/api/report/ratecard", state.lastRatecardPayload));
+    openReportWith("/api/report/ratecard", state.lastRatecardPayload, null, { view: "ratecard", label: "Printable rate card", anchor: "#rc-report" }));
   $("#rc-csv").addEventListener("click", downloadRatecardCsv);
   $("#rc-bundle").addEventListener("click", downloadTrackerBundle);
   initStandardVisit();
   $("#vv-run").addEventListener("click", showVisitMarket);
   $("#vv-report").addEventListener("click", () =>
-    openReportWith("/api/report/visitvalue", state.lastVisitMarketPayload));
+    openReportWith("/api/report/visitvalue", state.lastVisitMarketPayload, null, { view: "ratecard", label: "Visit value report", anchor: "#vv-report" }));
   $("#vv-csv").addEventListener("click", downloadVisitMarketCsv);
 }
 
@@ -2252,7 +2455,7 @@ async function showVisitMarket() {
   $("#vv-msg").textContent = "pricing the market…";
   let d;
   const isFresh = ticket("visit-market");
-  try { d = await postJson("/api/schedule/visit/market", payload); }
+  try { d = await postJson("/api/schedule/visit/market", payload, { view: "ratecard", label: "Visit value in this market", anchor: "#vv-run" }); }
   catch (e) {
     if (!isFresh()) return;
     $("#vv-msg").textContent = ""; out.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return;
@@ -2421,7 +2624,7 @@ async function buildRatecard() {
   out.innerHTML = `<div class="loading">Building rate card</div>`;
   let data;
   const isFresh = ticket("ratecard");
-  try { data = await postJson("/api/schedule/fee", payload); }
+  try { data = await postJson("/api/schedule/fee", payload, { view: "ratecard", label: "Rate card", anchor: "#rc-run" }); }
   catch (e) {
     if (!isFresh()) return;
     out.innerHTML = `<div class="empty"><h3>Could not build</h3>${esc(e.message)}</div>`; return;
@@ -2608,7 +2811,7 @@ async function loadClientDigest() {
   out.classList.remove("empty");
   out.innerHTML = `<div class="loading">Building the digest for ${have.clients.length} client${have.clients.length === 1 ? "" : "s"}</div>`;
   let d;
-  try { d = await api("/api/clients/digest"); }
+  try { d = await api("/api/clients/digest", { bar: { view: "clients", label: "Client digest", anchor: "#cl-refresh" } }); }
   catch (e) {
     if (!isFresh()) return;
     out.innerHTML = `<div class="empty"><h3>Digest failed</h3>${esc(e.message)}</div>`; return;
@@ -3081,7 +3284,7 @@ function initLeverage() {
     if (!p.subject || !p.payer) { $("#lv-msg").textContent = "pick a practice and a payer"; return; }
     $("#lv-msg").textContent = "measuring…";
     let d;
-    try { d = await postJson("/api/leverage", p); }
+    try { d = await postJson("/api/leverage", p, { view: "negotiate", label: "Leverage", anchor: "#lv-run" }); }
     catch (e) { $("#lv-msg").textContent = ""; show(`<div class="muted">${esc(e.message)}</div>`); return; }
     $("#lv-msg").textContent = "";
     const rows = d.alternatives.map((a, i) => `<tr>
@@ -3103,7 +3306,7 @@ function initLeverage() {
     if (!p.subject) { $("#lv-msg").textContent = "pick a practice"; return; }
     $("#lv-msg").textContent = "ranking payers…";
     let d;
-    try { d = await postJson("/api/leverage/summary", p); }
+    try { d = await postJson("/api/leverage/summary", p, { view: "negotiate", label: "Every payer's leverage", anchor: "#lv-all" }); }
     catch (e) { $("#lv-msg").textContent = ""; show(`<div class="muted">${esc(e.message)}</div>`); return; }
     $("#lv-msg").textContent = "";
     const rows = d.payers.map((x) => `<tr>
@@ -3171,16 +3374,19 @@ function initDossier() {
     // the tab opens NOW, inside the click (after the awaits Chrome's
     // activation window has expired on a slow store and the popup is
     // blocked); the HTML report's refusal is caught and shown (P1.23)
-    const reportTab = openReportWith("/api/report/dossier", body,
-                                     (msg) => { $("#ds-msg").textContent = msg; });
-    try {
-      const meta = await postJson("/api/report/dossier.json", body);
-      $("#ds-msg").textContent = "";
-      $("#ds-out").innerHTML = (meta.skipped || []).length
-        ? `<div class="muted">Built with ${meta.skipped.length} section(s) omitted: ${
-            esc(meta.skipped.join("; "))}</div>` : "";
-    } catch (e) { $("#ds-msg").textContent = ""; $("#ds-out").innerHTML = `<div class="muted">${esc(e.message)}</div>`; }
-    await reportTab;
+    // ONE build: the omitted sections ride in a response header (the button
+    // used to build the whole dossier twice, review 13)
+    $("#ds-out").innerHTML = "";
+    const r = await openReportWith("/api/report/dossier", body,
+                                   (msg) => { $("#ds-msg").textContent = msg; },
+                                   { view: "leads", label: "Prospect dossier", anchor: "#ds-run" });
+    if ($("#ds-msg").textContent === "assembling…") $("#ds-msg").textContent = "";
+    if (r) {
+      let skipped = [];
+      try { skipped = JSON.parse(decodeURIComponent(r.headers.get("X-Mrfx-Skipped") || "%5B%5D")); } catch (_) { skipped = []; }
+      $("#ds-out").innerHTML = skipped.length
+        ? `<div class="muted">Built with ${skipped.length} section(s) omitted: ${esc(skipped.join("; "))}</div>` : "";
+    }
   });
   $("#mr-run").addEventListener("click", async () => {
     const st = $("#mr-state").value.trim();
@@ -3192,7 +3398,7 @@ function initDossier() {
       state: st, code: $("#mr-code").value.trim() || "97110",
       zip: $("#mr-zip").value.trim() || null,
       market: { month: "latest", therapy_only: false } },
-      (msg) => { $("#mr-msg").textContent = msg; });
+      (msg) => { $("#mr-msg").textContent = msg; }, { view: "leads", label: "Market report", anchor: "#mr-run" });
     if ($("#mr-msg").textContent === "building…") $("#mr-msg").textContent = "";
   });
 }
@@ -3729,7 +3935,7 @@ async function runMedicareOrg() {
   let d;
   // limit 500 (the API max) so the table and its CSV carry everything up to
   // the cap — and total_partners says when even that truncates
-  try { d = await postJson("/api/medicare/org", { subject, dataset_id: $("#md-year").value || null, limit: 500 }); }
+  try { d = await postJson("/api/medicare/org", { subject, dataset_id: $("#md-year").value || null, limit: 500 }, { view: "medicare", label: "Practice lookup", anchor: "#md-run" }); }
   catch (e) { out.innerHTML = `<div class="empty"><h3>Could not look up</h3>${esc(e.message)}</div>`; return; }
   state.lastMedicareOrg = d;
   $("#md-csv").disabled = !(d.referrals_in.rows.length || d.referrals_out.rows.length);
@@ -3906,19 +4112,33 @@ function downloadMedicareCheckCsv() {
    LEADS + RATE-CHANGE MONITORING
    ======================================================================= */
 
-async function postDownload(url, payload, filename) {
+async function postDownload(url, payload, filename, bar) {
+  let jb = null, poll = null;
+  const headers = { "Content-Type": "application/json" };
+  if (bar) {
+    const token = newToken();
+    headers["X-Mrfx-Progress"] = token;
+    jb = mountJobbar(bar, token);
+    poll = startPoll(token, jb, bar);
+  }
   try {
     const r = await fetch(url, {
-      method: "POST", headers: { "Content-Type": "application/json" },
+      method: "POST", headers,
       body: JSON.stringify(payload),
     });
-    if (!r.ok) { alert("The export was not built.\n\n" + await refusalText(r)); return; }
+    if (poll) poll.stop();
+    if (!r.ok) {
+      if (jb) { if (r.status === 409) { jb.stopped(); return; } jb.failed("not built"); }
+      alert("The export was not built.\n\n" + await refusalText(r)); return;
+    }
+    const blob = await r.blob();
+    if (jb) jb.done();
     const a = document.createElement("a");
-    a.href = URL.createObjectURL(await r.blob());
+    a.href = URL.createObjectURL(blob);
     a.download = filename;
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 60000);
-  } catch (e) { alert("export failed: " + e.message); }
+  } catch (e) { if (poll) poll.stop(); if (jb) jb.failed("failed"); alert("export failed: " + e.message); }
 }
 
 let leadsInit = false;
@@ -3935,7 +4155,7 @@ async function initLeads() {
     api("/api/states").catch(() => null),
   ]);
   fillMonthSelect("#ld-month", months, LATEST_MONTH_OPT);
-  if (payers) $("#ld-payer-chips").innerHTML = payers.payers.map((p) => `<button class="chip" data-payer="${esc(p)}">${esc(p)}</button>`).join("");
+  if (payers) $("#ld-payer-chips").innerHTML = payerChipsHtml(payers);
   $("#ld-payer-chips").addEventListener("click", (ev) => { const b = ev.target.closest(".chip"); if (b) b.classList.toggle("on"); });
   if (states) $("#ld-states").innerHTML = (states.states || []).map((s) => `<option value="${esc(s)}">`).join("");
   if (subjects) $("#ld-subjects").innerHTML = subjectOptionsHtml(subjects);
@@ -3948,7 +4168,7 @@ async function initLeads() {
   initDossier();
   initGrowth();
   initMarketSizing();
-  $("#ld-csv").addEventListener("click", () => { if (state.lastLeadsPayload) postDownload("/api/leads.csv", state.lastLeadsPayload, "leads.csv"); });
+  $("#ld-csv").addEventListener("click", () => { if (state.lastLeadsPayload) postDownload("/api/leads.csv", state.lastLeadsPayload, "leads.csv", { view: "leads", label: "Leads CSV", anchor: "#ld-csv" }); });
   $("#ld-board-run").addEventListener("click", runLeaderboard);
 }
 
@@ -3961,7 +4181,7 @@ async function runLeaderboard() {
   const isFresh = ticket("leaderboard");
   try {
     d = await postJson("/api/leaderboard", {
-      market: payload.market, min_codes: payload.min_codes, sort, limit: 50 });
+      market: payload.market, min_codes: payload.min_codes, sort, limit: 50 }, { view: "leads", label: "Leaderboard", anchor: "#ld-board-run" });
   } catch (e) {
     if (!isFresh()) return;
     el.innerHTML = `<div class="empty">Couldn't build the leaderboard (${esc(e.message)}).</div>`; return;
@@ -3998,7 +4218,7 @@ function fillMonthSelect(sel, months, prefix = "") {
   const el = $(sel);
   if (!el) return;
   const opts = months
-    ? (months.months || []).filter(Boolean).map((m) => `<option>${esc(m)}</option>`).join("")
+    ? monthOptionsHtml({ months: (months.months || []).filter(Boolean), covered: months.covered })
     : "";
   const note = !months
     ? `<option value="" disabled>couldn't load months — reopen this tab</option>`
@@ -4037,7 +4257,7 @@ async function runLeads() {
   out.innerHTML = `<div class="loading">Finding leads</div>`;
   let data;
   const isFresh = ticket("leads");
-  try { data = await postJson("/api/leads", payload); } catch (e) {
+  try { data = await postJson("/api/leads", payload, { view: "leads", label: "Leads", anchor: "#ld-run" }); } catch (e) {
     if (!isFresh()) return;
     out.innerHTML = `<div class="empty"><h3>Search failed</h3>${esc(e.message)}</div>`; return;
   }
@@ -4085,7 +4305,7 @@ async function initChanges() {
   ]);
   fillMonthSelect("#ch-month", months, `<option value="latest">Latest — each payer's newest file vs its previous one</option>`);
   fillMonthSelect("#ch-prev", months, `<option value="">auto — the previous month present</option>`);
-  if (payers) $("#ch-payer-chips").innerHTML = payers.payers.map((p) => `<button class="chip" data-payer="${esc(p)}">${esc(p)}</button>`).join("");
+  if (payers) $("#ch-payer-chips").innerHTML = payerChipsHtml(payers);
   // the State box's suggestions (list="ld-states") were filled only once the
   // Leads tab had been opened
   if (!$("#ld-states").options.length) {
@@ -4098,7 +4318,7 @@ async function initChanges() {
   if (subjects) $("#ch-subjects").innerHTML = subjectOptionsHtml(subjects);
   wireSubjectSearch("#ch-subject", "#ch-subjects");
   $("#ch-run").addEventListener("click", runChanges);
-  $("#ch-csv").addEventListener("click", () => { if (state.lastChangesPayload) postDownload("/api/changes.csv", state.lastChangesPayload, "rate_changes.csv"); });
+  $("#ch-csv").addEventListener("click", () => { if (state.lastChangesPayload) postDownload("/api/changes.csv", state.lastChangesPayload, "rate_changes.csv", { view: "changes", label: "Rate changes CSV", anchor: "#ch-csv" }); });
   $("#ch-traj-run").addEventListener("click", runTrajectory);
 }
 
@@ -4114,7 +4334,7 @@ async function runTrajectory() {
   else market.allow_national = true;
   el.innerHTML = `<div class="loading">Tracing payer trajectories across all months${st ? ` in ${esc(st.toUpperCase())}` : " in every state (the slowest view on a big store)"}</div>`;
   let d;
-  try { d = await postJson("/api/trajectory", { market }); }
+  try { d = await postJson("/api/trajectory", { market }, { view: "changes", label: "Payer trajectory", anchor: "#ch-traj-run" }); }
   catch (e) { el.innerHTML = `<div class="empty">Couldn't build the trajectory (${esc(e.message)}).</div>`; return; }
   if (!d.count) {
     el.innerHTML = `<div class="ov-block"><h3>Payer trajectory</h3><div class="muted">No payer has ≥2 months of data under this scope. Re-ingest the payers' newer MRFs (a later file month).</div></div>`;
@@ -4197,7 +4417,7 @@ async function runChanges() {
   out.innerHTML = `<div class="loading">Comparing months</div>`;
   let data;
   const isFresh = ticket("changes");
-  try { data = await postJson("/api/changes", payload); } catch (e) {
+  try { data = await postJson("/api/changes", payload, { view: "changes", label: "Rate changes", anchor: "#ch-run" }); } catch (e) {
     if (!isFresh()) return;
     out.innerHTML = `<div class="empty"><h3>Could not compare</h3>${esc(e.message)}</div>`; return;
   }
@@ -4324,7 +4544,13 @@ async function loadFilesNow() {
     ? `<div class="muted" title="${esc(d.pooled_note || "")}">Pooled months: ${pm.slice(0, 4).map((r) =>
         `${esc(r.payer)} ${esc(r.file_month || "")} has ${fmtInt(r.files)} files, ${fmtInt(r.practices_in_several)} practices priced in more than one (${fmtInt(r.lines_differing)} lines at different rates)`).join("; ")}${pm.length > 4 ? `; and ${fmtInt(pm.length - 4)} more` : ""} — their rates are pooled (median), not one file replacing another.</div>`
     : "";
-  stateEl.innerHTML = ruLine + pmLine + (d.total > d.files.length
+  const an = d.analytics;
+  const anLine = an && an.state && an.state !== "current"
+    ? `<div class="warn-text">${an.state === "failed" ? "Analytics update stopped — " : an.state === "building" ? "Analytics: " : "Analytics behind — "}${esc(an.sentence || "")}${an.state === "building" && an.pct != null
+        ? ` <span class="progress" style="display:inline-block;width:160px;vertical-align:middle"><span class="progress-fill" style="width:${Math.max(0, Math.min(100, an.pct))}%"></span></span>`
+        : ""}</div>`
+    : "";
+  stateEl.innerHTML = anLine + ruLine + pmLine + (d.total > d.files.length
     ? `<div class="muted">Showing the newest ${fmtInt(d.files.length)} of ${fmtInt(d.total)} files.
         <button class="btn" id="files-more" style="padding:2px 8px;font-size:12px">show ${fmtInt(Math.min(d.total, (state.filesLimit || 500) * 4))}</button></div>`
     : "");
@@ -4922,6 +5148,11 @@ function hookOverrideForms(root) {
   if (stats?.default_grain && stats.default_grain !== "tin") {
     state.grain = stats.default_grain;
     $$("#f-grain button").forEach((b) => b.classList.toggle("on", b.dataset.g === state.grain));
+  }
+  if (stats && stats.analytics && stats.analytics.state && stats.analytics.state !== "current") {
+    state.analytics = stats.analytics;
+    const el = $("#dataset-stats");
+    if (el && /loading/.test(el.textContent)) { el.innerHTML = coverageHtml(stats.analytics); wireCoverageLink(); }
   }
   statsP.then((s) => loadStats(s || undefined));
   loadStateOptions();

@@ -14,6 +14,7 @@ import logging
 import statistics
 
 from .rounding import half_up, signed_pct
+from . import progress
 from . import __version__
 from .catalog import code_info
 from .config import MrfxConfig
@@ -884,6 +885,7 @@ def overall_position(rows: list[dict]) -> float | None:
 
 def compute_benchmark(store: Store, subject: str, market: dict) -> dict:
     """Per-code subject vs market percentiles (§7B.1)."""
+    progress.current().stage("Finding this practice")
     market = resolve_plan_scope(store, normalize_market(market))
     subject_tins = subject_tins_for_market(store, subject, market)
     peer_desc, market = resolve_peer_set(store, market)
@@ -966,10 +968,12 @@ def compute_benchmark(store: Store, subject: str, market: dict) -> dict:
     LEFT JOIN position pos USING (billing_code)
     ORDER BY m.billing_code
     """
+    progress.current().stage("Comparing with peers")
     with store.connect() as con:
         cur = con.execute(sql, [subject_tins, *params, *subj_params, *peer_params])
         cols = [d[0] for d in cur.description]
         rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    progress.current().stage("Adding Medicare and freshness")
     # the Medicare anchor for the market's state, else the subject practice's
     # main state (store.medicare_anchor) — REST OF MISSOURI applied to a
     # Kansas client misstated every % (and the Explorer showed it bare)
@@ -1157,9 +1161,14 @@ def compute_payer_negotiation(store: Store, subject: str, market: dict,
     volumes = clean_volumes(volumes) or None
     sections, total_target, total_conservative = [], 0.0, 0.0
     covered_payers = 0
-    for payer in payers:
+    prog = progress.current()
+    prog.stage("Benchmarking against each payer's other practices")
+    for i_payer, payer in enumerate(payers):
+        prog.tick(i_payer / len(payers))
         pmarket = {**market, "payers": [payer]}
-        bench = compute_benchmark(store, subject, pmarket)
+        with prog.group():
+            bench = compute_benchmark(store, subject, pmarket)
+        prog.tick((i_payer + 1) / len(payers))
         # only codes where the subject actually has a rate with this payer AND
         # a peer set exists — an all-null section is noise on a one-pager
         priced = [r for r in bench["rows"] if r.get("subject_rate") is not None]
@@ -1265,7 +1274,11 @@ def compute_payer_comparison(store: Store, subject: str, payer: str, market: dic
         raise BenchmarkError("pick the payer you are negotiating with")
     market = resolve_plan_scope(store, normalize_market(market))
     pmarket = {**market, "payers": [payer]}
-    bench = compute_benchmark(store, subject, pmarket)
+    _prog = progress.current()
+    _prog.stage("Comparing with this payer's peers")
+    with _prog.group():
+        bench = compute_benchmark(store, subject, pmarket)
+    _prog.stage("Reading the comparables")
 
     # named comparables: what THIS payer pays entities the user considers
     # comparable — columns, one per name, in the order given
@@ -2072,6 +2085,7 @@ def methodology_footer(store: Store, benchmark: dict) -> str:
         "place-of-service set, month); a TIN's rate is the median of its distinct "
         "published values excluding $0/$0.01 dollar placeholders (variants flagged).",
         *_pooled_lines(store, payers),
+        *store.analytics_note(),
         "Rate files in the store matching the market's payer scope (the "
         "benchmark draws on the subset matching the full market definition): "
         f"{'; '.join(f'{f[0]} ({f[1]}, {f[2]})' for f in files) or 'none'}.",
@@ -2095,6 +2109,7 @@ def _erosion_block(store: Store, benchmark: dict, e) -> str:
     price index does not cover, produces NOTHING here — never an estimate, and
     never a failed report.
     """
+    progress.current().stage("Measuring real-terms erosion")
     try:
         from .monitor import compute_payer_trajectory
         market = dict(benchmark.get("market") or {})
@@ -2167,9 +2182,12 @@ def render_pitch_report(cfg: MrfxConfig, store: Store, benchmark: dict,
     or methodology footer (§8.10 — they are generated here, unconditionally)."""
     if not benchmark.get("market", {}).get("month"):
         raise BenchmarkError("pitch report requires a pinned as-of month")
+    prog = progress.current()
+    prog.stage("Checking the practice has rates in this market")
     require_subject_content(store, benchmark, "pitch report")
     geo_banner = _geo_banner_html(
         require_geographic_scope(benchmark["market"], "pitch report"))
+    prog.stage("Listing the source files")
     footer = methodology_footer(store, benchmark)
     e = html.escape
     target = benchmark["target_percentile"]
@@ -2189,6 +2207,7 @@ def render_pitch_report(cfg: MrfxConfig, store: Store, benchmark: dict,
     # returns {} rather than raising, so a trend column can never cost a
     # deliverable (invariant 3).
     from .spark import SPARK_CSS, SPARK_NOTE, series_by_code, sparkline
+    prog.stage("Drawing the rate trend lines")
     series = series_by_code(
         store, subject_tins_for_market(store, benchmark["subject"],
                                        benchmark.get("market") or {}),

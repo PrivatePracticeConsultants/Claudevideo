@@ -2921,10 +2921,17 @@ def _refresh_loaded_children(cfg: MrfxConfig, store: Store, urls: list[str],
         then_size = r["server_size"] or r.get("loaded_size")
         verdict = _republished({"validator": r["server_validator"],
                                 "server_size": then_size}, now)
+        # the probe answered but said NOTHING it could be compared on (no
+        # validator, no size — a chunked 200 to the 1-byte probe): a size
+        # recorded at load cannot be compared with a size the server did not
+        # state, so this is "can't be told", not "unchanged" (review 13 item
+        # 1.4: a 0.7.4-loaded child behind such a server stayed at its old
+        # month with no note; 0.7.5 re-downloaded it)
+        told_nothing = now is not None and not now.get("validator") and not now.get("total")
         if verdict:
             changed.append(r["id"])
         elif verdict is None and parent_reval == 1 and now is not None \
-                and not r["server_validator"] and not then_size:
+                and (told_nothing or (not r["server_validator"] and not then_size)):
             unknown.append(r["id"])
     if parent_id is not None and store.url_status(parent_id) != "expanding":
         return None
@@ -2941,8 +2948,8 @@ def _refresh_loaded_children(cfg: MrfxConfig, store: Store, urls: list[str],
     if n is None:
         return None
     m = store.requeue_republished(
-        unknown, 0, "the monthly refresh downloads this file again: nothing was "
-                    "recorded to tell whether the payer changed it",
+        unknown, 0, "the monthly refresh downloads this file again: the payer's "
+                    "server did not say whether it changed (no size, no version tag)",
         parent_id=parent_id, urls=urls_by_id)
     if m is None:
         return None
@@ -3448,6 +3455,10 @@ def _rollup_due(pend: int, in_flight: int, since_last: float, min_interval: floa
         return False
     return in_flight == 0 or since_last >= min_interval
 
+# how often an IDLE serve queue asks whether the analytics are behind (a
+# part-way build, a failed attempt) when no ingest credit is pending
+STALE_CHECK_SECONDS = 120.0
+
 # how many files the downloader may fetch ahead of the parser (disk-bounded)
 PREFETCH_AHEAD = 1
 
@@ -3515,6 +3526,12 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
     rollup_failures = 0
     last_rebuild_at = time.monotonic()
     rollup_min_interval = float(ROLLUP_MAX_STALE_SECONDS)
+    # review 13 item 1.3: a failing rollup is never given up on for the run —
+    # it is retried at the next idle gap after a back-off that grows with the
+    # failures (the build itself keeps its committed slices and halves the
+    # one that failed), and the dashboard says it stopped and why
+    retry_rollup_at = 0.0
+    last_stale_check = time.monotonic()
 
     def rebuild_now() -> bool:
         """Returns True only when a rebuild actually RAN to completion. False on
@@ -3524,10 +3541,13 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
         would peg a CPU and flood the log for the whole length of a concurrent
         multi-hour rebuild (audit HIGH-2)."""
         nonlocal ingests_pending_rollup, rollup_failures, last_rebuild_at, rollup_min_interval
+        nonlocal retry_rollup_at
         with state:
             n = ingests_pending_rollup
         if not n:
             return False
+        if time.monotonic() < retry_rollup_at:
+            return False        # backing off after a failure (see below)
         # COALESCE: if a rebuild (e.g. the enrichment name refresh) is already
         # running, don't queue behind it and then run our OWN multi-hour pass in
         # turn — the credits stay pending and the next cycle retries. Check
@@ -3565,25 +3585,24 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                 # a rebuild is already running; keep the credits pending so the
                 # next _rollup_due fires after it, and don't count this as done
                 return False
-        except Exception:  # noqa: BLE001 — rollups retry on the next batch
+        except Exception:  # noqa: BLE001 — rollups retry at the next idle gap
             rollup_failures += 1
-            if rollup_failures >= 3:
-                # never loop forever on a rebuild that keeps failing: the raw
-                # rates are safely on disk; dashboards just lag until the next
-                # successful rebuild (next batch, restart, or `mrfx serve`)
-                log.error(
-                    "rollup rebuild failed %d times — giving up for this run; "
-                    "raw data is safe, analytics will refresh on the next "
-                    "successful rebuild", rollup_failures)
-                with state:
-                    # drop only the credits THIS attempt covered — files that
-                    # landed during the failing attempts must still be able to
-                    # trigger a later rebuild within this run
-                    ingests_pending_rollup = max(0, ingests_pending_rollup - n)
-                return False
-            log.exception("rollup rebuild failed; will retry after the next file")
+            # never hot-loop on a rebuild that keeps failing — and never give
+            # up on it either (review 13 item 1.3: the old "giving up for this
+            # run" after three failures left a 1.16 B-row store answering from
+            # 3 of 49 payers until a restart). The build keeps every slice it
+            # committed and halves the one that ran out of memory; the next
+            # attempt waits for the queue to go idle AND a back-off of 2, 4,
+            # 8 … up to 60 minutes; the dashboard shows the sentence meanwhile.
+            backoff = min(3600.0, 120.0 * (2 ** (rollup_failures - 1)))
+            retry_rollup_at = time.monotonic() + backoff
+            log.exception("analytics update failed (%d in a row) — raw data is safe; "
+                          "the committed part of the build is kept and it is tried "
+                          "again when the queue is idle, in about %.0f min",
+                          rollup_failures, backoff / 60)
             return False
         rollup_failures = 0
+        retry_rollup_at = 0.0
         # Re-stamp at COMPLETION and self-throttle by how long the rebuild
         # actually took: counting the 90s window from the start would make a
         # >90s rebuild permanently "stale" the moment it finished — a full
@@ -3852,6 +3871,19 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                         log.info("resumed %d paused download(s) whose wait is over", woke)
                 except Exception:  # noqa: BLE001 — a wake check must never stop the queue
                     log.exception("could not check paused downloads; will retry")
+            if (not drain and pend == 0 and in_flight == 0
+                    and time.monotonic() - last_stale_check >= STALE_CHECK_SECONDS):
+                # an idle queue with analytics behind (a part-way build after a
+                # restart, a failed attempt, files a stopped run left out):
+                # one credit so the idle-gap rule below picks it up
+                last_stale_check = time.monotonic()
+                try:
+                    if store.rollups_stale() and not store.rollup_in_progress():
+                        with state:
+                            ingests_pending_rollup = max(ingests_pending_rollup, 1)
+                        pend = 1
+                except Exception:  # noqa: BLE001 — a probe never stops the queue
+                    pass
             if _rollup_due(pend, in_flight, time.monotonic() - last_rebuild_at,
                            rollup_min_interval):
                 if rebuild_now():

@@ -159,27 +159,34 @@ POOLED_FILES_NOTE = (
     "Files tab.")
 
 
-@generation_cached('quality.pooled_month_files')
 def pooled_month_files(store: Store) -> list[dict]:
     """Payer x month cells loaded from more than one file, with how many
     practices and contract lines appear in more than one of them and how many
     of those lines carry different rates (review 12 item 2.5: the rule is
     pooling, and the Files tab and every methodology say so with the numbers).
-    One aggregate over the spine per data generation."""
+    The file list is read each call (the small files table); the aggregate
+    over the spine is kept per SPINE generation (review 13 item 1.4 — keyed
+    on the data generation it ran again after every enrichment name refresh,
+    5-6 s per 99M rows on the Files poll, for an identical answer)."""
     with store.connect() as con:
         files = con.execute("""
             SELECT payer, file_month, count(*) FROM files
             WHERE status = 'done' AND file_type = 'in_network'
               AND coalesce(rows_emitted, 0) > 0 AND payer IS NOT NULL
             GROUP BY 1, 2 HAVING count(*) > 1""").fetchall()
-        if not files:
-            return []
-        spine = {(p, m): (pr, ln, df) for p, m, pr, ln, df in con.execute("""
-            SELECT payer, file_month,
-                   count(DISTINCT tin_value) FILTER (WHERE source_count > 1),
-                   count(*) FILTER (WHERE source_count > 1),
-                   count(*) FILTER (WHERE source_count > 1 AND rate_variants > 1)
-            FROM rates_by_tin GROUP BY 1, 2""").fetchall()}
+    if not files:
+        return []
+
+    def spine_cells():
+        with store.connect() as con:
+            return [list(r) for r in con.execute("""
+                SELECT payer, file_month,
+                       count(DISTINCT tin_value) FILTER (WHERE source_count > 1),
+                       count(*) FILTER (WHERE source_count > 1),
+                       count(*) FILTER (WHERE source_count > 1 AND rate_variants > 1)
+                FROM rates_by_tin GROUP BY 1, 2""").fetchall()]
+    spine = {(p, m): (pr, ln, df)
+             for p, m, pr, ln, df in store.spine_cached("quality.pooled_spine", None, spine_cells)}
     out = []
     for payer, month, n in files:
         pr, ln, df = spine.get((payer, month), (0, 0, 0))

@@ -27,6 +27,7 @@ import logging
 import re
 from pathlib import Path
 
+from . import progress as _progress
 from .benchmark import (BenchmarkError, compute_benchmark, contract_gaps,
                         normalize_market, render_pitch_report,
                         resolve_subject_tins)
@@ -313,22 +314,31 @@ def build_all_packets(cfg: MrfxConfig, store: Store, out_root: Path | str | None
     pmarket = dict(market or {})
     pmarket.setdefault("month", "latest")
     pmarket.setdefault("therapy_only", True)
+    prog = _progress.current()
+    prog.stage("Finding contract gaps for the whole book")
     if progress:
         progress("finding contract gaps for the book")
     try:
         book = contract_gaps_book(store, subjects, pmarket)
     except BenchmarkError as e:
         book = {s: e for s in subjects}
+    prog.stage("Building the book's digest")
     if progress:
         progress("building the book's digest")
     same = (normalize_market(pmarket) == normalize_market(DIGEST_GAPS_MARKET))
     digest = client_digest(store, gaps_book=book if same else None)
     packets = []
+    prog.stage("Building the packets")
     for i, s in enumerate(subjects, 1):
+        _progress.check_cancelled()        # a stop ends the run between clients
+        prog.tick((i - 1) / len(subjects))
         if progress:
             progress(f"building packet {i} of {len(subjects)}: {s}")
-        packets.append(build_client_packet(cfg, store, s, mdir, market, digest=digest,
-                                           gaps=book.get(s)))
+        with prog.group():
+            packets.append(build_client_packet(cfg, store, s, mdir, market, digest=digest,
+                                               gaps=book.get(s)))
+        prog.tick(i / len(subjects))
+    prog.stage("Writing the index")
     (mdir / "index.html").write_text(
         _book_index_html(cfg, month, packets), encoding="utf-8")
     log.info("packets: %s client(s) written to %s", len(packets), mdir)

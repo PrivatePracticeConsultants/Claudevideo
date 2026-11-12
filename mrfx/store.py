@@ -34,6 +34,7 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from . import progress as _progress
 from .catalog import (THERAPY_CLINIC_STRONG_CODES, THERAPY_MIN_SHARE_PCT,
                       THERAPY_SMALL_PRACTICE_NPIS,
                       excluded_facility_taxonomy_sql, hospital_taxonomy_sql,
@@ -1034,6 +1035,10 @@ class Store:
         # HDD, slowing extraction (a plain bool; GIL makes the read/write
         # atomic, no lock needed).
         self._rollup_active = False
+        # the running analytics build's progress (rollup_job) and the last
+        # failed attempt's sentence (rollup_failure; _MISSING = not read yet)
+        self._rollup_job: dict | None = None
+        self._rollup_failure = _MISSING
         self._sweep_orphan_tmps()
         if memory_limit_gb is not None:
             # explicit override from config (duckdb_memory_gb): trust the user
@@ -1318,6 +1323,10 @@ class Store:
         rebuild failure must not stop the app from opening)."""
         try:
             with self.connect() as con:
+                if self._meta_get(con, "rollup_plan"):
+                    # a sliced build is part-way: it resumes in the background
+                    # (serve / the queue), never synchronously here at open
+                    return
                 if not con.execute(
                     "SELECT count(*) FROM information_schema.tables "
                     "WHERE table_name = 'tin_directory_tbl'").fetchone()[0]:
@@ -2029,6 +2038,8 @@ class Store:
             with self.connect() as con:
                 if self._meta_get(con, "rollup_needs_full") == "1":
                     return True
+                if self._meta_get(con, "rollup_plan"):
+                    return True  # a sliced build is part-way: it resumes
                 if self._read_pending_payers(con)[1]:
                     return True  # a removed part's slices await recompute
                 covered = self._meta_get(con, "rollup_covered_through") or ""
@@ -2051,6 +2062,11 @@ class Store:
         the fast incremental path."""
         try:
             with self.connect() as con:
+                plan = self._plan_get(con)
+                if plan is not None:
+                    return (f"an analytics build is part-way ({plan.get('next', 0)} of "
+                            f"{len(plan['slices'])} parts saved) — it continues where it "
+                            "stopped")
                 if self._meta_get(con, "rollup_needs_full") == "1":
                     return ("a full rebuild is FLAGGED (rollup_needs_full) — a "
                             "removal that couldn't be scoped, or a prior full "
@@ -2110,6 +2126,10 @@ class Store:
         Each connection is told to spill to a temp dir under the store so the
         big rollup GROUP BYs over national files (millions of rows) never OOM —
         DuckDB streams to disk under memory pressure instead."""
+        p = _progress.current()
+        if p is not _progress._NOOP and getattr(p, "cancelled", False):
+            # a stopped run opens no new connection (review 13 Group 2)
+            raise _progress.Stopped(getattr(p, "cancel_reason", "") or "stopped")
         con = self._connect_with_retry()
         # The settings below are GLOBAL to the in-process DuckDB instance
         # and are applied once on the pinned connection (see __init__), so a
@@ -2123,6 +2143,15 @@ class Store:
         # memory stays bounded either way (audit F1).
         if self._pin is None:
             self._apply_settings(con, include_threads=False)
+        # review 13 Group 2: a run with a progress bar sees DuckDB's own
+        # progress on every connection it opens, and its Stop reaches the
+        # connection actually running the statement; a stopped run opens no
+        # new one. Nothing at all happens without a token (the no-op).
+        if p is not _progress._NOOP:
+            try:
+                p.attach(con)
+            except Exception:  # noqa: BLE001 — a progress bar never fails a query
+                pass
         return con
 
     def _connect_with_retry(self) -> duckdb.DuckDBPyConnection:
@@ -2363,6 +2392,16 @@ class Store:
                 recorded_at TIMESTAMP
             );
             CREATE TABLE IF NOT EXISTS rate_npi_set (part VARCHAR, npi VARCHAR);
+            -- What each rate PART holds, per payer and month (rows) and its
+            -- TINs — kept per part like rate_npi_set (one scan of a new part,
+            -- never of the store): the payers and months LOADED, for the
+            -- coverage line and the pickers (review 13 item 1.2), and the
+            -- header's counts while the analytics are behind (a raw
+            -- count(DISTINCT) over a billion rows every minute is gone)
+            CREATE TABLE IF NOT EXISTS part_payer_set (part VARCHAR, payer VARCHAR,
+                                                       file_month VARCHAR, n BIGINT);
+            CREATE TABLE IF NOT EXISTS part_tin_set (part VARCHAR, tin_value VARCHAR);
+            CREATE TABLE IF NOT EXISTS part_set_parts (part VARCHAR PRIMARY KEY, sig VARCHAR);
             -- Which health PLANS a rate file serves, harvested from the payer's
             -- table-of-contents (the rate file itself never names a plan).
             -- Keyed by the URL's dedup_key so it joins to url_queue, which
@@ -4269,15 +4308,22 @@ class Store:
         # transaction commits — bumping here (pre-build) let a concurrent poll
         # cache a count computed from the OLD tables under the NEW generation
         # and serve that stale total for the cache TTL after the swap.
-        tables = (("tin_directory_tbl",) if names_only
-                  else ("rates_by_tin_tbl", "tin_directory_tbl"))
         if not self._acquire_rollup_lock(log, skip_if_busy=skip_if_busy):
             return ROLLUP_SKIPPED
         try:
             self._rollup_active = True
-            return self._rebuild_rollups_locked(tables, log)
+            # review 13 item 1.3: a durable plan of slices, each committed on
+            # its own — resumed after a kill / restart / failure, queryable
+            # while it runs, an out-of-memory slice halved and retried
+            took = self._run_plan("names" if names_only else "full", log)
+            self._clear_rollup_failure()
+            return took
+        except Exception as e:
+            self._note_rollup_failure(e)
+            raise
         finally:
             self._rollup_active = False
+            self._rollup_job = None
             self.rollup_lock.release()
 
     def _acquire_rollup_lock(self, log, skip_if_busy: bool = False) -> bool:
@@ -4358,6 +4404,9 @@ class Store:
             return ROLLUP_SKIPPED
         try:
             self._rollup_active = True
+            self._rollup_job = {"kind": "update", "slice": 0, "slices": 1, "work_done": 0,
+                                "work_total": 1, "rate": None,
+                                "label": "adding newly loaded files", "started": time.time()}
             with self.connect() as con:
                 t_locked = time.monotonic()
                 with self.write_lock:
@@ -4377,6 +4426,9 @@ class Store:
                 if self._meta_get(con, "rollup_needs_full") == "1":
                     raise RuntimeError("a data removal could not be scoped — "
                                        "full rebuild required")
+                if self._meta_get(con, "rollup_plan"):
+                    raise RuntimeError("an analytics build is part-way — it "
+                                       "continues as a full build")
                 covered = self._meta_get(con, "rollup_covered_through") or ""
                 # filenames AT the covered timestamp: a strict `>` alone would
                 # permanently skip a file whose done-upsert committed after the
@@ -4494,9 +4546,12 @@ class Store:
                 self.last_rollup_build_seconds = took
                 log.info("analytics update finished in %.0fs (payer slice, not "
                          "a full rebuild)", took)
+                if self.rollup_failure():
+                    self._clear_rollup_failure()
                 return took
         finally:
             self._rollup_active = False
+            self._rollup_job = None
             self.rollup_lock.release()
 
     def refresh_directory_incremental(self, skip_if_busy: bool = False) -> float:
@@ -4927,6 +4982,358 @@ class Store:
                 _query, _key, view = specs[tbl]
                 con.execute(f"CREATE OR REPLACE VIEW {view} AS SELECT * FROM {tbl}")
 
+    # -- the durable sliced build (review 13 item 1.3; mrfx/rollplan.py) -------
+
+    def _plan_versions(self) -> list:
+        """What a plan's slices were computed under: a plan made by another
+        version of the rules is not resumed (its committed slices are redone)."""
+        return [ROLLUP_SCHEMA_VERSION, DIRECTORY_SCHEMA_VERSION, ROW_RULES_VERSION]
+
+    def _plan_get(self, con: duckdb.DuckDBPyConnection) -> dict | None:
+        raw = self._meta_get(con, "rollup_plan")
+        if not raw:
+            return None
+        try:
+            plan = json.loads(raw)
+        except ValueError:
+            return None
+        return plan if isinstance(plan, dict) and isinstance(plan.get("slices"), list) else None
+
+    def rollup_plan(self) -> dict | None:
+        """The outstanding analytics build plan, if one is part-way (None
+        otherwise). Never raises."""
+        try:
+            with self.connect() as con:
+                return self._plan_get(con)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _table_columns(self, con: duckdb.DuckDBPyConnection, tbl: str) -> list[str]:
+        return [r[0] for r in con.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = ? "
+            "ORDER BY ordinal_position", [tbl]).fetchall()]
+
+    def _new_plan(self, con: duckdb.DuckDBPyConnection, kind: str, log) -> dict:
+        """Snapshot the coverage markers, size the slices, make sure the
+        target tables exist, and store the plan. Nothing is aggregated yet."""
+        from . import rollplan
+        # the same SNAPSHOT rule as the one-shot build had: taken BEFORE any
+        # slice reads the rates glob, so a file finishing mid-build stays
+        # newer than the marker and the next incremental heals its payer
+        cover_ts = con.execute(
+            "SELECT coalesce(max(finished_at)::VARCHAR, '') FROM files "
+            "WHERE status = 'done' AND rows_emitted > 0").fetchone()[0]
+        cover_names = [] if not cover_ts else [r[0] for r in con.execute(
+            "SELECT filename FROM files WHERE status = 'done' "
+            "AND rows_emitted > 0 AND finished_at::VARCHAR = ?", [cover_ts]).fetchall()]
+        pend_gen, pending = self._read_pending_payers(con)
+        needs_full = self._meta_get(con, "rollup_needs_full") == "1"
+        dir_names_ts = con.execute(
+            "SELECT coalesce(max(enriched_at)::VARCHAR, '') FROM npi_directory").fetchone()[0]
+        try:
+            threads = max(1, int(con.execute(
+                "SELECT current_setting('threads')").fetchone()[0]))
+        except Exception:  # noqa: BLE001
+            threads = 1
+        rpp = self._rollup_partition_rows(1, threads)
+        log.info("analytics build: planning (counting rows per payer and code)…")
+        n_rows = con.execute("SELECT count(*) FROM rates").fetchone()[0] or 0
+        slices = list(rollplan.dir_slices(n_rows, rpp))
+        payers: list = []
+        if kind == "full":
+            counts = con.execute(
+                "SELECT payer, billing_code, count(*) FROM rates "
+                "GROUP BY payer, billing_code").fetchall()
+            spine = rollplan.spine_slices(counts, rpp)
+            payers = sorted({s["payer"] for s in spine if s["payer"] is not None})
+            has_null = any(s["payer"] is None for s in spine)
+            slices.append({"t": "prune", "payers": payers, "null_payer": has_null,
+                           "k": 1, "i": 0, "rows": 0, "work": 1})
+            slices.extend(spine)
+        # where each table is built: in place (the live table, queryable as it
+        # fills) when its columns are what this version writes; a fresh
+        # `<table>__next` swapped in at the end when they are not (a schema
+        # change — the old table keeps serving meanwhile)
+        targets = {}
+        specs = {"tin_directory_tbl": TIN_DIRECTORY_QUERY}
+        if kind == "full":
+            specs["rates_by_tin_tbl"] = SPINE_QUERY
+        with self.write_lock:
+            con.execute("BEGIN TRANSACTION")
+            try:
+                for tbl, query in specs.items():
+                    cols = con.execute(f"DESCRIBE {query.format(part='FALSE')}").fetchall()
+                    want = [c[0] for c in cols]
+                    have = self._table_columns(con, tbl)
+                    ddl = ", ".join(f'"{name}" {typ}' for name, typ, *_ in cols)
+                    if not have:
+                        # explicit DDL, never an empty CTAS (round 5's DuckDB
+                        # visibility bug — tests/mrfx/test_rollup_visibility.py)
+                        con.execute(f"CREATE TABLE {tbl} ({ddl})")
+                        targets[tbl] = tbl
+                    elif sorted(have) == sorted(want):
+                        targets[tbl] = tbl
+                    else:
+                        con.execute(f"CREATE OR REPLACE TABLE {tbl}__next ({ddl})")
+                        targets[tbl] = f"{tbl}__next"
+                plan = {
+                    "id": os.urandom(6).hex(), "kind": kind,
+                    "versions": self._plan_versions(),
+                    "cover_ts": cover_ts, "cover_names": sorted(cover_names),
+                    "pend_gen": pend_gen, "pending": pending, "needs_full": needs_full,
+                    "dir_names_ts": dir_names_ts, "targets": targets,
+                    "rows": int(n_rows), "slices": slices, "next": 0, "work_done": 0,
+                    "created": _utcnow().isoformat(timespec="seconds"),
+                }
+                con.execute("INSERT OR REPLACE INTO meta VALUES ('rollup_plan', ?)",
+                            [json.dumps(plan)])
+                con.execute("COMMIT")
+            except Exception:
+                try:
+                    con.execute("ROLLBACK")
+                except duckdb.Error:
+                    pass
+                raise
+            self._register_views(con)
+        log.info("analytics build planned: %d slice(s) over %s rows (%d payer(s))",
+                 len(slices), f"{n_rows:,}", len(payers))
+        return plan
+
+    def _run_plan(self, kind: str, log) -> float:
+        """Create (or resume) the plan and run its slices to the end. Each
+        slice commits with the plan's pointer in ONE transaction, so a kill
+        between any two statements loses at most the running slice. An
+        out-of-memory slice is halved (rollplan.halve) and retried; any other
+        error propagates with the plan kept for the next attempt."""
+        from . import rollplan
+        with self.connect() as con:
+            t_locked = time.monotonic()
+            self.last_rollup_build_seconds = None
+            with self.write_lock:
+                self._register_views(con)
+            plan = self._plan_get(con)
+            if plan is not None and plan.get("versions") != self._plan_versions():
+                log.info("analytics build: the part-way build was made by another "
+                         "version of the rules — starting it again")
+                plan = None
+            if plan is not None and kind == "full" and plan.get("kind") == "names":
+                plan = None      # a full build includes the names; it replaces it
+            if plan is None:
+                if kind == "full":
+                    log.info("full analytics build: payer by payer, each part saved "
+                             "as it finishes — the dashboard shows each payer as it "
+                             "lands, and a stop or restart continues where it left off")
+                plan = self._new_plan(con, kind, log)
+            else:
+                log.info("analytics build: resuming at part %d of %d (%s)",
+                         plan["next"] + 1, len(plan["slices"]),
+                         rollplan.slice_label(plan["slices"][min(plan["next"], len(plan["slices"]) - 1)])
+                         if plan["slices"] else "—")
+            total_work = sum(int(s.get("work", 1)) for s in plan["slices"]) or 1
+            session_work, session_t0 = 0, time.monotonic()
+            self._rollup_job = {"kind": plan["kind"], "slice": plan["next"],
+                                "slices": len(plan["slices"]),
+                                "work_done": int(plan.get("work_done", 0)),
+                                "work_total": total_work, "rate": None,
+                                "label": "", "started": time.time()}
+            while plan["next"] < len(plan["slices"]):
+                idx = plan["next"]
+                sl = plan["slices"][idx]
+                self._rollup_job.update(slice=idx, slices=len(plan["slices"]),
+                                        label=rollplan.slice_label(sl))
+                t_slice = time.monotonic()
+                try:
+                    self._run_slice(con, plan, idx, log)
+                except duckdb.OutOfMemoryException:
+                    halves = rollplan.halve(sl) if sl["t"] != "prune" else None
+                    if not halves:
+                        raise
+                    log.warning("analytics build: %s ran out of memory — cutting it "
+                                "in two and trying again", rollplan.slice_label(sl))
+                    plan["slices"][idx:idx + 1] = halves
+                    with self.write_lock:
+                        con.execute("INSERT OR REPLACE INTO meta VALUES ('rollup_plan', ?)",
+                                    [json.dumps(plan)])
+                    total_work = sum(int(s.get("work", 1)) for s in plan["slices"]) or 1
+                    self._rollup_job["work_total"] = total_work
+                    continue
+                w = int(sl.get("work", 1))
+                session_work += w
+                elapsed = time.monotonic() - session_t0
+                self._rollup_job.update(
+                    work_done=int(plan.get("work_done", 0)), slice=plan["next"],
+                    rate=(session_work / elapsed) if elapsed > 0 else None,
+                    work_total=total_work)
+                if len(plan["slices"]) > 1:
+                    log.info("analytics build: part %d of %d done (%s, %.0fs)",
+                             idx + 1, len(plan["slices"]), rollplan.slice_label(sl),
+                             time.monotonic() - t_slice)
+            self._finish_plan(con, plan, log)
+            took = time.monotonic() - t_locked
+            self.last_rollup_build_seconds = took
+            log.info("analytics build finished in %.0fs", took)
+            return took
+
+    def _run_slice(self, con: duckdb.DuckDBPyConnection, plan: dict, idx: int, log) -> None:
+        """One slice: delete what it recomputes, insert it, advance the plan —
+        one transaction. A spine slice writes a new spine token in the same
+        transaction (spine_key), so a cached screen never outlives it."""
+        from . import rollplan
+        sl = plan["slices"][idx]
+        nxt = dict(plan, next=idx + 1, work_done=int(plan.get("work_done", 0)) + int(sl.get("work", 1)))
+        spine = plan["targets"].get("rates_by_tin_tbl", "rates_by_tin_tbl")
+        directory = plan["targets"].get("tin_directory_tbl", "tin_directory_tbl")
+        con.execute("BEGIN TRANSACTION")
+        try:
+            if sl["t"] == "dir":
+                pred = rollplan.slice_pred(sl)
+                con.execute(f"DELETE FROM {directory} WHERE {pred}")
+                con.execute(f"INSERT INTO {directory} BY NAME "
+                            + TIN_DIRECTORY_QUERY.format(part=pred))
+            elif sl["t"] == "prune":
+                keep = list(sl.get("payers") or [])
+                null_clause = "FALSE" if sl.get("null_payer") else "payer IS NULL"
+                con.execute(f"DELETE FROM {spine} WHERE {null_clause} OR (payer IS NOT NULL "
+                            "AND payer NOT IN (SELECT unnest(?::VARCHAR[])))", [keep])
+                con.execute("INSERT OR REPLACE INTO meta VALUES ('spine_token', ?)",
+                            [os.urandom(8).hex()])
+            else:
+                pred = rollplan.slice_pred(sl)
+                con.execute(f"DELETE FROM {spine} WHERE {pred}")
+                con.execute(f"INSERT INTO {spine} BY NAME " + SPINE_QUERY.format(part=pred))
+                con.execute("INSERT OR REPLACE INTO meta VALUES ('spine_token', ?)",
+                            [os.urandom(8).hex()])
+            con.execute("INSERT OR REPLACE INTO meta VALUES ('rollup_plan', ?)",
+                        [json.dumps(nxt)])
+            con.execute("COMMIT")
+        except Exception:
+            try:
+                con.execute("ROLLBACK")
+            except duckdb.Error:
+                pass
+            raise
+        plan.update(next=nxt["next"], work_done=nxt["work_done"])
+        try:
+            con.execute("CHECKPOINT")
+        except duckdb.Error:
+            pass  # another connection's write blocks it; the next one catches up
+        if sl["t"] != "dir" and spine == "rates_by_tin_tbl":
+            # the spine changed and is LIVE: caches keyed on it go (coverage
+            # moves on screen as each payer lands)
+            self._store_stats_cache = None
+            self._bump_generation()
+        elif sl["t"] == "dir" and directory == "tin_directory_tbl":
+            self._states_cache = None
+            self._bump_generation(spine=False)
+
+    def _finish_plan(self, con: duckdb.DuckDBPyConnection, plan: dict, log) -> None:
+        """Every slice committed: swap in any `__next` table, stamp the
+        coverage markers from the plan's snapshot, clear the plan — in ONE
+        transaction — then consume the removal notes the snapshot covered."""
+        full = plan["kind"] == "full"
+        with self.write_lock:
+            con.execute("BEGIN TRANSACTION")
+            try:
+                for live, target in plan["targets"].items():
+                    if target != live:
+                        con.execute(f"DROP TABLE IF EXISTS {live}")
+                        con.execute(f"ALTER TABLE {target} RENAME TO {live}")
+                if full:
+                    con.execute("INSERT OR REPLACE INTO meta VALUES ('rollup_schema_version', ?)",
+                                [str(ROLLUP_SCHEMA_VERSION)])
+                    con.execute("INSERT OR REPLACE INTO meta VALUES ('rollup_covered_through', ?)",
+                                [plan["cover_ts"]])
+                    con.execute("INSERT OR REPLACE INTO meta VALUES ('rollup_covered_names', ?)",
+                                [json.dumps(sorted(plan["cover_names"]))])
+                    con.execute("INSERT OR REPLACE INTO meta VALUES ('spine_token', ?)",
+                                [os.urandom(8).hex()])
+                    if plan.get("needs_full"):
+                        # set before the plan was made -> satisfied; set since -> kept
+                        con.execute("DELETE FROM meta WHERE key = 'rollup_needs_full'")
+                con.execute("INSERT OR REPLACE INTO meta VALUES ('directory_names_through', ?)",
+                            [plan["dir_names_ts"]])
+                con.execute("INSERT OR REPLACE INTO meta VALUES ('directory_schema_version', ?)",
+                            [str(DIRECTORY_SCHEMA_VERSION)])
+                con.execute("DELETE FROM meta WHERE key = 'rollup_plan'")
+                con.execute("DROP TABLE IF EXISTS rates_dedup_tbl")
+                con.execute(f"CREATE OR REPLACE VIEW rates_dedup AS {DEDUP_QUERY}")
+                con.execute("COMMIT")
+            except Exception:
+                try:
+                    con.execute("ROLLBACK")
+                except duckdb.Error:
+                    pass
+                raise
+            self._register_views(con)
+        if full:
+            self._consume_pending_payers(con, int(plan.get("pend_gen", 0)),
+                                         list(plan.get("pending") or []))
+        try:
+            con.execute("CHECKPOINT")
+        except duckdb.Error:
+            pass
+        self._enrich_progress_cache = None
+        self._store_stats_cache = None
+        self._states_cache = None
+        self._bump_generation(spine=full)
+
+    # -- the build's state, for the dashboard (review 13 item 1.2) --------------
+
+    def _note_rollup_failure(self, exc: BaseException) -> None:
+        """A rollup attempt failed: keep the sentence (the header line and the
+        Files tab say it) until a later attempt succeeds. Never raises."""
+        from . import rollplan
+        try:
+            sentence = rollplan.failure_sentence(exc, self._memory_limit_gb)
+            self._rollup_failure = {"at": _utcnow().isoformat(timespec="seconds"),
+                                    "sentence": sentence}
+            self._coverage_cache = None
+            with self.write_lock, self.connect() as con:
+                con.execute("INSERT OR REPLACE INTO meta VALUES ('rollup_failure', ?)",
+                            [json.dumps(self._rollup_failure)])
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _clear_rollup_failure(self) -> None:
+        try:
+            self._rollup_failure = None
+            self._coverage_cache = None
+            with self.write_lock, self.connect() as con:
+                con.execute("DELETE FROM meta WHERE key = 'rollup_failure'")
+        except Exception:  # noqa: BLE001
+            pass
+
+    def rollup_failure(self) -> dict | None:
+        """{at, sentence} of the last failed analytics attempt, or None."""
+        if self._rollup_failure is not _MISSING:
+            return self._rollup_failure
+        try:
+            with self.connect() as con:
+                raw = self._meta_get(con, "rollup_failure")
+            self._rollup_failure = json.loads(raw) if raw else None
+        except Exception:  # noqa: BLE001
+            return None
+        return self._rollup_failure
+
+    def rollup_job(self) -> dict | None:
+        """The running build's progress: {pct, slice, slices, label, eta_s} —
+        None when nothing is building. Percent = work of committed slices over
+        the plan's total (each slice weighted by the raw rows it reads); the
+        ETA is from this session's measured rate. Never raises."""
+        job = self._rollup_job
+        if not job or not self._rollup_active:
+            return None
+        try:
+            total = max(1, int(job.get("work_total") or 1))
+            done = min(total, int(job.get("work_done") or 0))
+            rate = job.get("rate")
+            eta = (total - done) / rate if rate else None
+            return {"kind": job.get("kind"), "pct": min(99, int(100 * done / total)),
+                    "slice": int(job.get("slice") or 0), "slices": int(job.get("slices") or 0),
+                    "label": job.get("label") or "", "eta_s": eta}
+        except Exception:  # noqa: BLE001
+            return None
+
     def cached(self, name: str, key, compute):
         """`compute()`, remembered until the next data generation.
 
@@ -4953,6 +5360,33 @@ class Store:
                 if len(self._gen_cache) > 512:
                     self._gen_cache = {"_gen": gen}
                 self._gen_cache[k] = value
+        return copy.deepcopy(value)
+
+    def spine_cached(self, name: str, key, compute):
+        """`compute()`, remembered until the SPINE changes — not every data
+        generation: the enrichment name refresh bumps data_generation every
+        few minutes without touching a rate, and an aggregate over the spine
+        alone must not be recomputed for that (review 13 item 1.4: 5-6 s per
+        99M rows on every Files poll after each refresh)."""
+        import copy
+        gen = self.spine_generation
+        k = (name, key)
+        with self._gen_cache_lock:
+            held = self.__dict__.setdefault("_spine_cache", {})
+            if held.get("_gen") != gen:
+                held.clear()
+                held["_gen"] = gen
+            got = held.get(k, _MISSING)
+        if got is not _MISSING:
+            return copy.deepcopy(got)
+        value = compute()
+        with self._gen_cache_lock:
+            held = self._spine_cache
+            if held.get("_gen") == gen:
+                if len(held) > 256:
+                    held.clear()
+                    held["_gen"] = gen
+                held[k] = value
         return copy.deepcopy(value)
 
     def _bump_generation(self, spine: bool = True) -> None:
@@ -4990,6 +5424,9 @@ class Store:
             path = self.dir / f"{name}.{self.spine_key()}.parquet"
             if not path.exists():
                 tmp = path.with_name(f"{path.name}.{os.getpid()}-{os.urandom(3).hex()}.tmp")
+                # the cold-only step a progress bar must name (review 13 Group 2)
+                _progress.current().stage(
+                    "Preparing the practice medians (first run since new data)")
                 try:
                     with self.connect() as con:
                         con.execute(f"COPY ({select_sql}) TO '{sql_path(tmp)}' "
@@ -5352,9 +5789,18 @@ class Store:
                             "FROM rates_by_tin_tbl").fetchone()
                         self._spine_counts = (gen, (tins, payers))
                 else:
-                    rates_n, tins, payers = con.execute(
-                        "SELECT count(*), count(DISTINCT tin_value), count(DISTINCT payer) "
-                        "FROM rates").fetchone()
+                    # analytics behind: what is LOADED, from the per-part sets
+                    # (one scan per new part) — a raw count(DISTINCT) over the
+                    # whole store every minute while a billion-row rollup
+                    # catches up competed with the rollup itself (review 13)
+                    inv = self.loaded_inventory()
+                    if inv.get("complete"):
+                        rates_n = con.execute("SELECT count(*) FROM rates").fetchone()[0]
+                        tins, payers = inv["tins"], len(inv["payers"])
+                    else:
+                        rates_n, tins, payers = con.execute(
+                            "SELECT count(*), count(DISTINCT tin_value), count(DISTINCT payer) "
+                            "FROM rates").fetchone()
             result = {"rates": rates_n, "tins": tins, "payers": payers}
             self._store_stats_cache = (time.monotonic(), result)
             return result
@@ -5611,6 +6057,258 @@ class Store:
                     "available_states query returned nothing (%s)", e)
                 return []
         return [r[0] for r in rows if r[0]]
+
+    # -- what is LOADED vs what the analytics cover (review 13 item 1.2) -------
+
+    def _part_sets_current(self, con: duckdb.DuckDBPyConnection,
+                           budget_s: float | None = None) -> bool:
+        """Bring part_payer_set / part_tin_set up to date with the parts on
+        disk — the rate_npi_set pattern: new or rewritten parts are scanned
+        one at a time with NO lock held, the result applied in one short
+        transaction under the writer lock. Returns True when every part is
+        counted (False: the time budget ran out or a writer held the lock;
+        the next call continues)."""
+        current = self._part_sigs()
+        known = dict(con.execute("SELECT part, sig FROM part_set_parts").fetchall())
+        gone = [p for p in known if p not in current]
+        changed = sorted(p for p, sig in current.items() if known.get(p) != sig)
+        if not gone and not changed:
+            return True
+        t0 = time.monotonic()
+        con.execute("CREATE OR REPLACE TEMP TABLE __pp_new (part VARCHAR, payer VARCHAR, "
+                    "file_month VARCHAR, n BIGINT)")
+        con.execute("CREATE OR REPLACE TEMP TABLE __pt_new (part VARCHAR, tin_value VARCHAR)")
+        scanned, complete = [], True
+        for name in changed:
+            if budget_s is not None and time.monotonic() - t0 > budget_s:
+                complete = False
+                break
+            src = f"read_parquet('{sql_path(self.rates_dir / name)}')"
+            try:
+                con.execute(f"INSERT INTO __pp_new SELECT ?, payer, file_month, count(*) "
+                            f"FROM {src} GROUP BY payer, file_month", [name])
+                con.execute(f"INSERT INTO __pt_new SELECT DISTINCT ?, tin_value FROM {src} "
+                            "WHERE tin_value IS NOT NULL", [name])
+                scanned.append(name)
+            except duckdb.Error:
+                con.execute("DELETE FROM __pp_new WHERE part = ?", [name])
+                con.execute("DELETE FROM __pt_new WHERE part = ?", [name])
+                complete = False      # unreadable right now: next call
+        drop = gone + scanned
+        if not drop:
+            return complete and not changed
+        if not self.write_lock.acquire(timeout=3):
+            return False
+        try:
+            con.execute("BEGIN TRANSACTION")
+            try:
+                for tbl in ("part_payer_set", "part_tin_set", "part_set_parts"):
+                    con.execute(f"DELETE FROM {tbl} WHERE part IN "
+                                "(SELECT unnest(?::VARCHAR[]))", [drop])
+                con.execute("INSERT INTO part_payer_set SELECT * FROM __pp_new")
+                con.execute("INSERT INTO part_tin_set SELECT * FROM __pt_new")
+                for name in scanned:
+                    con.execute("INSERT INTO part_set_parts VALUES (?, ?)", [name, current[name]])
+                con.execute("COMMIT")
+            except Exception:
+                try:
+                    con.execute("ROLLBACK")
+                except duckdb.Error:
+                    pass
+                raise
+        finally:
+            self.write_lock.release()
+        return complete
+
+    def loaded_inventory(self, budget_s: float | None = 2.0) -> dict:
+        """{payers, months, tins, rows_by_payer, complete} of every LOADED rate
+        part (not what the analytics cover). Cached until a part changes; a
+        first call on a big store counts what it can in `budget_s` and says
+        complete=False (the next poll continues). Never raises."""
+        try:
+            sig = hashlib.sha1(json.dumps(sorted(self._part_sigs().items())).encode()).hexdigest()
+        except Exception:  # noqa: BLE001
+            sig = None
+        held = getattr(self, "_inventory_cache", None)
+        if held is not None and held[0] == sig and held[1].get("complete"):
+            return held[1]
+        lock = self.__dict__.setdefault("_inventory_lock", threading.Lock())
+        if not lock.acquire(blocking=False):
+            return held[1] if held is not None else {
+                "payers": [], "months": [], "tins": 0, "rows_by_payer": {}, "complete": False}
+        try:
+            with self.connect() as con:
+                complete = self._part_sets_current(con, budget_s)
+                payers = con.execute(
+                    "SELECT payer, sum(n) FROM part_payer_set WHERE part IN "
+                    "(SELECT part FROM part_set_parts) GROUP BY payer ORDER BY payer").fetchall()
+                months = [r[0] for r in con.execute(
+                    "SELECT DISTINCT file_month FROM part_payer_set WHERE file_month IS NOT NULL "
+                    "AND file_month <> '' ORDER BY file_month DESC").fetchall()]
+                tins = con.execute(
+                    "SELECT count(DISTINCT tin_value) FROM part_tin_set").fetchone()[0] or 0
+            out = {"payers": [p for p, _n in payers if p is not None],
+                   "rows_by_payer": {p: int(n or 0) for p, n in payers if p is not None},
+                   "months": months, "tins": int(tins), "complete": bool(complete)}
+            self._inventory_cache = (sig, out)
+            return out
+        except Exception as e:  # noqa: BLE001 — a count never breaks a screen
+            logging.getLogger(__name__).debug("loaded inventory unavailable (%s)", e)
+            return held[1] if held is not None else {
+                "payers": [], "months": [], "tins": 0, "rows_by_payer": {}, "complete": False}
+        finally:
+            lock.release()
+
+    def spine_payers(self) -> list[str]:
+        """Payers present in the analytics spine — what every screen can show.
+        Counted once per spine generation."""
+        gen = self.spine_generation
+        held = getattr(self, "_spine_payers_cache", None)
+        if held is not None and held[0] == gen:
+            return list(held[1])
+        try:
+            with self.connect() as con:
+                if not con.execute("SELECT count(*) FROM information_schema.tables "
+                                   "WHERE table_name = 'rates_by_tin_tbl'").fetchone()[0]:
+                    return []
+                got = [r[0] for r in con.execute(
+                    "SELECT DISTINCT payer FROM rates_by_tin_tbl WHERE payer IS NOT NULL "
+                    "ORDER BY payer").fetchall()]
+        except Exception:  # noqa: BLE001
+            return list(held[1]) if held is not None else []
+        self._spine_payers_cache = (gen, got)
+        return list(got)
+
+    def analytics_coverage(self, max_age_seconds: float = 3.0) -> dict:
+        """How much of what is LOADED the analytics (and so every screen,
+        report and export) cover, and what the rollup is doing about the rest
+        (review 13 item 1.2) — the header line, /api/payers' `covered`, the
+        methodology sentence. Cheap (the files table, the kept part sets, one
+        spine DISTINCT per spine generation); cached a few seconds. Never
+        raises: a failure reads as state 'current' with no numbers rather than
+        a broken header."""
+        from . import rollplan
+        held = getattr(self, "_coverage_cache", None)
+        if held is not None and time.monotonic() - held[0] < max_age_seconds \
+                and held[2] == (self.data_generation, self._rollup_active):
+            return held[1]
+        try:
+            out = self._analytics_coverage()
+        except Exception as e:  # noqa: BLE001
+            logging.getLogger(__name__).debug("coverage unavailable (%s)", e)
+            out = {"state": "current", "covered_files": 0, "done_files": 0,
+                   "covered_payers": 0, "loaded_payers": 0, "covered_rows": 0,
+                   "loaded_rows": 0, "reason": "", "pct": None, "eta_text": "",
+                   "covered": [], "loaded": []}
+        out["sentence"] = rollplan.coverage_sentence(out)
+        self._coverage_cache = (time.monotonic(), out, (self.data_generation, self._rollup_active))
+        return out
+
+    def _analytics_coverage(self) -> dict:
+        from . import rollplan
+        inv = self.loaded_inventory()
+        with self.connect() as con:
+            files = con.execute(
+                "SELECT filename, finished_at::VARCHAR, coalesce(rows_emitted, 0), payer "
+                "FROM files WHERE status = 'done' AND rows_emitted > 0 "
+                "AND coalesce(file_type, '') <> 'provider_reference'").fetchall()
+            built = bool(self._meta_get(con, "rollup_schema_version"))
+            marker = self._meta_get(con, "rollup_covered_through") or ""
+            names = set(json.loads(self._meta_get(con, "rollup_covered_names") or "[]"))
+            needs_full = self._meta_get(con, "rollup_needs_full") == "1"
+            pending = self._read_pending_payers(con)[1]
+            plan = self._plan_get(con)
+            part_payers: dict[str, set] = {}
+            for part, payer in con.execute(
+                    "SELECT DISTINCT part, payer FROM part_payer_set").fetchall():
+                part_payers.setdefault(part, set()).add(payer)
+        # files the analytics hold: the coverage marker's (a completed build
+        # or update), plus — while a sliced build is part-way — every file
+        # whose payers' slices it has committed (and which it snapshotted)
+        plan_done: set = set()
+        if plan is not None:
+            last: dict = {}
+            for i, sl in enumerate(plan["slices"]):
+                if sl.get("t") == "spine":
+                    last[sl.get("payer")] = i
+            plan_done = {p for p, i in last.items() if i < int(plan.get("next", 0))}
+            p_ts, p_names = plan.get("cover_ts") or "", set(plan.get("cover_names") or [])
+
+        def covered(fn: str, ts: str | None) -> bool:
+            if ts is None:      # (no finish time: rollups_stale never counts it either)
+                return built
+            if built and (ts < marker or (ts == marker and fn in names)):
+                return True
+            if plan is not None and plan.get("kind") == "full" \
+                    and (ts < p_ts or (ts == p_ts and fn in p_names)):
+                pp = part_payers.get(f"{file_key(fn)}.parquet")
+                return bool(pp) and pp <= plan_done
+            return False
+
+        cov = [f for f in files if covered(f[0], f[1])]
+        spine_payers = self.spine_payers()
+        loaded = list(inv["payers"]) if inv.get("complete") else sorted(
+            set(inv["payers"]) | set(spine_payers) | {f[3] for f in files if f[3]})
+        covered_list = [p for p in spine_payers if p in set(loaded)]
+        stale = (needs_full or bool(pending) or plan is not None
+                 or len(cov) < len(files))
+        failure = self.rollup_failure()
+        job = self.rollup_job()
+        if self._rollup_active:
+            state = "building"
+        elif failure:
+            state = "failed"
+        elif stale:
+            state = "behind"
+        else:
+            state = "current"
+        pct = job["pct"] if job else None
+        eta = rollplan.eta_text(job["eta_s"]) if job else ""
+        n_new = len(files) - len(cov)
+        if state == "building":
+            if job and job.get("kind") == "full":
+                reason = (f"Rolling up the rest — {pct} %" + (f", {eta}" if eta else "")
+                          + (f" ({job['label']})" if job.get("label") else ""))
+            elif job and job.get("kind") == "names":
+                reason = "Refreshing practice names and places"
+            else:
+                reason = "Adding the newly loaded files to the analytics"
+        elif state == "failed":
+            reason = failure.get("sentence") or "stopped"
+            reason = (reason if reason.startswith("stopped") else "stopped: " + reason) \
+                + " — Files tab"
+        elif plan is not None:
+            reason = (f"A full analytics build is part-way ({plan.get('next', 0)} of "
+                      f"{len(plan['slices'])} parts saved) — it continues when the "
+                      "queue is idle")
+        elif needs_full:
+            reason = "The analytics need one full rebuild — it runs when the queue is idle"
+        elif n_new or pending:
+            reason = (f"{n_new:,} newly loaded file{'s' if n_new != 1 else ''} not in the "
+                      "analytics yet — added when the queue is idle") if n_new else \
+                     "A removed file's numbers are being taken out — next analytics update"
+        else:
+            reason = ""
+        return {
+            "state": state, "reason": reason, "pct": pct, "eta_text": eta,
+            "covered_files": len(cov), "done_files": len(files),
+            "covered_payers": len(covered_list), "loaded_payers": len(loaded),
+            "covered_rows": int(sum(f[2] for f in cov)),
+            "loaded_rows": int(sum(f[2] for f in files)),
+            "covered": covered_list, "loaded": loaded,
+            "failure": failure, "inventory_complete": bool(inv.get("complete")),
+        }
+
+    def analytics_note(self) -> list[str]:
+        """The coverage sentence every methodology and CSV sidecar prints while
+        the analytics are behind ([] when current; never raises — a footer
+        line never fails a document)."""
+        try:
+            from . import rollplan
+            line = rollplan.coverage_sentence(self.analytics_coverage(), document=True)
+            return [line] if line else []
+        except Exception:  # noqa: BLE001
+            return []
 
     def save_npi(self, npi: str, org_name: str | None, taxonomy_code: str | None,
                  taxonomy_desc: str | None, city: str | None, state: str | None,
@@ -5895,10 +6593,15 @@ class Store:
                     "DELETE FROM url_queue; DELETE FROM rollup_pending_tins; "
                     "DELETE FROM content_fingerprints; DELETE FROM inflight_fingerprints; "
                     "DELETE FROM rate_npi_parts; DELETE FROM rate_npi_set; "
+                    "DELETE FROM part_payer_set; DELETE FROM part_tin_set; "
+                    "DELETE FROM part_set_parts; "
                     # part-operation and rollup bookkeeping of the wiped store
                     "DELETE FROM meta WHERE key IN ('parked_parts', "
-                    "'rollup_pending_payers', 'rollup_needs_full');"
+                    "'rollup_pending_payers', 'rollup_needs_full', 'rollup_plan', "
+                    "'rollup_failure');"
                 )
+                for tbl in ("rates_by_tin_tbl__next", "tin_directory_tbl__next"):
+                    con.execute(f"DROP TABLE IF EXISTS {tbl}")
                 # a part Windows would not let go of is deleted at the next
                 # open, never served as the "empty" store's rates
                 con.execute("INSERT OR REPLACE INTO meta VALUES ('doomed_parts', ?)",
@@ -5914,6 +6617,8 @@ class Store:
         # AFTER the wipe: a count computed mid-reset (from the old tables) must
         # not be cached under the post-reset generation and served for 30s
         # against the now-empty store.
+        self._rollup_failure = None
+        self._inventory_cache = None
         self._bump_generation()
         self._invalidate_scan_caches()
 

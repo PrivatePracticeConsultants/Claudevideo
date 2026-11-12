@@ -9,6 +9,7 @@ ships with a methodology sidecar (§7A.6). The default analytical grain is
 from __future__ import annotations
 
 import contextlib
+import functools
 import datetime as dt
 import io
 import json
@@ -67,6 +68,7 @@ from .schedule import (
 from .entities import sync_entity_map, update_entity
 from .ingest import ingest_file, scan_inbox, thread_stacks_text
 from .registry import Registry
+from . import progress as _progress
 from .store import SSN_PREFIXES, Store, mask_tin, sql_path
 
 log = logging.getLogger(__name__)
@@ -1166,6 +1168,7 @@ def outreach_methodology(store: Store, grain: str, fs: FilterSet, market: dict) 
         OUTREACH_COLUMNS_NOTE,
         "",
         "SSN-pattern tax IDs are masked. Names and addresses come from NPPES.",
+        *store.analytics_note(),
         "Rate files in the store at export time: "
         + ("; ".join(f"{f[0]} ({f[1]}, month {f[2]})" for f in files) or "none"),
         "Caveats: a negotiated rate is not per-visit revenue (timed 15-minute "
@@ -1287,6 +1290,7 @@ def methodology_text(cfg: MrfxConfig, store: Store, grain: str, fs: FilterSet,
         "Per-row provenance: source_files names ONE representative file per row; "
         "source_count is the number of distinct files behind that row.",
         *([_pooled] if (_pooled := _pooled_line(store)) else []),
+        *store.analytics_note(),
         "Rate files in the store at export time (the export above draws on the "
         "subset matching its filters, NOT necessarily all of these): "
         f"{'; '.join(f'{f[0]} ({f[1]}, month {f[2]}, updated {f[3]})' for f in files) or 'none'}",
@@ -1534,6 +1538,59 @@ class SwapRetryMiddleware:
                          scope.get("path"))
 
 
+class ProgressMiddleware:
+    """A request carrying `X-Mrfx-Progress: <token>` (or `?progress=<token>`,
+    the iframe downloads) gets a Progress registered under the token and set
+    as the current one for the request's context — the sync route runs in a
+    worker thread that inherits the context (anyio copies it), and the route's
+    `_progress_route` decorator gives it its plan and finishes it. A request
+    without a token passes through untouched (review 13 Group 2)."""
+
+    def __init__(self, app, registry=None):
+        self.app = app
+        self.registry = registry
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or self.registry is None:
+            return await self.app(scope, receive, send)
+        token = None
+        try:
+            for k, v in scope.get("headers") or []:
+                if k.lower() == b"x-mrfx-progress":
+                    token = v.decode("latin-1").strip()
+                    break
+            if token is None and scope.get("query_string"):
+                from urllib.parse import parse_qs
+                got = parse_qs(scope["query_string"].decode("latin-1")).get("progress")
+                token = got[0] if got else None
+        except Exception:  # noqa: BLE001
+            token = None
+        if not token or not _progress.TOKEN_RE.match(token):
+            return await self.app(scope, receive, send)
+        try:
+            p = _progress.Progress(token)
+            self.registry.add(p)
+        except Exception:  # noqa: BLE001 — the bar is cosmetic: answer without it
+            return await self.app(scope, receive, send)
+        ctx_tok = _progress.set_current(p)
+        status = {"code": 0}
+
+        async def tracked(message):
+            if message["type"] == "http.response.start":
+                status["code"] = message.get("status", 0)
+            await send(message)
+        try:
+            await self.app(scope, receive, tracked)
+        except BaseException:
+            p.finish("stopped" if p.cancelled else "failed")
+            raise
+        finally:
+            _progress.reset_current(ctx_tok)
+            if p.ended is None:      # a route without the decorator
+                p.finish("done" if 0 < status["code"] < 400 else
+                         ("stopped" if p.cancelled or status["code"] == 409 else "failed"))
+
+
 def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     # Startup work is collected here and run by the lifespan handler below.
     # `@app.on_event("startup")` is deprecated and slated for removal, but the
@@ -1551,8 +1608,82 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         yield
 
     app = FastAPI(title="MRF Explorer", docs_url="/api/docs", lifespan=lifespan)
+    progress_registry = _progress.Registry()
+    app.state.progress_registry = progress_registry
+    app.add_middleware(ProgressMiddleware, registry=progress_registry)
     app.add_middleware(SwapRetryMiddleware)
     app.add_middleware(LocalOnlyMiddleware)
+
+    def _progress_route(plan: str):
+        """Mark an output route (review 13 Group 2): with a token the run gets
+        its plan, a Stop answers 409 "stopped" and never a partial document,
+        and the run is finished when the body is built. Without a token it is
+        a plain call — the same bytes (test_progress pins it)."""
+        def deco(fn):
+            @functools.wraps(fn)
+            def wrapper(*a, **k):
+                p = _progress.current()
+                if p is _progress._NOOP:
+                    return fn(*a, **k)
+                try:
+                    if p.ended is not None and not p.cancelled:   # SwapRetry asked again
+                        p.state, p.ended = "running", None
+                    p.label = p.label or plan
+                    p.plan_from(plan)
+                    if p.plan and p._stage_i < 0:
+                        p.stage(p.plan[0][0])     # the bar moves from the first word
+                except Exception:  # noqa: BLE001
+                    pass
+
+                def stopped():
+                    p.finish("stopped", "stopped by you"
+                             if getattr(p, "cancel_reason", "") != "superseded" else "superseded")
+                    if getattr(p, "cancel_reason", "") == "superseded":
+                        return HTTPException(409, "superseded by a newer search")
+                    return HTTPException(409, "stopped")
+                try:
+                    out = fn(*a, **k)
+                except HTTPException:
+                    if p.cancelled:
+                        raise stopped() from None
+                    p.finish("failed")
+                    raise
+                except Exception:
+                    if p.cancelled:
+                        raise stopped() from None
+                    p.finish("failed")
+                    raise
+                if p.cancelled:
+                    raise stopped()
+                p.finish("done")
+                return out
+            wrapper._mrfx_progress = plan
+            return wrapper
+        return deco
+
+    @app.get("/api/progress/{token}")
+    async def progress_poll(token: str):
+        """How far a run is (review 13 Group 2). async on purpose: it must
+        answer while every worker thread is busy — it reads one in-memory
+        object under a lock held for microseconds, never the store."""
+        if not _progress.TOKEN_RE.match(token or ""):
+            raise HTTPException(422, "not a progress token")
+        p = progress_registry.get(token)
+        if p is None:
+            raise HTTPException(404, "unknown run (never started, or finished a minute ago)")
+        return p.snapshot()
+
+    @app.delete("/api/progress/{token}")
+    async def progress_stop(token: str):
+        """Stop a run: its running statement is interrupted and it opens no
+        other; the request answers 409 "stopped". Idempotent."""
+        if not _progress.TOKEN_RE.match(token or ""):
+            raise HTTPException(422, "not a progress token")
+        p = progress_registry.get(token)
+        if p is None:
+            raise HTTPException(404, "unknown run")
+        p.cancel("stopped")
+        return {"stopped": True}
     registry = Registry(cfg)
     sync_entity_map(cfg, store)
     if cfg.mpfs_path and Path(cfg.mpfs_path).exists():
@@ -1596,7 +1727,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         if not key:
             yield lambda: None
             return
-        me = {"con": con, "dead": False}
+        me = {"con": con, "dead": False, "p": _progress.current()}
         with _views_lock:
             old = _views.get(key)
             _views[key] = me
@@ -1605,6 +1736,11 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                     _views.pop(k, None)
         if old is not None:
             old["dead"] = True
+            # the older run's Progress (when it has one) is cancelled — that
+            # interrupts every connection it opened, not only this one — and
+            # its own connection is interrupted as before (one mechanism)
+            if old.get("p") is not None and old["p"] is not _progress._NOOP:
+                old["p"].cancel("superseded")
             try:
                 old["con"].interrupt()
             except Exception:  # noqa: BLE001
@@ -1752,6 +1888,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         raise HTTPException(422, msg)
 
     @app.get("/api/rates")
+    @_progress_route("rates")
     def rates(
         request: Request,
         sort: str = "negotiated_rate",
@@ -1818,6 +1955,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     # this collapses repeated identical loads and stops stacking.
     _summary_cache: dict[tuple, tuple[float, dict]] = {}
     _summary_lock = threading.Lock()
+    app.state.summary_lock = _summary_lock      # (tests hold it: the waiting state)
     # the market overview does several whole-spine GROUP BYs — heavy at book
     # scale — so cache per (state, data_generation); it changes only on a rebuild.
     _overview_cache: dict[tuple, dict] = {}
@@ -1869,6 +2007,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             log.debug("summary strip not stored", exc_info=True)
 
     @app.get("/api/summary")
+    @_progress_route("summary")
     def summary(request: Request):
         qp = _qp(request)
         grain = grain_of(qp, cfg, store)
@@ -1910,8 +2049,10 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             return _summary_locked(fs, grain, key, hit, fresh, vcon, alive, True)
 
     def _summary_locked(fs, grain, key, hit, fresh, vcon, alive, wait):
-        if not (_summary_lock.acquire(timeout=8.0) if wait
-                else _summary_lock.acquire(blocking=False)):
+        with _progress.current().waiting("Waiting for an earlier summary to finish"):
+            got = (_summary_lock.acquire(timeout=8.0) if wait
+                   else _summary_lock.acquire(blocking=False))
+        if not got:
             # a heavy scan is already running — serve the last value for THIS
             # key, else say "busy" honestly (serving another filter's numbers
             # under this view's label would be a wrong number; and iterating
@@ -2013,6 +2154,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     # -- detail views -----------------------------------------------------------
 
     @app.get("/api/entity/{grain}/{unit_id:path}")
+    @_progress_route("entity")
     def entity_detail(grain: str, unit_id: str):
         if grain not in GRAIN_REL:
             raise HTTPException(404, "grain must be entity|tin|npi")
@@ -2155,6 +2297,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             return None
 
     @app.get("/api/code/{code}")
+    @_progress_route("code")
     def code_detail(code: str, request: Request):
         qp = _qp(request)
         qp["code"] = code
@@ -2267,6 +2410,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 "mpfs_rate": half_up(base, 2) if base else None}
 
     @app.get("/api/trend")
+    @_progress_route("trend")
     def trend(request: Request):
         qp = _qp(request)
         qp.pop("month", None)  # trend spans months by definition
@@ -2314,7 +2458,13 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                     "ORDER BY file_month DESC"
                 ).fetchall()
             return {"months": [r[0] for r in rows]}
-        return store.cached("api.months", None, compute)
+        got = store.cached("api.months", None, compute)
+        # loaded months the analytics do not hold yet are listed too, marked
+        # (review 13 item 1.2)
+        covered = got["months"]
+        inv = store.loaded_inventory()
+        months = sorted(set(covered) | set(inv.get("months") or []), reverse=True)
+        return {"months": months, "covered": covered}
 
     # -- validation cross-check (§7A.10) -----------------------------------------
 
@@ -2326,6 +2476,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     # "API unreachable" until the work finishes. Enforced by a test that walks
     # every route and rejects coroutine endpoints.
     @app.post("/api/validate")
+    @_progress_route("validate")
     def validate(body: dict = Body(...)):
         ident = str(body.get("id", "")).replace("-", "").strip()
         code = str(body.get("code", "")).strip()
@@ -2446,7 +2597,10 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 "pooled_note": POOLED_FILES_NOTE if pooled else None,
                 # the one-time stored-row update still running behind the
                 # dashboard (review 12 item 2.9)
-                "rows_update": store.rows_update}
+                "rows_update": store.rows_update,
+                # where the analytics stand (review 13 items 1.2/1.3): the
+                # build's progress, or the sentence of a failed attempt
+                "analytics": _analytics_public()}
 
     @app.post("/api/files/scan")
     def files_scan():
@@ -2754,6 +2908,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         own memory cap. The Excel BOM is NOT written by copying the file again
         (that doubled the disk a whole-store export needs): the response
         streams BOM + file. Refused up front when the drive cannot hold it."""
+        _prog = _progress.current()
+        _prog.stage("Checking the filters and the disk space")
         qp = {} if full else _qp(request)
         grain = grain_of(qp, cfg, store)
         fs = _fs(qp if not full else {"dollar_only": "0"})
@@ -2775,9 +2931,11 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 roomy = True
             with store.connect() as con:
                 if not roomy:
+                    _prog.stage("Counting the rows")
                     rows = con.execute(f"SELECT count(*) FROM ({select})",
                                        params).fetchone()[0]
                     _check_export_space(tmp.parent, rows, zip_factor, mem)
+                _prog.stage("Writing the rows to a file")
                 con.execute(f"COPY ({select}) TO '{sql_path(tmp)}' (FORMAT CSV, HEADER)",
                             params)
         except ExportSpaceError as e:
@@ -2789,6 +2947,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             tmp.with_name("tmp_" + tmp.name).unlink(missing_ok=True)
             raise
         try:
+            _prog.stage("Writing the methodology")
             method = methodology_text(cfg, store, grain, fs, sort, dir, view)
         except BaseException:
             tmp.unlink(missing_ok=True)   # never leave a built export behind
@@ -2813,6 +2972,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             background=BackgroundTask(path.unlink, missing_ok=True))
 
     @app.get("/api/export.csv")
+    @_progress_route("export")
     def export_csv(
         request: Request,
         background: BackgroundTasks,
@@ -2826,6 +2986,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return _stream_with_bom(out, f"mrfx_{view}_{stamp}.csv", "text/csv")
 
     @app.get("/api/export.zip")
+    @_progress_route("export")
     def export_zip(
         request: Request,
         background: BackgroundTasks,
@@ -2841,11 +3002,21 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         # streamed disk-to-disk into the member (BOM first, for Excel) — no
         # data-sized BytesIO copy and no second BOM'd copy of the CSV
         try:
+            _prog = _progress.current()
+            _prog.stage("Compressing")
+            total = max(1, csv_path.stat().st_size)
             with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
                 with z.open(f"mrfx_{view}_{stamp}.csv", "w", force_zip64=True) as m, \
                         open(csv_path, "rb") as src:
                     m.write(_BOM)
-                    shutil.copyfileobj(src, m, 1 << 20)
+                    done = 0
+                    while True:
+                        buf = src.read(1 << 20)
+                        if not buf:
+                            break
+                        m.write(buf)
+                        done += len(buf)
+                        _prog.tick(done / total)
                 z.writestr(f"mrfx_{view}_{stamp}_methodology.txt", method)
         except BaseException as e:
             if isinstance(e, OSError) and _is_disk_full(e):
@@ -2858,6 +3029,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return FileResponse(out, filename=f"mrfx_{view}_{stamp}.zip", media_type="application/zip")
 
     @app.post("/api/report/org-bundle.zip")
+    @_progress_route("bundle")
     def org_bundle(background: BackgroundTasks, body: dict = Body(...)):
         """One organization, packaged to be combined with the Medicare Order &
         Referring Tracker: a paste-ready NPI list (the tracker is NPI-native,
@@ -2894,8 +3066,14 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         from .medicare import import_orf_roster, import_shared_patients
 
         done: list[dict] = []
+        prog = tracker_job.get("_p") or _progress.Progress(None, [("Importing", 100)])
+        ctx_tok = _progress.set_current(prog)
+        prog.stage("Importing")
         try:
             for i, item in enumerate(items, 1):
+                if prog.cancelled:
+                    break                      # stopped: the files done so far stay
+                prog.tick((i - 1) / max(1, len(items)))
                 label = item.get("label") or item.get("path")
                 with tracker_job_lock:
                     tracker_job["message"] = f"importing {label} ({i} of {len(items)})…"
@@ -2921,12 +3099,17 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 with tracker_job_lock:
                     tracker_job["done"] = list(done)
         finally:
+            _progress.reset_current(ctx_tok)
+            prog.finish("stopped" if prog.cancelled else "done")
             with tracker_job_lock:
                 tracker_job["state"] = "done"
                 tracker_job["done"] = list(done)
                 ok = sum(1 for d in done if d["ok"])
                 tracker_job["message"] = (
                     f"imported {ok} of {len(items)}" if done else "nothing to import")
+                if prog.cancelled:
+                    tracker_job["message"] += (" — stopped by you; the rest were "
+                                               "not imported")
 
     def _tracker_discover() -> dict:
         from .tracker import discover
@@ -2939,8 +3122,21 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         belong to the tracker, which has its own retention rules."""
         d = _tracker_discover()
         with tracker_job_lock:
-            d["job"] = dict(tracker_job)
+            job = {k: v for k, v in tracker_job.items() if k != "_p"}
+            if tracker_job.get("_p") is not None:
+                job["progress"] = tracker_job["_p"].snapshot()
+            d["job"] = job
         return d
+
+    @app.delete("/api/medicare/tracker/import")
+    def api_tracker_stop():
+        """Stop a running tracker import after the file it is on."""
+        with tracker_job_lock:
+            p = tracker_job.get("_p")
+            running = tracker_job["state"] == "running"
+        if p is not None and running:
+            p.cancel("stopped")
+        return {"stopped": bool(running)}
 
     @app.post("/api/medicare/tracker/import")
     def api_tracker_import(body: dict = Body(...)):
@@ -2959,6 +3155,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 raise HTTPException(409, "an import is already running — "
                                     f"{tracker_job['message']}")
             tracker_job.update({"state": "running", "done": [], "items": [],
+                                "_p": _progress.Progress(None, [("Importing", 100)]),
                                 "message": "finding the tracker's files…"})
         try:
             found = {p["path"]: p for p in _tracker_discover()["pending"]}
@@ -3004,6 +3201,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return {"clients": remove_client(store, str(body.get("subject", "")))}
 
     @app.post("/api/contracts/renewals")
+    @_progress_route("working")
     def api_renewals(body: dict = Body(...)):
         """Contracts with a REAL published end date, soonest first — with the
         coverage figure attached, because payers publish this field
@@ -3024,6 +3222,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return expiration_coverage(store, {})
 
     @app.post("/api/contracts/new-to-network")
+    @_progress_route("working")
     def api_new_to_network(body: dict = Body(...)):
         """Practices that appear in a payer's book this month and were absent
         from the same payer's previous published month."""
@@ -3054,6 +3253,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return utilization_status(store)
 
     @app.post("/api/utilization/volumes")
+    @_progress_route("working")
     def api_utilization_volumes(body: dict = Body(...)):
         """Annual units per code for a practice, from Medicare claims — what
         pre-fills a volumes box. Medicare-only, so it is labeled a floor."""
@@ -3099,6 +3299,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, f"could not read that file: {_plain(e)}")
 
     @app.post("/api/market/sizing")
+    @_progress_route("working")
     def api_market_sizing(body: dict = Body(...)):
         """Population, seniors and therapy practices inside a radius — is this
         market underserved or saturated?"""
@@ -3118,6 +3319,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return feed_status(store)
 
     @app.post("/api/newclinics")
+    @_progress_route("working")
     def api_newclinics(body: dict = Body(...)):
         """Therapy NPIs issued recently — practices that have no payer contract
         yet, which is the earliest a consultant can reach them."""
@@ -3140,6 +3342,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return closure_status(store)
 
     @app.post("/api/closures")
+    @_progress_route("working")
     def api_closures(body: dict = Body(...)):
         """Therapy NPIs deactivated recently — a closed referral source is a
         hole in a client's inbound volume; a closed competitor is room."""
@@ -3200,6 +3403,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return {**res, "status": floor_status(store)}
 
     @app.post("/api/floors/compare")
+    @_progress_route("working")
     def api_floors_compare(body: dict = Body(...)):
         """Commercial rates against the loaded Medicaid / WC schedules."""
         from .floors import floor_comparison
@@ -3228,6 +3432,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     # -- prospect dossier + market report -------------------------------------------------
 
     @app.post("/api/report/dossier")
+    @_progress_route("dossier")
     def api_dossier(body: dict = Body(...)):
         """One branded page about a practice you have never spoken to."""
         from .dossier import build_prospect_dossier
@@ -3240,9 +3445,14 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
         except (TypeError, ValueError) as e:
             raise HTTPException(422, f"bad input: {e}")
-        return HTMLResponse(res["html"])
+        # the omitted sections ride along, so the page builds the dossier ONCE
+        # (it also fetched dossier.json — a second full build — review 13)
+        from urllib.parse import quote
+        return HTMLResponse(res["html"], headers={
+            "X-Mrfx-Skipped": quote(json.dumps(res.get("skipped") or []))})
 
     @app.post("/api/report/dossier.json")
+    @_progress_route("dossier")
     def api_dossier_json(body: dict = Body(...)):
         """The dossier's facts and omissions, without the rendered page."""
         from .dossier import build_prospect_dossier
@@ -3258,6 +3468,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return {k: v for k, v in res.items() if k != "html"}
 
     @app.post("/api/report/market")
+    @_progress_route("market_report")
     def api_market_report(body: dict = Body(...)):
         """The metro-level story as one sellable branded document."""
         from .dossier import build_market_report
@@ -3282,6 +3493,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return {"years": available_years(store)}
 
     @app.post("/api/utilization/growth")
+    @_progress_route("working")
     def api_practice_growth(body: dict = Body(...)):
         """A practice's Medicare volume between two PUF years."""
         from .utilization import practice_growth
@@ -3297,6 +3509,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, f"bad input: {e}")
 
     @app.post("/api/utilization/service-lines")
+    @_progress_route("working")
     def api_service_lines(body: dict = Body(...)):
         """Codes nearby practices bill Medicare that this one does not."""
         from .utilization import service_line_gaps
@@ -3316,6 +3529,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     # -- per-visit economics + volume-weighted position -----------------------------------
 
     @app.post("/api/economics/visit")
+    @_progress_route("working")
     def api_visit_economics(body: dict = Body(...)):
         """What one payer's visit is worth on this practice's own code mix."""
         from .economics import visit_economics
@@ -3331,6 +3545,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, f"bad input: {e}")
 
     @app.post("/api/economics/weighted-position")
+    @_progress_route("working")
     def api_weighted_position(body: dict = Body(...)):
         """Market position weighted by what the practice actually bills."""
         from .economics import weighted_position
@@ -3348,6 +3563,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     # -- walk-away leverage --------------------------------------------------------------
 
     @app.post("/api/leverage")
+    @_progress_route("working")
     def api_leverage(body: dict = Body(...)):
         """How many other local practices this payer publishes rates for."""
         from .leverage import network_leverage
@@ -3363,6 +3579,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, f"bad input: {e}")
 
     @app.post("/api/leverage/summary")
+    @_progress_route("working")
     def api_leverage_summary(body: dict = Body(...)):
         """Every payer this practice contracts with, thinnest network first."""
         from .leverage import leverage_summary
@@ -3379,6 +3596,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     # -- territory: sub-state geography, payer concentration, steal-share --------------
 
     @app.post("/api/territory/local")
+    @_progress_route("territory")
     def api_territory_local(body: dict = Body(...)):
         """Median rate by CITY inside one state, for one code."""
         from .territory import local_rate_map
@@ -3393,6 +3611,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, f"bad input: {e}")
 
     @app.post("/api/territory/radius")
+    @_progress_route("territory")
     def api_territory_radius(body: dict = Body(...)):
         """One code's median rate by DISTANCE BAND from a ZIP."""
         from .territory import radius_rate_map
@@ -3407,6 +3626,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, f"bad input: {e}")
 
     @app.post("/api/territory/concentration")
+    @_progress_route("territory")
     def api_territory_concentration(body: dict = Body(...)):
         """How contracted relationships divide across payers (HHI)."""
         from .territory import payer_concentration
@@ -3419,6 +3639,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, f"bad input: {e}")
 
     @app.post("/api/territory/steal-share")
+    @_progress_route("territory")
     def api_territory_steal(body: dict = Body(...)):
         """Referral sources feeding a client's competitors, not the client."""
         from .medicare import MedicareImportError
@@ -3439,6 +3660,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     # -- data quality: what kind of rate, how old, does size explain it ----------------
 
     @app.post("/api/quality/types")
+    @_progress_route("quality")
     def api_quality_types(body: dict = Body(...)):
         """Contracted vs payer-derived composition of the scoped market."""
         from .quality import rate_type_mix
@@ -3450,6 +3672,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, f"bad input: {e}")
 
     @app.post("/api/quality/posture")
+    @_progress_route("quality")
     def api_quality_posture(body: dict = Body(...)):
         """Per payer: does it negotiate, or run one schedule for everyone?"""
         from .quality import payer_posture
@@ -3462,11 +3685,13 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, f"bad input: {e}")
 
     @app.get("/api/quality/freshness")
+    @_progress_route("quality")
     def api_quality_freshness(stale_days: int = 270):
         from .quality import payer_freshness
         return payer_freshness(store, stale_days=max(1, min(int(stale_days), 3650)))
 
     @app.post("/api/quality/size")
+    @_progress_route("size")
     def api_quality_size(body: dict = Body(...)):
         """Whether bigger practices are paid better in this market."""
         from .quality import size_premium
@@ -3480,6 +3705,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, f"bad input: {e}")
 
     @app.post("/api/quality/subject-types")
+    @_progress_route("quality")
     def api_quality_subject_types(body: dict = Body(...)):
         from .quality import code_type_flag
         try:
@@ -3532,6 +3758,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return {**res, "status": hospital_status(store)}
 
     @app.post("/api/hospital/parity")
+    @_progress_route("working")
     def api_hospital_parity(body: dict = Body(...)):
         """Practice rates vs hospital outpatient rates for the same payer+code."""
         from .hospital import hospital_parity
@@ -3548,6 +3775,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, f"bad input: {e}")
 
     @app.post("/api/hospital/cash")
+    @_progress_route("working")
     def api_hospital_cash(body: dict = Body(...)):
         """What local hospitals charge self-pay patients for the same codes."""
         from .hospital import cash_anchors
@@ -3567,6 +3795,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     # -- underpayment check ------------------------------------------------------------
 
     @app.post("/api/remits/check")
+    @_progress_route("working")
     def api_remit_check(body: dict = Body(...)):
         from .remits import check_underpayments
         try:
@@ -3580,6 +3809,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, f"bad input: {e}")
 
     @app.post("/api/remits/check.csv", response_class=PlainTextResponse)
+    @_progress_route("working")
     def api_remit_check_csv(body: dict = Body(...)):
         from .remits import check_underpayments, underpayment_csv
         try:
@@ -3617,6 +3847,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return {"baselines": list_baselines(store)}
 
     @app.post("/api/engagements/compare")
+    @_progress_route("working")
     def api_compare_baseline(body: dict = Body(...)):
         from .engagements import compare_to_baseline
         try:
@@ -3634,26 +3865,57 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     def _run_packets() -> None:
         from .packets import build_all_packets
+        prog = packet_job.get("_p") or _progress.Progress(None, [])
+        prog.plan_from("packets")
+        prog.label = "Monthly packets"
+        ctx_tok = _progress.set_current(prog)
+        prog.stage("Finding each client's newest month")
         try:
             def progress(msg):
                 with packet_lock:
                     packet_job["message"] = msg
             res = build_all_packets(cfg, store, getattr(cfg, "packets_dir", None),
                                     progress=progress)
+            prog.finish("stopped" if prog.cancelled else "done")
             with packet_lock:
                 packet_job.update({"state": "done", "result": res,
                                    "message": f"{res['clients']} client packet(s) "
                                               f"written to {res['dir']}"})
         except Exception as e:  # noqa: BLE001 — report, never die silently
+            if prog.cancelled:
+                prog.finish("stopped")
+                with packet_lock:
+                    packet_job.update({"state": "done", "result": None,
+                                       "message": "stopped by you — the packets already "
+                                                  "written stay; nothing was written for "
+                                                  "the remaining clients"})
+                return
+            prog.finish("failed")
             log.warning("packet build failed: %s", e)
             with packet_lock:
                 packet_job.update({"state": "done", "result": None,
                                    "message": f"could not build packets: {e}"})
+        finally:
+            _progress.reset_current(ctx_tok)
 
     @app.get("/api/packets")
     def api_packets_status():
         with packet_lock:
-            return dict(packet_job)
+            out = {k: v for k, v in packet_job.items() if k != "_p"}
+            if packet_job.get("_p") is not None:
+                out["progress"] = packet_job["_p"].snapshot()
+            return out
+
+    @app.delete("/api/packets")
+    def api_packets_stop():
+        """Stop a running packet build (between clients; the packets already
+        written are complete documents and stay)."""
+        with packet_lock:
+            p = packet_job.get("_p")
+            running = packet_job["state"] == "running"
+        if p is not None and running:
+            p.cancel("stopped")
+        return {"stopped": bool(running)}
 
     @app.post("/api/packets/build")
     def api_packets_build():
@@ -3661,7 +3923,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             if packet_job["state"] == "running":
                 raise HTTPException(409, "a packet build is already running")
             packet_job.update({"state": "running", "result": None,
-                               "message": "starting…"})
+                               "message": "starting…", "_p": _progress.Progress(None, [])})
         try:
             threading.Thread(target=_bg_safe, args=(_run_packets,),
                              name="mrfx-packets", daemon=True).start()
@@ -3675,6 +3937,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return {"started": True}
 
     @app.get("/api/clients/digest")
+    @_progress_route("digest")
     def clients_digest():
         """The Monday review: per saved client, what moved. Composes the same
         functions the Changes/Benchmark/Medicare tabs run, so a digest cell can
@@ -3683,6 +3946,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return client_digest(store)
 
     @app.post("/api/medicare/leaders")
+    @_progress_route("working")
     def api_medicare_leaders(body: dict = Body(...)):
         """Practices ranked by shared Medicare patients received, optionally
         ZIP+radius clipped. in_store rows click through to the entity drawer
@@ -3709,6 +3973,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return medicare_status(store)
 
     @app.post("/api/medicare/eligibility")
+    @_progress_route("working")
     def api_medicare_eligibility(body: dict = Body(...)):
         """Batch Order & Referring check: any pasted text in, one row per
         VALID NPI found (10 digits + NPPES prefix + Luhn check digit — pasted
@@ -3736,6 +4001,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 "on_list": sum(1 for r in rows if r["on_list"])}
 
     @app.post("/api/medicare/org")
+    @_progress_route("medicare_org")
     def api_medicare_org(body: dict = Body(...)):
         """One practice's Medicare view: its NPIs' eligibility, plus who shares
         patients into it and where it shares onward — each referral row carrying
@@ -3821,6 +4087,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return outreach_csv(headers, rows), outreach_methodology(store, grain, fs, market)
 
     @app.get("/api/export/outreach.csv")
+    @_progress_route("outreach")
     def export_outreach(request: Request, background: BackgroundTasks):
         """One row per entity (org name + geography + per-code merge fields),
         for cross-referencing a contact list / Brevo mail merge. DATA ONLY —
@@ -3837,6 +4104,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return FileResponse(out, filename=f"mrfx_outreach_{stamp}.csv", media_type="text/csv")
 
     @app.get("/api/export/outreach.zip")
+    @_progress_route("outreach")
     def export_outreach_zip(request: Request, background: BackgroundTasks):
         """Outreach CSV + its methodology sidecar in one ZIP — the honesty
         contract says every delivered export carries its methodology, and a
@@ -3912,6 +4180,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return {"entities": entities, "tins": tins}
 
     @app.post("/api/benchmark/market")
+    @_progress_route("benchmark")
     def benchmark_market(body: dict = Body(...)):
         try:
             return compute_benchmark(store, str(body.get("subject", "")), body.get("market") or {})
@@ -3921,6 +4190,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
 
     @app.post("/api/benchmark/opportunity")
+    @_progress_route("benchmark")
     def benchmark_opportunity(body: dict = Body(...)):
         try:
             bench = compute_benchmark(store, str(body.get("subject", "")), body.get("market") or {})
@@ -3934,9 +4204,14 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
 
     @app.post("/api/report/pitch", response_class=HTMLResponse)
+    @_progress_route("pitch")
     def pitch_report(body: dict = Body(...)):
         try:
-            bench = compute_benchmark(store, str(body.get("subject", "")), body.get("market") or {})
+            _prog = _progress.current()
+            _prog.stage("Comparing with peers")
+            with _prog.group():
+                bench = compute_benchmark(store, str(body.get("subject", "")),
+                                          body.get("market") or {})
             opp = None
             volumes = clean_volumes(body.get("volumes"))
             if volumes:
@@ -3949,6 +4224,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
 
     @app.post("/api/report/negotiation", response_class=HTMLResponse)
+    @_progress_route("negotiation")
     def negotiation_report(body: dict = Body(...)):
         try:
             volumes = clean_volumes(body.get("volumes"))
@@ -3965,6 +4241,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     # payer-comparison workspace (Negotiate tab): one payer, named comparables
     @app.post("/api/negotiate/compare")
+    @_progress_route("compare")
     def negotiate_compare(body: dict = Body(...)):
         try:
             return compute_payer_comparison(
@@ -3976,6 +4253,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
 
     @app.post("/api/report/payer-compare", response_class=HTMLResponse)
+    @_progress_route("compare")
     def payer_compare_report(body: dict = Body(...)):
         try:
             comp = compute_payer_comparison(
@@ -3989,6 +4267,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     # fee schedule / payer scorecard (§7C)
     @app.post("/api/negotiate/proposal")
+    @_progress_route("proposal")
     def negotiate_proposal(body: dict = Body(...)):
         from .benchmark import compute_rate_proposal
         try:
@@ -4001,6 +4280,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
 
     @app.post("/api/report/proposal", response_class=HTMLResponse)
+    @_progress_route("proposal")
     def report_proposal(body: dict = Body(...)):
         from .benchmark import compute_rate_proposal, render_proposal_report
         try:
@@ -4014,6 +4294,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
 
     @app.post("/api/schedule/fee")
+    @_progress_route("ratecard")
     def schedule_fee(body: dict = Body(...)):
         try:
             fs = compute_fee_schedule(store, str(body.get("subject", "")), body.get("market") or {})
@@ -4030,6 +4311,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return {"presets": presets_public(), "default": DEFAULT_PRESET, "units_rule": UNITS_RULE}
 
     @app.post("/api/schedule/visit")
+    @_progress_route("visit")
     def schedule_visit(body: dict = Body(...)):
         """One standard therapy visit, priced per payer at the practice's own
         rates — units by the CMS 8-minute rule (mrfx/visit.py)."""
@@ -4061,6 +4343,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             return None, str(e)
 
     @app.post("/api/schedule/visit/market")
+    @_progress_route("visit_market")
     def schedule_visit_market(body: dict = Body(...)):
         """One standard visit priced at every practice of a state and
         discipline: mean / median / P25 / P75 per payer and over all payers,
@@ -4072,16 +4355,19 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
 
     @app.post("/api/schedule/visit/market.csv", response_class=PlainTextResponse)
+    @_progress_route("visit_market")
     def schedule_visit_market_csv(body: dict = Body(...)):
         from .visit import VisitError
         from .visit_market import to_csv
         try:
-            return PlainTextResponse("\ufeff" + to_csv(_visit_market(body)), headers={
+            note = "".join(f"# {x}\n" for x in store.analytics_note())
+            return PlainTextResponse("\ufeff" + note + to_csv(_visit_market(body)), headers={
                 "Content-Disposition": 'attachment; filename="visit_value.csv"'})
         except (VisitError, BenchmarkError, ValueError, TypeError) as e:
             raise HTTPException(422, str(e))
 
     @app.post("/api/report/visitvalue", response_class=HTMLResponse)
+    @_progress_route("visit_market")
     def report_visit_value(body: dict = Body(...)):
         from .visit import VisitError
         from .visit_market import render_report
@@ -4091,10 +4377,13 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
 
     @app.post("/api/report/ratecard", response_class=HTMLResponse)
+    @_progress_route("ratecard_report")
     def ratecard_report(body: dict = Body(...)):
         try:
             fs = compute_fee_schedule(store, str(body.get("subject", "")), body.get("market") or {})
+            _progress.current().stage("Pricing a standard visit across the state")
             vm, why = _visit_market_or_refusal(body)
+            _progress.current().stage("Drawing trends and listing sources")
             return HTMLResponse(render_rate_card(cfg, store, fs, payer_scorecard(fs),
                                                  visit_market=vm, visit_market_refusal=why))
         except (BenchmarkError, ValueError, TypeError) as e:
@@ -4103,6 +4392,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
 
     @app.post("/api/schedule/fee.csv", response_class=PlainTextResponse)
+    @_progress_route("ratecard")
     def schedule_fee_csv(body: dict = Body(...)):
         try:
             fs = compute_fee_schedule(store, str(body.get("subject", "")), body.get("market") or {})
@@ -4122,6 +4412,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     # underpaid-practice leads (§7D)
     @app.post("/api/leads")
+    @_progress_route("leads")
     def leads(body: dict = Body(...)):
         try:
             return compute_leads(
@@ -4137,6 +4428,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
 
     @app.post("/api/leads.csv", response_class=PlainTextResponse)
+    @_progress_route("leads")
     def leads_export(body: dict = Body(...)):
         try:
             result = compute_leads(
@@ -4155,6 +4447,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     # rate-change monitoring (§7E)
     @app.post("/api/changes")
+    @_progress_route("changes")
     def changes(body: dict = Body(...)):
         try:
             return compute_rate_changes(
@@ -4168,6 +4461,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
 
     @app.post("/api/changes.csv", response_class=PlainTextResponse)
+    @_progress_route("changes")
     def changes_export(body: dict = Body(...)):
         try:
             result = compute_rate_changes(
@@ -4185,6 +4479,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     # market intelligence for one code (Markets tab): geography, negotiability,
     # % of Medicare, assistant/telehealth differential — all share the house basis
     @app.post("/api/market/geography")
+    @_progress_route("markets")
     def market_geography(body: dict = Body(...)):
         try:
             return geographic_rates(store, body.get("code"), body.get("market") or {},
@@ -4193,6 +4488,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
 
     @app.post("/api/market/negotiability")
+    @_progress_route("markets")
     def market_negotiability(body: dict = Body(...)):
         try:
             return negotiability(store, body.get("code"), body.get("market") or {})
@@ -4200,6 +4496,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
 
     @app.post("/api/market/medicare")
+    @_progress_route("markets")
     def market_medicare(body: dict = Body(...)):
         try:
             return medicare_index(store, body.get("code"), body.get("market") or {})
@@ -4207,6 +4504,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
 
     @app.post("/api/market/differential")
+    @_progress_route("markets")
     def market_differential(body: dict = Body(...)):
         try:
             return assistant_pos_diff(store, body.get("code"), body.get("market") or {})
@@ -4214,6 +4512,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
 
     @app.post("/api/contract-gaps")
+    @_progress_route("gaps")
     def contract_gaps_ep(body: dict = Body(...)):
         try:
             return contract_gaps(
@@ -4225,6 +4524,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
 
     @app.post("/api/leaderboard")
+    @_progress_route("leaderboard")
     def leaderboard_ep(body: dict = Body(...)):
         try:
             return compute_leaderboard(
@@ -4236,6 +4536,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
 
     @app.post("/api/trajectory")
+    @_progress_route("trajectory")
     def trajectory_ep(body: dict = Body(...)):
         from .inflation import InflationError
         try:
@@ -4275,6 +4576,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return {"saved": n, **index_status(store)}
 
     @app.post("/api/roster")
+    @_progress_route("roster")
     def roster_ep(body: dict = Body(...)):
         try:
             return compute_payer_roster(
@@ -4286,6 +4588,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
 
     @app.post("/api/roster.csv", response_class=PlainTextResponse)
+    @_progress_route("roster")
     def roster_csv_ep(body: dict = Body(...)):
         try:
             result = compute_payer_roster(
@@ -4321,6 +4624,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return {"peer_sets": store.peer_sets()}
 
     @app.get("/api/overview")
+    @_progress_route("overview")
     def overview(request: Request):
         from .overview import market_overview
         from .states import state_code
@@ -4451,14 +4755,25 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 # bumps when a rollup lands (new rates, new payers, new
                 # months): the dashboard refreshes its pickers and the open
                 # Explorer/Code view when it changes (round 7 P1.20)
-                "data_generation": store.data_generation}
+                "data_generation": store.data_generation,
+                # how much of what is loaded the screens answer from, and what
+                # the rollup is doing about the rest (review 13 item 1.2)
+                "analytics": _analytics_public()}
+
+    def _analytics_public() -> dict:
+        cov = store.analytics_coverage()
+        keep = ("state", "reason", "pct", "eta_text", "covered_files", "done_files",
+                "covered_payers", "loaded_payers", "covered_rows", "loaded_rows", "sentence")
+        return {k: cov.get(k) for k in keep}
 
     @app.get("/api/boot")
     @_log_if_slow("/api/boot")
     def boot_info():
         """The one thing the first paint needs from /api/stats (whose
-        whole-store counts made the table wait 1.2-1.7 s — review 10 1.4)."""
-        return {"default_grain": grain_of({}, cfg, store)}
+        whole-store counts made the table wait 1.2-1.7 s — review 10 1.4) —
+        and the coverage line, so the first paint already says when the
+        screens answer from part of the store (review 13 item 1.2)."""
+        return {"default_grain": grain_of({}, cfg, store), "analytics": _analytics_public()}
 
     @app.get("/api/states")
     def states():
@@ -4488,7 +4803,14 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             # before the first rollup the list reads raw parts, which land
             # without a new generation: never hold that one
             store._gen_cache.pop(("api.payers", None), None)
-        return got
+            return {"payers": got["payers"], "covered": []}
+        # review 13 item 1.2: list what is LOADED; `covered` says which of them
+        # the analytics hold (the page greys the others: "loaded, not yet in
+        # analytics") — the chips offered 3 payers while the header said 49
+        covered = got["payers"]
+        inv = store.loaded_inventory()
+        return {"payers": sorted(set(covered) | set(inv.get("payers") or [])),
+                "covered": covered}
 
     @app.get("/api/catalog")
     def catalog():

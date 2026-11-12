@@ -248,6 +248,7 @@ def org_bundle_files(store: Store, profile: dict) -> dict[str, str]:
         f"Rate rows:      {max(0, len(rows) - 1)}",
         "",
         _methodology(store, fs),
+        *store.analytics_note(),
         "",
         "Source: payers' Transparency-in-Coverage machine-readable files, as",
         "ingested by this app. These are PUBLISHED NEGOTIATED RATES — not paid",

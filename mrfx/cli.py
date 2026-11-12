@@ -823,11 +823,15 @@ def cmd_export(cfg: MrfxConfig, args) -> int:
     # API's streaming export path was built to avoid.
     tmp = out.with_name(out.name + ".tmp")
     n = 0
+    from . import progress as _progress
+    bar = _progress.text_bar("export", label="Export")
     try:
-        with store.connect() as con:
+        with bar, store.connect() as con:
+            bar.stage("Writing the rows to a file")
             # sql_path: an output path containing an apostrophe (C:\Users\O'Brien\…)
             # must not break the COPY statement
             con.execute(f"COPY ({sql}) TO '{sql_path(tmp)}' (FORMAT CSV, HEADER)", params)
+            bar.stage("Writing the methodology")
         import shutil
         with open(out, "wb") as dst, open(tmp, "rb") as src:
             dst.write(b"\xef\xbb\xbf")
@@ -877,8 +881,12 @@ def cmd_outreach(cfg: MrfxConfig, args) -> int:
     from .outreach import OUTREACH_COLUMNS_NOTE
     market = {"month": fs.described.get("as_of_month") or "latest",
               "payers": list(fs.described.get("payers") or [])}
-    headers, rows = build_outreach_rows(store, rel_sql(grain, fs), fs.params,
-                                        fs.described.get("codes"), market=market)
+    from . import progress as _progress
+    with _progress.text_bar("outreach", label="Outreach") as bar:
+        bar.stage("Listing the organizations in this view")
+        headers, rows = build_outreach_rows(store, rel_sql(grain, fs), fs.params,
+                                            fs.described.get("codes"), market=market)
+        bar.stage("Writing the CSV and methodology")
     out = Path(args.out)
     # bytes: the CSV ends rows with \r\n already (text mode doubled them on
     # Windows — review 11 item 4.4d)
@@ -1157,9 +1165,12 @@ def cmd_packets(cfg: MrfxConfig, args) -> int:
               "thing without stopping the server)")
         return 1
     store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir)
+    from . import progress as _progress
     try:
-        res = build_all_packets(cfg, store, args.out or getattr(cfg, "packets_dir", None),
-                                progress=lambda m: print(f"  {m}"))
+        with _progress.text_bar("packets", label="Monthly packets") as bar:
+            bar.stage("Finding each client's newest month")
+            res = build_all_packets(cfg, store, args.out or getattr(cfg, "packets_dir", None),
+                                    progress=lambda m: print(f"  {m}"))
     except Exception as e:  # noqa: BLE001 — a refusal is a message, not a trace
         print(f"could not build packets: {e}")
         return 1
@@ -1633,9 +1644,13 @@ def cmd_orgreport(cfg: MrfxConfig, args) -> int:
     market: dict = {"month": args.month}
     if args.state:
         market["state"] = args.state
+    from . import progress as _progress
     try:
-        profile = compute_org_profile(store, args.subject, market)
-        files = org_bundle_files(store, profile)
+        with _progress.text_bar("bundle", label="Tracker bundle") as bar:
+            profile = compute_org_profile(store, args.subject, market)
+            bar.stage("Collecting NPIs and contact details")
+            files = org_bundle_files(store, profile)
+            bar.stage("Zipping")
     except Exception as e:  # noqa: BLE001 — a lookup miss is a message, not a trace
         print(f"could not build the bundle: {e}")
         return 1

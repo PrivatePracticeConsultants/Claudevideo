@@ -443,7 +443,7 @@ def render_report(cfg, store: Store, d: dict) -> str:
 <h1>{e(title)}</h1>
 <div class="meta">What one standard visit is worth across the market, as of {e(d['as_of'])}.</div>
 {block_html(d)}
-<footer>Generated {e(gen)} by MRF Explorer v{e(__version__)}.</footer>
+<footer>Generated {e(gen)} by MRF Explorer v{e(__version__)}.{''.join(chr(10) + e(x) for x in store.analytics_note())}</footer>
 </body></html>"""
 
 

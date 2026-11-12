@@ -76,10 +76,23 @@ def test_rollup_tables_are_clustered_for_zonemap_pruning(store):
 
     with store.connect() as con:
         # physical scan order (no ORDER BY in the probe) must be non-decreasing:
-        # proof the table was materialized clustered, not in aggregate-hash order
-        spine = [r[0] for r in con.execute(
-            "SELECT billing_code FROM rates_by_tin_tbl").fetchall()]
-        assert spine == sorted(spine), "spine not clustered by billing_code"
+        # proof the table was materialized clustered, not in aggregate-hash order.
+        # Since 0.7.7 the spine is built payer by payer (review 13 item 1.3 —
+        # each payer's slices commit on their own and resume after a kill), so
+        # the clustering holds WITHIN each payer's block: payers contiguous,
+        # billing codes ascending inside each. A code-filtered query still
+        # prunes to that code's row groups in every payer block.
+        spine = con.execute("SELECT payer, billing_code FROM rates_by_tin_tbl").fetchall()
+        blocks: dict = {}
+        order = []
+        for payer, code in spine:
+            if not order or order[-1] != payer:
+                assert payer not in blocks, "a payer's rows are not contiguous"
+                order.append(payer)
+                blocks[payer] = []
+            blocks[payer].append(code)
+        for payer, codes_seen in blocks.items():
+            assert codes_seen == sorted(codes_seen), f"{payer}: not clustered by billing_code"
         direc = [r[0] for r in con.execute(
             "SELECT tin_value FROM tin_directory_tbl").fetchall()]
         assert direc == sorted(direc), "directory not clustered by tin_value"
@@ -721,9 +734,13 @@ def test_no_route_blocks_the_event_loop(cfg, store):
     # ONE deliberate exception: /api/debug/stacks runs on the event loop so it
     # still answers when every threadpool worker is wedged — the situation it
     # exists to diagnose. It does no store/compute work (in-memory frame walk).
+    # Since 0.7.7 (review 13 Group 2) the progress poll and its Stop are the
+    # other two, for the same reason: they must answer while every worker
+    # thread is busy building the report the bar describes, and they read one
+    # in-memory object under a lock held for microseconds — never the store.
     offenders = [r.path for r in create_app(cfg, store).routes
                  if isinstance(r, APIRoute) and asyncio.iscoroutinefunction(r.endpoint)
-                 and r.path != "/api/debug/stacks"]
+                 and r.path not in ("/api/debug/stacks", "/api/progress/{token}")]
     assert offenders == [], f"async endpoints would block the event loop: {offenders}"
 
 

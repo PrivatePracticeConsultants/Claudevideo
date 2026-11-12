@@ -23,7 +23,7 @@ import html
 import statistics
 
 from .rounding import half_up
-from . import __version__
+from . import __version__, progress
 from .benchmark import (
     anchor_state,
     market_in_words,
@@ -69,6 +69,7 @@ def compute_fee_schedule(store: Store, subject: str, market: dict, *,
     (95% of the call: 4.13 of 4.34 s on a 99M-rate store).
     """
     from .benchmark import resolve_plan_scope
+    progress.current().stage("Finding this practice")
     market = resolve_plan_scope(store, normalize_market(market))
     subject_tins = subject_tins_for_market(store, subject, market)
     include_assistant = bool(market.get("include_assistant", False))
@@ -109,6 +110,7 @@ def compute_fee_schedule(store: Store, subject: str, market: dict, *,
     GROUP BY payer, billing_code
     ORDER BY billing_code, payer
     """
+    progress.current().stage("Reading its own rates")
     with store.connect() as con:
         cur = con.execute(sql, [subject_tins, *subject_params])
         raw = [dict(zip([d[0] for d in cur.description], r)) for r in cur.fetchall()]
@@ -156,6 +158,7 @@ def compute_fee_schedule(store: Store, subject: str, market: dict, *,
             # bind order follows the SQL TEXT: the subject_tins CTE, then the
             # relation's own filter inside FROM, then the shared WHERE, then the
             # explicit payer/code lists
+            progress.current().stage("What each payer pays its peers for the same codes")
             mcur = con.execute(msql, [subject_tins, *peer_params])
             for row in mcur.fetchall():
                 d = dict(zip([c[0] for c in mcur.description], row))
@@ -324,6 +327,7 @@ def _methodology(store: Store, fee_schedule: dict) -> str:
         f"Generated {dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} by MRF Explorer v{__version__}.",
         f"As-of month: {month_label(market.get('month'))}. Subject tax IDs: {', '.join(fee_schedule['subject_tins']) or 'n/a'}.",
         f"Market definition: {market_in_words(market)}.",
+        *store.analytics_note(),
         fee_schedule["basis_note"],
         "Rate for a (payer, code) is the median across the subject's tax IDs of "
         "each tax ID's median published value (variants collapse per the app's "

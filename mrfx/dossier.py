@@ -27,7 +27,7 @@ import datetime as dt
 import html
 import logging
 
-from . import __version__
+from . import __version__, progress
 from .config import MrfxConfig
 from .sqlfn import modal_zip_of
 from .rounding import signed_pct
@@ -44,6 +44,15 @@ DOSSIER_NOTE = (
     "are a proxy for referral rather than a record of one."
 )
 
+
+# the progress bar's words for each section (mrfx/progress_plans.py)
+_DOSSIER_STAGE = {"Identity": "Who they are", "Medicare volume": "How big they are vs the market",
+                  "Rate position": "Where their rates sit", "Weakest payer": "Their weakest payer",
+                  "Negotiating leverage": "Who else the payers contract nearby",
+                  "Referral sources": "Who refers to them", "Market size": "The market around them"}
+_MARKET_STAGE = {"City rate map": "Rates by city", "Payer concentration": "Who holds the contracts",
+                 "Payer posture": "Which payers negotiate",
+                 "Openings and closures": "Openings and closures", "Local demand": "Local demand"}
 
 def _doc(cfg: MrfxConfig, title: str, body: str, footer: str = "") -> str:
     from .benchmark import _brand_header
@@ -153,8 +162,12 @@ def build_prospect_dossier(cfg: MrfxConfig, store: Store, subject: str,
     facts: dict = {"subject": subject, "state": market.get("state")}
 
     def section(name: str, fn):
+        # one progress stage per section, the nested features inside its slot
+        prog = progress.current()
+        prog.stage(_DOSSIER_STAGE.get(name, name))
         try:
-            out = fn()
+            with prog.group():
+                out = fn()
             if out:
                 parts.append(out)
         except BenchmarkError as e_:
@@ -351,7 +364,8 @@ def build_prospect_dossier(cfg: MrfxConfig, store: Store, subject: str,
     footer = (
         f"Generated {dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} "
         f"by MRF Explorer v{__version__}. Market: "
-        f"{market_in_words({'month': 'latest', **market})}.\n{DOSSIER_NOTE}")
+        f"{market_in_words({'month': 'latest', **market})}.\n"
+        + "".join(f"{x}\n" for x in store.analytics_note()) + DOSSIER_NOTE)
     title = f"Practice profile — {facts.get('display_name') or subject}"
     return {"subject": subject, "html": _doc(cfg, title, "\n".join(parts), footer),
             "facts": facts, "skipped": skipped, "note": DOSSIER_NOTE}
@@ -379,8 +393,11 @@ def build_market_report(cfg: MrfxConfig, store: Store, *, state: str,
     parts, skipped = [], []
 
     def section(name, fn):
+        prog = progress.current()
+        prog.stage(_MARKET_STAGE.get(name, name))
         try:
-            out = fn()
+            with prog.group():
+                out = fn()
             if out:
                 parts.append(out)
         except BenchmarkError as e_:
@@ -505,6 +522,7 @@ def build_market_report(cfg: MrfxConfig, store: Store, *, state: str,
     footer = (
         f"Generated {dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} "
         f"by MRF Explorer v{__version__}. As of {asof}. Market: {market_in_words(m)}.\n"
+        + "".join(f"{x}\n" for x in store.analytics_note())
         + DOSSIER_NOTE.replace("this dossier", "this report"))
     return {"state": st, "code": code,
             "html": _doc(cfg, f"Therapy market report — {st}",
