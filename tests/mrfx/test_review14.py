@@ -422,3 +422,534 @@ def test_1_2_status_analytics_prints_the_panel(cfg, store, capsys):
     out = capsys.readouterr().out
     assert rc == 0 and "Analytics activity" in out and "Alpha Health" in out
     assert "What this means" in out
+
+
+# ---------------------------------------------------------------- group 2
+
+
+def _cfg_store(tmp_path, name):
+    from mrfx.config import MrfxConfig
+    from mrfx.store import Store
+    w = tmp_path / name
+    c = MrfxConfig(inbox_dir=w / "inbox", processed_dir=w / "p", failed_dir=w / "f",
+                   store_dir=w / "store", downloads_dir=w / "dl", entity_map_path=w / "em.yaml")
+    c.ensure_dirs()
+    c.enrichment.mode = "off"
+    return c, Store(c.store_dir)
+
+
+def _rate_rows(store):
+    with store.connect() as con:
+        return con.execute("SELECT count(*) FROM rates").fetchone()[0]
+
+
+def test_2_1_a_failed_link_releases_its_content_claim(tmp_path, monkeypatch):
+    """2.1 (P0, a round-13 regression vs 0.7.6): link A's load fails once;
+    the same document re-encoded under link B must then load, and an inbox
+    copy must not wait forever. End to end through the real queue. was:
+    after A failed the claims still held {'92856b6a…': 'cb1b758b_a.json.gz'}
+    (B then 'skipped' "being loaded right now — will retry automatically",
+    rate rows 0, and an inbox copy's scan did not return in 20 s)."""
+    import gzip as _gz
+
+    import mrfx.ingest as ING
+    from mrfx import fetch
+    cfg, s = _cfg_store(tmp_path, "w")
+    body = rate_doc(n=60)
+    a, b = _gz.compress(body, 1, mtime=0), _gz.compress(body, 9, mtime=0)
+    from tests.mrfx.test_review11 import ranged
+    srv = Srv({})
+    real = ING._ingest_file_locked
+    fired = {"n": 0}
+
+    def flaky(*args, **kw):
+        if fired["n"] == 0:
+            fired["n"] += 1
+            raise OSError("simulated transient failure")
+        return real(*args, **kw)
+    monkeypatch.setattr(ING, "_ingest_file_locked", flaky)
+    try:
+        srv.routes["/a.json.gz"] = lambda req: ranged(a, req, etag='"a"')
+        srv.routes["/b.json.gz"] = lambda req: ranged(b, req, etag='"b"')
+        fetch.add_urls(s, [srv.base + "/a.json.gz"])
+        fetch.run_queue(cfg, s, drain=True)
+        assert s._content_claims == {}
+        fetch.add_urls(s, [srv.base + "/b.json.gz"])
+        fetch.run_queue(cfg, s, drain=True)
+    finally:
+        srv.close()
+    assert _rate_rows(s) == 60
+    # (b) an inbox copy of the same content after a FAILED load: it loads
+    # or is recognised — it never waits
+    cfg2, s2 = _cfg_store(tmp_path, "w2")
+    fired["n"] = 0
+    srv = Srv({})
+    try:
+        srv.routes["/a.json.gz"] = lambda req: ranged(a, req, etag='"a"')
+        fetch.add_urls(s2, [srv.base + "/a.json.gz"])
+        fetch.run_queue(cfg2, s2, drain=True)
+    finally:
+        srv.close()
+    (cfg2.inbox_dir / "copy.json").write_bytes(body)
+    out = {}
+    t = threading.Thread(target=lambda: out.setdefault("r", ING.scan_inbox(cfg2, s2)), daemon=True)
+    t.start()
+    t.join(20)
+    assert not t.is_alive(), "the inbox scan waited on a claim nobody held"
+    assert _rate_rows(s2) == 60
+
+
+def test_2_1_a_deferred_content_twin_loads_when_its_link_fails(tmp_path, monkeypatch):
+    """2.1: B (other bytes, same content) deferred to A WHILE A was loading;
+    A then fails — B is revived and loads. was: {'b.json.gz': 'skipped',
+    'a.json.gz': 'failed'} — the revive matched the raw sha only."""
+    import gzip as _gz
+
+    import mrfx.ingest as ING
+    from mrfx import fetch
+    from tests.mrfx.test_review11 import ranged
+    cfg, s = _cfg_store(tmp_path, "w")
+    body = rate_doc(n=40)
+    a, b = _gz.compress(body, 1, mtime=0), _gz.compress(body, 9, mtime=0)
+    srv = Srv({})
+    real = ING._ingest_file_locked
+    gate = threading.Event()
+    seen = {"a": 0}
+
+    def a_fails_after_b_deferred(cfg_, store_, path, *args, **kw):
+        if path.name.endswith("_a.json.gz") and not seen["a"]:
+            seen["a"] += 1
+            # B arrives while A holds the content claim
+            fetch.add_urls(s, [srv.base + "/b.json.gz"])
+            assert _wait(lambda: gate.is_set(), 30)
+            raise OSError("A fails after B deferred to it")
+        return real(cfg_, store_, path, *args, **kw)
+    real_claim = s.claim_content_ingest
+
+    def claim(*a_, **k):
+        r = real_claim(*a_, **k)
+        if r is not None:
+            gate.set()            # B deferred
+        return r
+    monkeypatch.setattr(ING, "_ingest_file_locked", a_fails_after_b_deferred)
+    monkeypatch.setattr(s, "claim_content_ingest", claim)
+    cfg.parallel_ingests = 2
+    try:
+        srv.routes["/a.json.gz"] = lambda req: ranged(a, req, etag='"a"')
+        srv.routes["/b.json.gz"] = lambda req: ranged(b, req, etag='"b"')
+        fetch.add_urls(s, [srv.base + "/a.json.gz"])
+        fetch.run_queue(cfg, s, drain=True)
+    finally:
+        srv.close()
+    with s.connect() as con:
+        st = dict(con.execute("SELECT regexp_replace(url, '.*/', ''), status FROM url_queue").fetchall())
+    assert st == {"a.json.gz": "failed", "b.json.gz": "done"}, st
+    assert _rate_rows(s) == 40
+
+
+def test_2_2_a_file_loaded_before_0_7_7_is_named_by_content(cfg, store):
+    """2.2 (P0): a file 0.7.6 loaded has its raw sha and no content sha; the
+    backfill names it by content from its kept copy, so a decoded copy is
+    recognised. was: backfilled 0 (assert 0 >= 1); then both copies done,
+    rate rows 120 for a 60-row document."""
+    from mrfx.ingest import backfill_identities, scan_inbox
+    body = rate_doc(n=60)
+    (cfg.inbox_dir / "twin_in-network-rates.json.gz").write_bytes(gz(body))
+    scan_inbox(cfg, store)
+    with store.connect() as con:      # what a 0.7.6 store holds
+        con.execute("UPDATE content_fingerprints SET content_sha = NULL, content_size = NULL")
+    assert backfill_identities(cfg, store) >= 1
+    (cfg.inbox_dir / "twin_in-network-rates (1).json").write_bytes(b"\xef\xbb\xbf" + body)
+    scan_inbox(cfg, store)
+    assert _rate_rows(store) == 60
+    assert store.file_status("twin_in-network-rates (1).json")["status"] == "skipped"
+
+
+def test_2_3_two_rereads_of_one_rate_file_never_fail_it(cfg, store, tmp_path, monkeypatch):
+    """2.3 (P1, from 5.2.7): the list's re-read pass holds the rate file's
+    claim when the file's own end-of-read check starts its re-read — the
+    loser defers to the winner. Both triggers forced at once, no sleeps.
+    was: the file's ingest returned {'status': 'skipped', 'error': 'already
+    being ingested by another worker'} (its link row then ended 'failed')."""
+    import mrfx.ingest as I
+    from tests.mrfx.test_review13 import _rate_and_list
+    rate, comp = _rate_and_list(cfg, tmp_path)
+    holding, release = threading.Event(), threading.Event()
+    real_locked = I._ingest_file_locked
+
+    def slow(cfg_, store_, path, *a, **k):
+        if path.name == rate.name and threading.current_thread().name == "list-pass":
+            holding.set()
+            release.wait(30)
+        return real_locked(cfg_, store_, path, *a, **k)
+    monkeypatch.setattr(I, "_ingest_file_locked", slow)
+    real_rel = I._release_ingest
+    fired = {"n": 0}
+    th = {}
+
+    def rel(name):
+        real_rel(name)
+        if name == rate.name and not fired["n"] and threading.current_thread().name != "list-pass":
+            fired["n"] += 1
+            th["t"] = threading.Thread(target=lambda: I.ingest_file(cfg, store, comp),
+                                       name="list-pass", daemon=True)
+            th["t"].start()
+            assert holding.wait(30)       # the list's pass holds the rate file now
+    monkeypatch.setattr(I, "_release_ingest", rel)
+    out = I.ingest_file(cfg, store, rate)
+    release.set()
+    th["t"].join(30)
+    assert out["status"] == "done", out
+    st = store.file_status(rate.name)
+    assert (st["status"], st["rows_emitted"], st["ref_groups_skipped"]) == ("done", 6, 0)
+
+
+def _backup_store(tmp_path):
+    cfg, s = _cfg_store(tmp_path, "b")
+    for i, (payer, pre) in enumerate((("Alpha Health", "71000"), ("Beta Health", "72000"))):
+        _market(cfg, s, payer, pre, [40 + i, 50 + i, 60 + i])
+    s.rebuild_rollups()
+    cfg.backup_dir = tmp_path / "bk"
+    return cfg, s
+
+
+def _restore_rows(zip_path, tmp_path):
+    import zipfile
+
+    from mrfx.store import Store
+    out = tmp_path / "restored"
+    with zipfile.ZipFile(zip_path) as z:
+        z.extractall(out)
+    return _rate_rows(Store(out / "store"))
+
+
+def test_2_4_a_file_committed_while_the_backup_waits_is_in_it(tmp_path, monkeypatch):
+    """2.4 (P0): a part that goes live after the backup lists the store but
+    before it takes the write lock is in the database copy — it must be in
+    the zip too, and verify must check the rows a restore would hold. was:
+    'backup OK: 3 files match their checksums; recorded 18 rate rows' and
+    the restored store held 12 (assert 12 == 18)."""
+    import datetime as _dt
+
+    from mrfx import backup
+    cfg, s = _backup_store(tmp_path)
+    real = backup.store_files
+    calls = {"n": 0}
+
+    def list_then_land(root, **kw):
+        got = real(root, **kw)
+        calls["n"] += 1
+        if calls["n"] == 1:          # a file finishes right after the listing
+            _market(cfg, s, "Gamma Health", "73000", [42, 52, 62])
+        return got
+    monkeypatch.setattr(backup, "store_files", list_then_land)
+    r = backup.hot_backup(cfg, s, now=_dt.datetime(2026, 11, 20, 9, 0, tzinfo=_dt.timezone.utc))
+    live = _rate_rows(s)
+    ok, verdict = backup.verify_zip(Path(r["path"]))
+    assert ok and live == r["counts"]["rates"]
+    assert _restore_rows(r["path"], tmp_path) == live, verdict
+
+
+def test_2_4_verify_refuses_a_zip_whose_parts_do_not_hold_its_rows(tmp_path):
+    """2.4: `mrfx verify` checks the restored row count from the parts in the
+    zip, not the manifest. was: (True, 'backup OK: 3 files match their
+    checksums; recorded 999 rate rows')."""
+    from mrfx import backup
+    cfg, s = _backup_store(tmp_path)
+    root = Path(s.dir)
+    entries = [(p, p.relative_to(root).as_posix()) for p in backup.store_files(root)]
+    dest = tmp_path / "x.zip"
+    backup.write_zip(dest, entries, store_dir=str(root), counts={"rates": 999})
+    ok, verdict = backup.verify_zip(dest)
+    assert not ok and "incomplete" in verdict, verdict
+
+
+def test_2_4_a_stopped_backup_leaves_nothing_and_inside_the_store_is_refused(tmp_path, monkeypatch):
+    """2.4 P2-2 / P2-5: a failed write leaves no `.zip.part` (each one is the
+    size of the store), and a backup_dir inside the data folder is refused.
+    was: 'mrfx-backup-….zip.part' left on the backup drive; the 4th backup
+    inside the store was 7x the store (each carried the earlier ones); here
+    ['mrfx-backup-2026-11-21_0900.zip.part'] == []."""
+    import datetime as _dt
+    import zipfile
+
+    from mrfx import backup
+    cfg, s = _backup_store(tmp_path)
+    real_write = zipfile.ZipFile.write
+    n = {"k": 0}
+
+    def eio(self, *a, **k):
+        n["k"] += 1
+        if n["k"] == 2:
+            raise OSError(5, "Input/output error")
+        return real_write(self, *a, **k)
+    monkeypatch.setattr(zipfile.ZipFile, "write", eio)
+    with pytest.raises(backup.BackupRefused):
+        backup.hot_backup(cfg, s, now=_dt.datetime(2026, 11, 21, 9, 0, tzinfo=_dt.timezone.utc))
+    monkeypatch.undo()
+    assert [p.name for p in Path(cfg.backup_dir).iterdir()] == []
+    cfg.backup_dir = Path(s.dir) / "backups"
+    with pytest.raises(backup.BackupRefused, match="inside the data folder"):
+        backup.hot_backup(cfg, s, now=_dt.datetime(2026, 11, 22, 9, 0, tzinfo=_dt.timezone.utc))
+
+
+def test_2_4_a_drive_that_cannot_link_copies_outside_the_lock(tmp_path, monkeypatch):
+    """2.4 P2-6: where hard links fail, the parts are copied OUTSIDE the
+    write lock (and the data drive's free space is checked first). was: every
+    copy ran holding the lock ([True, True]); disk_usage asked only about
+    the backup drive."""
+    import datetime as _dt
+    import errno
+
+    from mrfx import backup
+    cfg, s = _backup_store(tmp_path)
+
+    def no_link(*a, **k):
+        raise OSError(errno.EPERM, "Operation not permitted")
+    monkeypatch.setattr(backup.os, "link", no_link)
+    asked = []
+    real_du = backup.shutil.disk_usage
+    monkeypatch.setattr(backup.shutil, "disk_usage", lambda p: (asked.append(str(p)), real_du(p))[1])
+    copied_locked = []
+    real_copy = backup.shutil.copy2
+
+    def copy(a, b, **k):
+        copied_locked.append(s.write_lock.locked())
+        return real_copy(a, b, **k)
+    monkeypatch.setattr(backup.shutil, "copy2", copy)
+    r = backup.hot_backup(cfg, s, now=_dt.datetime(2026, 11, 23, 9, 0, tzinfo=_dt.timezone.utc))
+    assert copied_locked and not any(copied_locked)
+    assert any(a.startswith(str(s.dir)) for a in asked)
+    assert backup.verify_zip(Path(r["path"]))[0]
+
+
+def test_2_5_an_ssn_pattern_tin_reaches_no_shareable_surface(cfg, store, tmp_path):
+    """2.5 (P0): the Clients box refuses an SSN-pattern subject; one saved
+    before 0.8.0 is masked in the digest, the packet folder names, titles
+    and pages, the report HTML (what the PDF prints) and never enters the
+    address bar. was: add_client saved '070000001' (DID NOT RAISE); the
+    review's run showed the digest subject '070000001', the packet folder
+    '070000001' with '<title>Rate card — 070000001</title>' and the address
+    bar '#ratecard?subject=070000001'."""
+    from mrfx import clients
+    from mrfx.benchmark import BenchmarkError
+    from mrfx.packets import build_all_packets
+    ssn = "070000001"
+    T = [ssn, "430000002", "430000003", "430000004", "430000005"]
+    npis = {t: [f"1{t}"] for t in T}
+    d = doc("Alpha Health", "2026-06-01", {"97110": dict(zip(T, [40, 50, 60, 70, 80]))}, npis)
+    load(cfg, store, [("alpha_2026-06.json", d)])
+    for t in T:
+        org(store, npis[t][0], f"P {t[-1]} REHAB")
+    store.rebuild_rollups()
+    with pytest.raises(BenchmarkError, match="Social Security"):
+        clients.add_client(store, ssn)
+    with pytest.raises(BenchmarkError, match="Social Security"):
+        clients.add_client(store, "070-00-0001")
+    clients._save_client(store, ssn)           # saved by an older version
+    dig = clients.client_digest(store)
+    assert ssn not in json.dumps(dig)
+    out = build_all_packets(cfg, store, out_root=tmp_path / "packets",
+                            market={"month": "latest"})
+    for p in (tmp_path / "packets").rglob("*"):
+        assert ssn not in p.name
+        if p.is_file():
+            assert ssn not in p.read_text(errors="replace"), p
+    assert ssn not in json.dumps(out, default=str)
+    c = TestClient(create_app(cfg, store))
+    r = c.post("/api/report/ratecard", json={"subject": ssn, "market": {"month": "latest"}})
+    if r.status_code == 200:
+        assert ssn not in r.text
+    # the address bar: hashFor drops an SSN-shaped value (the JS itself)
+    from tests.mrfx.test_round7 import _browser_page, _js_function
+    pw, browser, page = _browser_page()
+    try:
+        app = (Path(__file__).resolve().parents[2] / "mrfx" / "web" / "app.js").read_text()
+        i = app.index("const SSN_PREFIXES")
+        j = app.index(";", app.index(")", i))
+        page.add_script_tag(content=app[i:j + 1] + "\nconst ssnShaped = " +
+                            app[app.index("const ssnShaped = ") + len("const ssnShaped = "):
+                                app.index("};", app.index("const ssnShaped = ")) + 2] +
+                            "\n" + _js_function("hashFor"))
+        h = page.evaluate("hashFor('ratecard', {subject: '070000001', state: 'MO'})")
+        h2 = page.evaluate("hashFor('ratecard', {subject: '070-00-0001'})")
+        h3 = page.evaluate("hashFor('ratecard', {subject: '430000002'})")
+    finally:
+        browser.close()
+        pw.stop()
+    assert "070" not in h and "070" not in h2 and "430000002" in h3
+
+
+def test_2_6_a_needs_full_raised_during_a_plan_survives_it(cfg, store, monkeypatch):
+    """2.6 (P1): a plan made while `rollup_needs_full` was set clears only the
+    raise it answers; an unscopable forget during the plan raises a new one
+    that survives the plan's end, and the next update heals the spine. was:
+    the flag was cleared at the plan's end (None) and the forgotten file's
+    rows stayed in the spine with the state 'current'."""
+    import mrfx.store as S
+    from mrfx.ingest import forget_file
+    _rebuild_part_way(cfg, store, stop_after=2)   # needs_full '1' + a part-way plan
+    monkeypatch.setattr(S.Store, "_part_payers_for_removal", lambda self, path: None)
+    forget_file(cfg, store, "72000_2026-06.json")    # unscopable -> a new raise; the
+    monkeypatch.undo()                               # plan resumes and finishes
+    assert store.rollup_plan() is None
+    with store.connect() as con:
+        flag = con.execute("SELECT value FROM meta WHERE key = 'rollup_needs_full'").fetchone()
+    assert flag is not None and flag[0].startswith("1:"), flag
+    assert store.rollups_stale()
+    from mrfx import foldin
+    foldin.fold_in(store)                            # the next update: a full build
+    assert not store.rollups_stale()
+    with store.connect() as con:
+        assert not con.execute("SELECT count(*) FROM rates_by_tin_tbl "
+                               "WHERE payer = 'Beta Health'").fetchone()[0]
+    got = _spine_dir(store)
+    store.rebuild_rollups()
+    assert _spine_dir(store) == got
+
+
+def test_2_7_screens_and_documents_agree_during_a_rebuild(cfg, store):
+    """2.7 (P1): during a full plan over an existing spine the header, the
+    payer chips and every document sentence come from ONE rule, and the
+    document never says "the files loaded since" when none were. was:
+    header covered_payers 2 while the chips marked 4 (assert 2 == 4), and
+    the document said 'Every number here comes from those; the files loaded
+    since are not in the analytics yet…' with nothing loaded since."""
+    _rebuild_part_way(cfg, store, stop_after=2)
+    c = TestClient(create_app(cfg, store))
+    a = c.get("/api/stats").json()["analytics"]
+    chips = c.get("/api/payers").json()["covered"]
+    note = store.analytics_note()
+    assert a["covered_payers"] == len(chips)
+    assert note and "loaded since" not in note[0]
+    assert f"cover {a['covered_payers']} of 4 payers" in note[0]
+
+
+def test_2_8_the_monthly_check_downloads_no_new_file(cfg, store):
+    """2.8 (P1, decided: probe only): the monthly re-check (on by default,
+    monthly_refresh off) asks about the loaded files; a file the index lists
+    for the first time is named on the index row, not downloaded. was: the
+    new month's file downloaded in full — ('/2026-12-01_twin_in-network-
+    rates.json.gz', 200, None, 476) — and loaded."""
+    import datetime as _dt
+    import gzip as _gz
+
+    from mrfx import fetch
+    from tests.mrfx.test_review11 import ranged
+    cfg.enrichment.mode = "off"
+    assert cfg.monthly_recheck and not cfg.monthly_refresh
+    srv = Srv({})
+    nov = _gz.compress(rate_doc(n=30, month="2026-11-01"), mtime=0)
+    dec = _gz.compress(rate_doc(n=30, rate=41.0, month="2026-12-01"), mtime=0)
+
+    def toc(files):
+        return json.dumps({"reporting_entity_name": "Twin Health", "reporting_structure": [{
+            "reporting_plans": [{"plan_name": "PPO", "plan_id_type": "EIN", "plan_id": "1",
+                                 "plan_market_type": "group"}],
+            "in_network_files": [{"description": "x", "location": srv.base + f}
+                                 for f in files]}]}).encode()
+    try:
+        srv.routes["/2026-11-01_twin_in-network-rates.json.gz"] = lambda r: ranged(nov, r, etag='"n"')
+        srv.routes["/2026-12-01_twin_in-network-rates.json.gz"] = lambda r: ranged(dec, r, etag='"d"')
+        cur = {"toc": toc(["/2026-11-01_twin_in-network-rates.json.gz"])}
+        srv.routes["/index.json"] = lambda r: ranged(cur["toc"], r)
+        fetch.add_urls(store, [srv.base + "/index.json"])
+        fetch.run_queue(cfg, store, drain=True)
+        cur["toc"] = toc(["/2026-11-01_twin_in-network-rates.json.gz",
+                          "/2026-12-01_twin_in-network-rates.json.gz"])
+        srv.log.clear()
+        fetch.monthly_refresh_tick(cfg, store, _dt.date(2026, 12, 3),
+                                   dated_sources=cfg.monthly_refresh, recheck=cfg.monthly_recheck)
+        fetch.run_queue(cfg, store, drain=True)
+        dec_gets = [e for e in srv.log if e[0].startswith("/2026-12-01") and e[1] == 200]
+    finally:
+        srv.close()
+    assert dec_gets == []
+    with store.connect() as con:
+        months = con.execute("SELECT DISTINCT file_month FROM rates").fetchall()
+        idx_note = con.execute("SELECT error FROM url_queue WHERE url LIKE '%index.json'").fetchone()[0]
+    assert months == [("2026-11",)]
+    assert idx_note and "1 new file listed" in idx_note and "paste this index again" in idx_note
+
+
+def test_2_9_a_result_built_under_a_stop_is_never_cached(cfg, store, monkeypatch):
+    """2.9 (P1): Stop landing inside the Clients digest (its per-client loop
+    catches the stop, as fault isolation does) / a generation-cached output
+    must not leave its degraded answer for the next caller. was: the next
+    plain digest said error='stopped' for the client (and so did the monthly
+    packets); a store.cached answer computed under a Stop was served again
+    (compute calls 1)."""
+    from mrfx import clients, progress
+    _market(cfg, store, "Alpha Health", "71000", [40, 50, 60, 70, 80])
+    store.rebuild_rollups()
+    clients._save_client(store, "ALPHA HEALTH P1 REHAB")
+    p = progress.Progress("t" * 32)
+    real = clients.resolve_subject_tins
+    fired = {"n": 0}
+
+    def stop_lands_here(*a, **k):
+        if not fired["n"]:
+            fired["n"] += 1
+            p.cancel()
+            raise progress.Stopped("stopped")
+        return real(*a, **k)
+    monkeypatch.setattr(clients, "resolve_subject_tins", stop_lands_here)
+    calls = {"n": 0}
+
+    def compute():
+        calls["n"] += 1
+        return {"degraded": True}
+    tok = progress.set_current(p)
+    try:
+        d1 = clients.client_digest(store)
+        store.cached("t.cancel", 1, compute)
+    finally:
+        progress.reset_current(tok)
+    assert "stopped" in str(d1["clients"][0].get("error"))
+    d2 = clients.client_digest(store)
+    assert not d2["clients"][0].get("error"), d2
+    store.cached("t.cancel", 1, compute)
+    assert calls["n"] == 2                     # recomputed, not served from a Stop
+
+
+def test_2_10_two_overlapping_runs_leave_the_button_enabled():
+    """2.10 (P1): Enter pressed twice starts two runs on one button; when
+    both end the button is enabled again, whichever ends last. was: the
+    first run's end re-enabled it while the second ran and the second run's
+    end restored 'disabled' — [True, False, True]: dead until a reload."""
+    from tests.mrfx.test_round7 import _browser_page, _js_function
+    pw, browser, page = _browser_page()
+    try:
+        page.set_content('<main><div id="view-x"><button id="run">Run</button></div></main>')
+        page.add_script_tag(content="const _btnRuns = new WeakMap();\n"
+                            + _js_function("jobHost") + "\n" + _js_function("mountJobbar"))
+        got = page.evaluate("""() => {
+            const bar = {view: 'x', label: 'Roster', anchor: '#run'};
+            const a = mountJobbar(bar, 't1'), b = mountJobbar(bar, 't2');
+            const mid = document.querySelector('#run').disabled;
+            a.done(); const after_a = document.querySelector('#run').disabled;
+            b.done(); return [mid, after_a, document.querySelector('#run').disabled]; }""")
+    finally:
+        browser.close()
+        pw.stop()
+    assert got == [True, True, False]
+
+
+def test_2_11_a_copy_after_a_kill_in_the_done_window_is_recognised(cfg, store):
+    """2.11 (P1): a kill between the 'done' commit and the identity row left
+    files.read_identity only; a byte-identical copy and a decoded copy under
+    other names must be recognised by every claim path. was: both copies
+    loaded — rate rows 120 for a 60-row document, each time."""
+    from mrfx.ingest import scan_inbox
+    body = rate_doc(n=60)
+    (cfg.inbox_dir / "k.json.gz").write_bytes(gz(body))
+    scan_inbox(cfg, store)
+    with store.connect() as con:          # the identity row the kill skipped
+        con.execute("DELETE FROM content_fingerprints")
+        ri = con.execute("SELECT read_identity FROM files WHERE filename = 'k.json.gz'").fetchone()[0]
+    assert ri and json.loads(ri).get("sha")
+    (cfg.inbox_dir / "k (1).json.gz").write_bytes(gz(body))
+    scan_inbox(cfg, store)
+    (cfg.inbox_dir / "k (2).json").write_bytes(body)
+    scan_inbox(cfg, store)
+    assert _rate_rows(store) == 60

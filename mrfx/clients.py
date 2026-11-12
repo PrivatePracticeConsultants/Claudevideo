@@ -38,10 +38,31 @@ def watchlist(store: Store) -> list[str]:
             return []
 
 
+def subject_label(subject: str | None) -> str:
+    """How a saved client is SHOWN (and named in a folder, a log line, the
+    address bar): its text with any SSN-pattern tax ID masked — a client
+    saved by one before 0.8.0 keeps working under its key but is never shown
+    raw (review 14 item 2.5)."""
+    from .store import looks_like_ssn_text, mask_ssn_text
+    s = str(subject or "")
+    if looks_like_ssn_text(s):
+        import hashlib
+        return "MASKED-SSN-" + hashlib.sha1(s.encode()).hexdigest()[:6]
+    return mask_ssn_text(s) or s
+
+
 def add_client(store: Store, subject: str) -> list[str]:
     subject = str(subject or "").strip()
     if not subject:
         raise BenchmarkError("type a practice (entity name, TIN, or NPI) to add")
+    from .store import looks_like_ssn_text
+    if looks_like_ssn_text(subject):
+        # it would travel to the address bar, folder names, titles and PDFs
+        # (review 14 item 2.5) — a sole proprietor's tax ID is never stored
+        raise BenchmarkError(
+            "that number has the shape of a Social Security number (a sole "
+            "proprietor's tax ID) — for privacy the app never saves or shows one. "
+            "Add this practice by its name or one of its NPIs instead")
     if len(subject) > 200:
         raise BenchmarkError("that doesn't look like a practice name/TIN/NPI")
     # a name that matches no practice was saved and then reported as "no
@@ -71,9 +92,13 @@ def _save_client(store: Store, subject: str) -> None:
 
 
 def remove_client(store: Store, subject: str) -> list[str]:
+    # a client shown by its masked label (an SSN-pattern key saved before
+    # 0.8.0) is removed by that label
+    keys = [s for s in watchlist(store) if s == subject or subject_label(s) == subject] or [subject]
     with store.write_lock, store.connect() as con:
         _ensure_table(con)
-        con.execute("DELETE FROM client_watchlist WHERE subject = ?", [subject])
+        for k in keys:
+            con.execute("DELETE FROM client_watchlist WHERE subject = ?", [k])
     return watchlist(store)
 
 
@@ -105,7 +130,12 @@ def client_digest(store: Store, gaps_book: dict | None = None) -> dict:
     if held is not None and held[0] == key:
         return held[1]
     result = _build_digest(store, subjects, mstatus, gaps_book)
-    store._digest_cache = (key, result)
+    from .store import _run_cancelled
+    if not _run_cancelled():
+        # a digest built under a Stop says "stopped" for every client it did
+        # not reach — the next digest and the monthly packets showed it until
+        # the data changed (review 14 item 2.9)
+        store._digest_cache = (key, result)
     return result
 
 
@@ -132,7 +162,11 @@ def _build_digest(store: Store, subjects: list[str], mstatus: dict,
 
     rows = []
     for subject in subjects:
-        row: dict = {"subject": subject, "error": None}
+        row: dict = {"subject": subject_label(subject), "label": subject_label(subject),
+                     "error": None,
+                     # what the jump buttons may put in a box and the address
+                     # bar: never an SSN-pattern key (review 14 item 2.5)
+                     "jump": None if subject_label(subject) != subject else subject}
         try:
             tins = resolve_subject_tins(store, subject)
             with store.connect() as con:
@@ -145,7 +179,7 @@ def _build_digest(store: Store, subjects: list[str], mstatus: dict,
                 my_payers = {r[0] for r in con.execute(
                     "SELECT DISTINCT payer FROM rates_by_tin WHERE is_latest AND tin_value IN "
                     "(SELECT unnest(?::VARCHAR[]))", [tins]).fetchall()}
-            row["display_name"] = display or subject
+            row["display_name"] = display or subject_label(subject)
             if not npis and not display:
                 row["error"] = "no longer matches any practice in the store"
                 rows.append(row)

@@ -1110,8 +1110,13 @@ def _read_identity(path: Path, cfg: MrfxConfig | None = None) -> dict:
         # (_finish_ok's rule): such a commit carries no read identity
         if st is not None and (now.st_size, now.st_mtime_ns) == st:
             seen = _IDENT_SEEN.get((str(path), st[0], st[1])) or {}
+            from .fetch import DOWNLOAD_IDENTITY
+            dl = DOWNLOAD_IDENTITY.get(str(path)) or {}      # a peek: _finish_ok pops it
+            # the content sha too: every claim path consults this when the
+            # identity row is missing (review 14 item 2.11)
             out["read_identity"] = json.dumps({"size": st[0], "mtime_ns": st[1],
-                                               "sha": seen.get("sha")})
+                                               "sha": seen.get("sha") or dl.get("sha"),
+                                               "csha": seen.get("csha") or dl.get("csha")})
         if cfg is not None:
             out["code_set"] = code_set_key(cfg)
     except Exception:  # noqa: BLE001 — bookkeeping never fails the commit
@@ -1146,6 +1151,9 @@ def _commit_done(store: Store, name: str, **fields) -> None:
 # pid-suffixed temp path AND gives forget a way to exclude live parses.
 _CLAIMS_LOCK = threading.Lock()
 _ACTIVE_INGESTS: set[str] = set()
+
+
+CLAIM_LOST = "already being ingested by another worker"
 
 
 def _claim_ingest(name: str) -> bool:
@@ -1275,7 +1283,7 @@ def ingest_file(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight | None 
         # part. Watcher + upload background scan + confirm double-click +
         # requeue_skipped can all collide here — one wins, the rest bow out.
         log.info("%s: already being ingested by another worker — skipping", name)
-        return {"status": "skipped", "error": "already being ingested by another worker"}
+        return {"status": "skipped", "error": CLAIM_LOST}
     claim: dict = {}
     result = None
     # review 13 item 5.2.7: the payer's provider lists as of the START of this
@@ -1292,10 +1300,11 @@ def ingest_file(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight | None 
             # the files row (done, with its sha) is the record from here on
             store.release_inbox_claim(sha, name)
             if not result or result.get("status") != "done":
-                # link copies of these bytes deferred to this load: it did not
-                # load, so they get their promised automatic retry
+                # link copies of these bytes (or of this CONTENT) deferred to
+                # this load: it did not load, so they get their promised
+                # automatic retry
                 try:
-                    store.revive_skipped_duplicates(sha, -1)
+                    store.revive_skipped_duplicates(sha, -1, twin_name=name)
                 except Exception:  # noqa: BLE001 — the next scan/retry covers it
                     log.debug("duplicate revival skipped", exc_info=True)
         _release_ingest(name)
@@ -1351,7 +1360,16 @@ def _reread_if_refs_landed(cfg: MrfxConfig, store: Store, path: Path, before: di
         for src in (path, cfg.processed_dir / name, cfg.inbox_dir / name,
                     cfg.downloads_dir / name):
             if src.exists():
-                return ingest_file(cfg, store, src, rebuild_rollups=rebuild_rollups)
+                again = ingest_file(cfg, store, src, rebuild_rollups=rebuild_rollups)
+                if (again or {}).get("error") == CLAIM_LOST:
+                    # review 14 item 2.3 (a race round 13's 5.2.7 introduced):
+                    # the list's own re-read pass (requeue_skipped) is reading
+                    # this file right now — it IS the re-read; this file's done
+                    # load stands (the link row ended 'failed' 1 run in 30)
+                    log.info("%s: already being read again with the new list — "
+                             "that read takes it", name)
+                    return None
+                return again
         requeue_skipped(cfg, store, payer, only={name})     # no copy: its link again
     except Exception:  # noqa: BLE001 — housekeeping, never fails the done file
         log.debug("provider-list re-read check skipped for %s", name, exc_info=True)
@@ -1415,7 +1433,7 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
             return {"status": "quarantined", "error": msg}
 
         if claim is not None:
-            twin = _content_claim(cfg, store, path, name, claim)
+            twin = _content_claim(cfg, store, path, name, claim, month=_claim_month(pf, name))
             if twin:
                 return _record_duplicate(cfg, store, path, name, pf, twin)
 
@@ -1740,6 +1758,15 @@ def requeue_skipped(cfg: MrfxConfig, store: Store, payer: str,
                    (month and str(fmonth or "")[:7] == str(month)[:7])
             if not same:
                 continue
+        if ingest_in_progress(fname):
+            # being read right now (its first read, or its own re-read): that
+            # read compares the provider-list counter at its end and reads
+            # again with the list — ONE place decides the re-read (review 14
+            # item 2.3: two re-reads of one rate file collided)
+            log.info("%s is being read right now — its own read picks up %s's provider "
+                     "list", fname, payer)
+            requeued.append(fname)
+            continue
         for base in (cfg.processed_dir, cfg.inbox_dir, cfg.downloads_dir):
             src = base / fname
             if src.exists():
@@ -1850,8 +1877,22 @@ def _big_local_twin(cfg: MrfxConfig, store: Store, path: Path, name: str) -> str
     return None
 
 
+def _claim_month(pf, name: str) -> str | None:
+    """The month this file's rows will carry (parser.file_month_for: the
+    header's, else the name's, else this month) — two copies of one document
+    are twins only within one month (review 14 Group 3). Never raises."""
+    try:
+        import datetime as _dt
+
+        from .parser import file_month_for
+        return file_month_for(getattr(pf, "last_updated_on", None), name,
+                              _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m"))[0]
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _content_claim(cfg: MrfxConfig, store: Store, path: Path, name: str,
-                   claim: dict) -> str | None:
+                   claim: dict, month: str | None = None) -> str | None:
     """Review 11 item 1.1: the inbox had no content check at all — the same
     bytes under a second name (the browser's "file (1).json.gz", a copy, or
     the file a link already loaded) were loaded again and every raw count
@@ -1882,7 +1923,7 @@ def _content_claim(cfg: MrfxConfig, store: Store, path: Path, name: str,
     sha, csha = ident["sha"], ident.get("csha")
     told = False
     while True:
-        got = store.claim_inbox_content(sha, name, csha)
+        got = store.claim_inbox_content(sha, name, csha, month)
         if got is None:
             claim["sha"] = sha
             claim["csha"] = csha
@@ -2047,11 +2088,18 @@ def same_name_verdict(cfg: MrfxConfig, store: Store, path: Path, name: str,
     return "new", sha
 
 
-def backfill_identities(cfg: MrfxConfig, store: Store, limit: int = 500) -> int:
+def backfill_identities(cfg: MrfxConfig, store: Store, limit: int = 500, stop=None) -> int:
     """Files loaded before identities were kept (audit 8) whose copy is still
     in data/processed: name them from their bytes now, so a later drop under
-    the name is compared by content, not guessed (review 13 item 5.2.6).
-    Best-effort, background, one file at a time; returns how many."""
+    the name is compared by content, not guessed (review 13 item 5.2.6) —
+    and then every file loaded before 0.7.7 by its CONTENT too (review 14
+    item 2.2, `backfill_content_identities`). Best-effort, background, one
+    file at a time; returns how many were named."""
+    n = _backfill_raw_identities(cfg, store, limit)
+    return n + backfill_content_identities(cfg, store, stop)
+
+
+def _backfill_raw_identities(cfg: MrfxConfig, store: Store, limit: int = 500) -> int:
     n = 0
     try:
         with store.connect() as con:
@@ -2078,6 +2126,87 @@ def backfill_identities(cfg: MrfxConfig, store: Store, limit: int = 500) -> int:
     if n:
         log.info("named %d file(s) loaded before identities were kept, from their copies "
                  "in data/processed", n)
+    return n
+
+
+# the Files-tab line of the content backfill (review 14 item 2.2)
+CONTENT_BACKFILL: dict = {"running": False, "done": 0, "total": 0, "no_copy": 0,
+                          "started": None}
+
+
+def backfill_content_identities(cfg: MrfxConfig, store: Store, stop=None) -> int:
+    """Review 14 item 2.2 (P0): every file loaded before 0.7.7 has its raw
+    sha and NO content sha, so round 13's "the same document compressed
+    differently" check protected none of them — a re-encoded copy of an old
+    file loaded twice. Name each of them by content now, from its kept copy
+    (data/processed, else the kept download), ONE file at a time in the
+    background: the copy is read once (raw sha + content sha in the same
+    pass), and the content sha is recorded only when the raw sha equals the
+    one recorded at load (the copy really is what was loaded). Resumable: a
+    restart continues with the files still unnamed. A file with no copy is
+    listed (meta `content_backfill_no_copy`) so the Files tab can say so —
+    its re-encoded twin cannot be recognised. Returns how many were named."""
+    n = 0
+    try:
+        with store.connect() as con:
+            rows = con.execute(
+                "SELECT f.filename, c.full_sha, c.size FROM files f JOIN content_fingerprints c "
+                "USING (filename) WHERE f.status = 'done' AND c.full_sha IS NOT NULL "
+                "AND c.content_sha IS NULL ORDER BY f.filename").fetchall()
+            raw = store._meta_get(con, "content_backfill_no_copy")
+        no_copy = set(json.loads(raw)) if raw else set()
+    except Exception:  # noqa: BLE001
+        return 0
+    todo = [r for r in rows if r[0] not in no_copy]
+    CONTENT_BACKFILL.update(running=bool(todo), done=0, total=len(todo),
+                            no_copy=len(no_copy & {r[0] for r in rows}),
+                            started=time.time())
+    if not todo:
+        CONTENT_BACKFILL["running"] = False
+        return 0
+    log.info("naming %d older file(s) by content (loaded before 0.7.7), one at a time "
+             "in the background", len(todo))
+    newly_missing = []
+    try:
+        for name, full_sha, size in todo:
+            if stop is not None and stop.is_set():
+                break
+            cands = [cfg.processed_dir / name, cfg.downloads_dir / name]
+            p = next((c for c in cands if c.exists() and (not size or c.stat().st_size == size)),
+                     None)
+            if p is None:
+                newly_missing.append(name)
+                CONTENT_BACKFILL["no_copy"] += 1
+                CONTENT_BACKFILL["done"] += 1
+                continue
+            try:
+                ident = _identity_of(p, cfg.early_dedup_mb, keep=False)
+                if ident.get("sha") == full_sha and ident.get("csha"):
+                    with store.write_lock, store.connect() as con:
+                        con.execute("UPDATE content_fingerprints SET content_sha = ?, "
+                                    "content_size = ? WHERE filename = ? AND full_sha = ? "
+                                    "AND content_sha IS NULL",
+                                    [ident["csha"], ident.get("csize"), name, full_sha])
+                    n += 1
+                else:
+                    newly_missing.append(name)      # the copy is not what was loaded
+                    CONTENT_BACKFILL["no_copy"] += 1
+            except Exception:  # noqa: BLE001 — the next start tries again
+                log.debug("content backfill skipped %s", name, exc_info=True)
+            CONTENT_BACKFILL["done"] += 1
+    finally:
+        if newly_missing:
+            try:
+                with store.write_lock, store.connect() as con:
+                    con.execute("INSERT OR REPLACE INTO meta VALUES "
+                                "('content_backfill_no_copy', ?)",
+                                [json.dumps(sorted(no_copy | set(newly_missing)))])
+            except Exception:  # noqa: BLE001
+                pass
+        CONTENT_BACKFILL["running"] = False
+    took = time.time() - (CONTENT_BACKFILL.get("started") or time.time())
+    log.info("named %d older file(s) by content in %.0f s (%d had no kept copy)",
+             n, took, len(newly_missing))
     return n
 
 

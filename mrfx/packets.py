@@ -40,6 +40,18 @@ from .rounding import half_up
 log = logging.getLogger(__name__)
 
 
+def _write_html(path: Path, text: str, encoding: str = "utf-8") -> None:
+    """Every packet document is written through here: an SSN-pattern tax ID
+    never reaches a saved page or the PDF printed from it (review 14 2.5)."""
+    from .store import mask_ssn_text
+    path.write_text(mask_ssn_text(text), encoding=encoding)
+
+
+def _label(subject: str) -> str:
+    from .clients import subject_label
+    return subject_label(subject)
+
+
 def _safe(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_")[:60] or "practice"
 
@@ -85,7 +97,7 @@ def build_client_packet(cfg: MrfxConfig, store: Store, subject: str,
     """One client's packet. Returns what was written and what was skipped.
     `digest` is the book's client digest when the caller already built it
     (build_all_packets does, once for the whole book)."""
-    from .clients import client_digest, subject_display_name  # avoids a cycle
+    from .clients import client_digest, subject_display_name, subject_label  # avoids a cycle
 
     market = dict(market or {})
     # A packet is a monthly deliverable, so it says which vintage it describes.
@@ -117,12 +129,12 @@ def build_client_packet(cfg: MrfxConfig, store: Store, subject: str,
             market["state"] = scoped_to
     written: list[str] = []
     skipped: list[str] = []
-    display = subject
+    display = subject_label(subject)
     try:
         with store.connect() as con:
             from .benchmark import mapped_entity_name
             display = subject_display_name(con, resolve_subject_tins(store, subject),
-                                           mapped_entity_name(store, subject)) or subject
+                                           mapped_entity_name(store, subject)) or display
     except Exception:  # noqa: BLE001 — a name is cosmetic; the packet still builds
         pass
 
@@ -132,10 +144,11 @@ def build_client_packet(cfg: MrfxConfig, store: Store, subject: str,
         except BenchmarkError as e:      # a real, expected refusal
             skipped.append(f"{section}: {_reason(e)}")
         except Exception as e:           # noqa: BLE001 — never lose the packet
-            log.warning("packet %s / %s failed: %s", subject, section, e)
+            log.warning("packet %s / %s failed: %s", subject_label(subject), section, e)
             skipped.append(f"{section}: could not be built ({_reason(e)})")
 
-    pdir = Path(out_dir) / _safe(subject)
+    # never an SSN-pattern key in a folder name, a title or a PDF (review 14 2.5)
+    pdir = Path(out_dir) / _safe(subject_label(subject))
     pdir.mkdir(parents=True, exist_ok=True)
 
     # 1. rate card — the anchor document
@@ -146,7 +159,7 @@ def build_client_packet(cfg: MrfxConfig, store: Store, subject: str,
         require_rate_card_content(fs)
         sc = payer_scorecard(fs)
         state["fs"], state["sc"] = fs, sc
-        (pdir / "1_rate_card.html").write_text(
+        _write_html(pdir / "1_rate_card.html", 
             render_rate_card(cfg, store, fs, sc), encoding="utf-8")
         written.append("1_rate_card.html")
     attempt("Rate card", _rate_card)
@@ -161,7 +174,7 @@ def build_client_packet(cfg: MrfxConfig, store: Store, subject: str,
         bench = compute_benchmark(store, subject, market)
         if not bench.get("rows"):
             raise BenchmarkError("no benchmarkable codes this month")
-        (pdir / "2_market_position.html").write_text(
+        _write_html(pdir / "2_market_position.html", 
             render_pitch_report(cfg, store, bench), encoding="utf-8")
         written.append("2_market_position.html")
     attempt("Market position", _pitch)
@@ -170,12 +183,12 @@ def build_client_packet(cfg: MrfxConfig, store: Store, subject: str,
     #    the Clients tab renders (so the packet and the screen agree)
     def _changes():
         dig = digest if digest is not None else client_digest(store)
-        row = next((c for c in dig["clients"] if c["subject"] == subject), None)
+        row = next((c for c in dig["clients"] if c["subject"] == subject_label(subject)), None)
         if row is None:
             raise BenchmarkError("this practice is not on the watchlist")
         if row.get("error"):
             raise BenchmarkError(row["error"])
-        (pdir / "3_this_month.html").write_text(
+        _write_html(pdir / "3_this_month.html", 
             _month_summary_html(cfg, display, row, dig, store, subject, market),
             encoding="utf-8")
         written.append("3_this_month.html")
@@ -194,7 +207,7 @@ def build_client_packet(cfg: MrfxConfig, store: Store, subject: str,
             f"<td class='num'>{x.get('n_peers', '')}</td>"
             f"<td class='num'>${x.get('peer_median', 0) or 0:,.2f}</td></tr>"
             for x in g["gaps"])
-        (pdir / "4_contract_gaps.html").write_text(_doc(
+        _write_html(pdir / "4_contract_gaps.html", _doc(
             cfg, f"Contract gaps — {display}",
             "<p class='meta'>Codes this practice's peers publish rates for, that it "
             "has no published rate on. Directional: absence in a machine-readable "
@@ -215,7 +228,7 @@ def build_client_packet(cfg: MrfxConfig, store: Store, subject: str,
         cmp = compare_to_baseline(store, subject, bl[0]["label"])
         if not cmp["rows"]:
             raise BenchmarkError("no codes in common with the baseline yet")
-        (pdir / "5_results_since_baseline.html").write_text(
+        _write_html(pdir / "5_results_since_baseline.html", 
             _wins_html(cfg, display, cmp), encoding="utf-8")
         written.append("5_results_since_baseline.html")
     attempt("Results since baseline", _wins)
@@ -260,7 +273,7 @@ def build_client_packet(cfg: MrfxConfig, store: Store, subject: str,
             f"<td>{html.escape(taxonomy_label(partners[x['npi']].get('taxonomy')))}</td>"
             f"<td>{html.escape(str(x.get('phone') or ''))}</td></tr>"
             for x in sorted(gone, key=lambda r: r["deactivated"], reverse=True))
-        (pdir / "6_closed_referral_sources.html").write_text(_doc(
+        _write_html(pdir / "6_closed_referral_sources.html", _doc(
             cfg, f"Referral sources that closed — {display}",
             "<p class='meta'>Practices that referred patients to this one whose NPI "
             "has since been DEACTIVATED in NPPES and not reactivated. A deactivated "
@@ -279,8 +292,8 @@ def build_client_packet(cfg: MrfxConfig, store: Store, subject: str,
     index = _index_html(cfg, display, subject, written, [s.split(":", 1)[0] for s in skipped],
                         market,
                         as_of, vintage)
-    (pdir / "index.html").write_text(index, encoding="utf-8")
-    return {"subject": subject, "display_name": display, "dir": str(pdir),
+    _write_html(pdir / "index.html", index, encoding="utf-8")
+    return {"subject": subject_label(subject), "display_name": display, "dir": str(pdir),
             "written": written, "skipped": skipped, "as_of": as_of,
             "vintage": [{"payer": p, "month": m} for p, m in vintage]}
 
@@ -333,13 +346,14 @@ def build_all_packets(cfg: MrfxConfig, store: Store, out_root: Path | str | None
         _progress.check_cancelled()        # a stop ends the run between clients
         prog.tick((i - 1) / len(subjects))
         if progress:
-            progress(f"building packet {i} of {len(subjects)}: {s}")
+            from .clients import subject_label
+            progress(f"building packet {i} of {len(subjects)}: {subject_label(s)}")
         with prog.group():
             packets.append(build_client_packet(cfg, store, s, mdir, market, digest=digest,
                                                gaps=book.get(s)))
         prog.tick(i / len(subjects))
     prog.stage("Writing the index")
-    (mdir / "index.html").write_text(
+    _write_html(mdir / "index.html", 
         _book_index_html(cfg, month, packets), encoding="utf-8")
     log.info("packets: %s client(s) written to %s", len(packets), mdir)
     return {"month": month, "dir": str(mdir), "packets": packets,
@@ -528,7 +542,7 @@ def _index_html(cfg: MrfxConfig, display: str, subject: str, written: list[str],
     return _doc(
         cfg, f"{display} — monthly packet",
         f"<p class='meta'>As of month: <b>{e(str(month or market.get('month')))}</b>."
-        f"{source} Practice: {e(subject)}.</p>"
+        f"{source} Practice: {e(_label(subject))}.</p>"
         f"<h2>Documents</h2><ul>{docs or '<li>(none)</li>'}</ul>"
         # section NAMES only: the technical reason (and any setup advice) is
         # the consultant's, in the book index — not the client's folder

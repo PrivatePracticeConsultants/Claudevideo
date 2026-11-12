@@ -395,6 +395,32 @@ def mask_tin(tin: str | None) -> str | None:
     return "MASKED-SSN" if looks_like_ssn(tin) else tin
 
 
+def looks_like_ssn_text(text: str | None) -> bool:
+    """A typed subject that is an SSN-pattern tax ID (with or without the
+    dashes / spaces people type)."""
+    t = re.sub(r"[\s-]", "", str(text or ""))
+    return looks_like_ssn(t)
+
+
+# a 9-digit run (or NNN-NN-NNNN) standing alone — never inside a word, a
+# number or a base64 data URI (the brand logo)
+_SSN_RUN = re.compile(r"(?<![\w+/=.,-])(\d{3}-\d{2}-\d{4}|\d{9})(?![\w+/=]|[.,]\d)")
+
+
+def mask_ssn_text(text: str | None) -> str | None:
+    """Invariant 4 at the last step of a document: every SSN-pattern tax ID
+    in `text` (a report's HTML before it is sent, saved or printed to PDF, a
+    folder name, a log line) becomes MASKED-SSN. An SSN prefix is never a
+    valid EIN prefix, so a real EIN is never touched (review 14 item 2.5)."""
+    if not text:
+        return text
+
+    def sub(m):
+        d = m.group(1).replace("-", "")
+        return "MASKED-SSN" if looks_like_ssn(d) else m.group(1)
+    return _SSN_RUN.sub(sub, text)
+
+
 def defuse_csv(v):
     """Excel/Sheets execute a cell starting with = + - @ (or tab/CR) as a
     formula. Org names, payer names, and descriptions come from third-party
@@ -611,6 +637,12 @@ def _needs_full_set(token: str | None) -> bool:
 
 def _needs_full_token() -> str:
     return "1:" + os.urandom(6).hex()
+
+
+# a loaded twin counts only in the candidate's own month (review 14 Group 3,
+# decided): the same document under a name that gives ANOTHER month is that
+# month's publication. Params: (month, month); NULL on either side matches.
+_SAME_MONTH = "(? IS NULL OR f.file_month IS NULL OR f.file_month = ?)"
 
 
 def _directory_query(src: str = "rates") -> str:
@@ -1071,6 +1103,10 @@ class Store:
         # CONTENT sha (inflated) -> name of a file being loaded right now
         # (review 13 item 5.2.1), beside the raw-byte claims above
         self._content_claims: dict[str, str] = {}
+        # content sha -> the url_queue id that holds the claim (a LINK's); an
+        # inbox file's claim maps to None. A claim whose link is not loading
+        # in THIS process any more is no owner (review 14 item 2.1).
+        self._content_claim_owner: dict[str, int | None] = {}
         # payer -> how many provider-reference files finished in THIS process
         # (review 13 item 5.2.7): a rate file that started before its payer's
         # list landed compares it at its end and is read again when it moved
@@ -1364,7 +1400,7 @@ class Store:
                          "to restore them", n])
         if con.execute("SELECT count(*) FROM information_schema.tables "
                        "WHERE table_name = 'rates_by_tin_tbl'").fetchone()[0]:
-            con.execute("INSERT OR REPLACE INTO meta VALUES ('rollup_needs_full', '1')")
+            con.execute("INSERT OR REPLACE INTO meta VALUES ('rollup_needs_full', ?)", [_needs_full_token()])
 
     def _sweep_stale_spill(self) -> None:
         """Best-effort removal of dead DuckDB spill files in our spill dir.
@@ -1448,7 +1484,7 @@ class Store:
                         "have been rebuilt by an older app version) — scheduling "
                         "one full refresh in the background")
                     con.execute(
-                        "INSERT OR REPLACE INTO meta VALUES ('rollup_needs_full', '1')")
+                        "INSERT OR REPLACE INTO meta VALUES ('rollup_needs_full', ?)", [_needs_full_token()])
         except Exception as e:  # noqa: BLE001
             import logging as _logging
             _logging.getLogger(__name__).warning(
@@ -3057,6 +3093,10 @@ class Store:
             if terminal and hit:
                 # its in-flight fingerprint has done its job (audit 8 F10)
                 con.execute("DELETE FROM inflight_fingerprints WHERE url_id = ?", [url_id])
+            if hit and fields.get("status") not in (None, "ingesting", "expanding"):
+                # no longer loading in this process: it owns no claim any more
+                # (review 14 item 2.1)
+                self._live_url_ingests.discard(url_id)
         return bool(hit)
 
     def url_status(self, url_id: int) -> str | None:
@@ -3448,7 +3488,8 @@ class Store:
 
     def claim_content_ingest(self, content_sha: str, url_id: int,
                              kind: str | None, filename: str | None,
-                             content_sha2: str | None = None) -> tuple[str, str] | None:
+                             content_sha2: str | None = None,
+                             month: str | None = None) -> tuple[str, str] | None:
         """Atomically decide whether THIS row may ingest its content, done
         right before the ingest under the write lock so the twin-check and the
         status flip are ONE indivisible step.
@@ -3472,9 +3513,11 @@ class Store:
             if content_sha:
                 row = con.execute(
                     "SELECT url, status FROM url_queue WHERE content_sha = ? AND id != ? "
-                    "AND status IN ('done', 'ingesting') "
+                    "AND status IN ('done', 'ingesting') AND (status <> 'done' OR ? IS NULL "
+                    "OR NOT EXISTS (SELECT 1 FROM files f WHERE f.filename = url_queue.filename "
+                    "AND f.file_month IS NOT NULL AND f.file_month <> ?)) "
                     "ORDER BY (status = 'done') DESC, id LIMIT 1",
-                    [content_sha, url_id],
+                    [content_sha, url_id, month, month],
                 ).fetchone()
                 if row:
                     twin_url, twin_status = row
@@ -3498,7 +3541,7 @@ class Store:
                 # the same bytes loaded from the INBOX (or loading from it right
                 # now) are the same content too (review 11 item 1.1): one
                 # content claim for every path
-                other = self._loaded_or_claimed_locked(con, content_sha, filename)
+                other = self._loaded_or_claimed_locked(con, content_sha, filename, month)
                 if other:
                     twin_name, twin_status = other
                     msg = (f"identical to {twin_name}, which is already loaded — skipped "
@@ -3514,7 +3557,7 @@ class Store:
                     con.execute("DELETE FROM inflight_fingerprints WHERE url_id = ?", [url_id])
                     return (twin_name, twin_status)
             # the same CONTENT under other bytes (review 13 item 5.2.1)
-            same = self._same_content_locked(con, content_sha2, filename)
+            same = self._same_content_locked(con, content_sha2, filename, month)
             if same:
                 twin_name, twin_status = same
                 msg = (f"the same content as {twin_name}, which is already loaded — the "
@@ -3536,25 +3579,63 @@ class Store:
             self._live_url_ingests.add(url_id)
             if content_sha2:
                 self._content_claims[content_sha2] = filename or str(url_id)
+                self._content_claim_owner[content_sha2] = url_id
         return None
 
     def _same_content_locked(self, con, content_sha2: str | None,
-                             own_name: str | None) -> tuple[str, str] | None:
+                             own_name: str | None, month: str | None = None
+                             ) -> tuple[str, str] | None:
         """Under write_lock: a LOADED file (or one being loaded now) whose
-        CONTENT — not its bytes — equals `content_sha2` (review 13 item 5.2.1)."""
+        CONTENT — not its bytes — equals `content_sha2` (review 13 item 5.2.1)
+        and whose month is `month` (None: any). The same document published
+        for another month is that month's file, not a copy (review 14,
+        decided: the month a file name gives was silently dropped)."""
         if not content_sha2:
             return None
         row = con.execute(
             "SELECT c.filename FROM content_fingerprints c JOIN files f "
             "ON f.filename = c.filename WHERE c.content_sha = ? AND f.status = 'done' "
-            "AND c.filename IS DISTINCT FROM ? ORDER BY c.filename LIMIT 1",
-            [content_sha2, own_name]).fetchone()
+            "AND c.filename IS DISTINCT FROM ? AND " + _SAME_MONTH +
+            " ORDER BY c.filename LIMIT 1",
+            [content_sha2, own_name, month, month]).fetchone()
         if row:
             return (row[0], "done")
+        # a kill between the 'done' commit and its identity row: the commit
+        # carried what was read (review 14 item 2.11 — every claim path reads it)
+        row = self._read_identity_twin(con, "csha", content_sha2, own_name, month)
+        if row:
+            return (row, "done")
         claimant = self._content_claims.get(content_sha2)
         if claimant and claimant != own_name:
+            uid = self._content_claim_owner.get(content_sha2)
+            if uid is not None and uid not in self._live_url_ingests:
+                # its link stopped loading without releasing (any exit path
+                # the release missed): no owner — never wait on it
+                self._content_claims.pop(content_sha2, None)
+                self._content_claim_owner.pop(content_sha2, None)
+                return None
             return (claimant, "ingesting")
         return None
+
+    def _read_identity_twin(self, con, key: str, value: str | None,
+                            own_name: str | None, month: str | None = None) -> str | None:
+        """A done file with no identity row whose 'done' commit recorded
+        `key` ('sha' or 'csha') = value in files.read_identity (review 14
+        item 2.11). Never raises."""
+        if not value:
+            return None
+        try:
+            row = con.execute(
+                "SELECT f.filename FROM files f LEFT JOIN content_fingerprints c "
+                "USING (filename) WHERE f.status = 'done' AND f.read_identity IS NOT NULL "
+                "AND (c.filename IS NULL OR (c.full_sha IS NULL AND c.content_sha IS NULL)) "
+                f"AND json_extract_string(f.read_identity, '$.{key}') = ? "
+                "AND f.filename IS DISTINCT FROM ? AND " + _SAME_MONTH +
+                " ORDER BY f.filename LIMIT 1",
+                [value, own_name, month, month]).fetchone()
+        except duckdb.Error:
+            return None
+        return row[0] if row else None
 
     def release_content_claim(self, content_sha2: str | None, name: str | None) -> None:
         if not content_sha2:
@@ -3562,26 +3643,34 @@ class Store:
         with self.write_lock:
             if self._content_claims.get(content_sha2) == name:
                 del self._content_claims[content_sha2]
+                self._content_claim_owner.pop(content_sha2, None)
 
     def _loaded_or_claimed_locked(self, con, content_sha: str,
-                                  own_name: str | None) -> tuple[str, str] | None:
+                                  own_name: str | None, month: str | None = None
+                                  ) -> tuple[str, str] | None:
         """Under write_lock: (filename, 'done') of a LOADED file with these
-        bytes under another name, else (filename, 'ingesting') of an inbox
-        file with these bytes being loaded right now, else None."""
+        bytes under another name (of the same month — see
+        _same_content_locked), else (filename, 'ingesting') of an inbox file
+        with these bytes being loaded right now, else None."""
         row = con.execute(
             "SELECT c.filename FROM content_fingerprints c JOIN files f "
             "ON f.filename = c.filename WHERE c.full_sha = ? AND f.status = 'done' "
-            "AND c.filename IS DISTINCT FROM ? ORDER BY c.filename LIMIT 1",
-            [content_sha, own_name]).fetchone()
+            "AND c.filename IS DISTINCT FROM ? AND " + _SAME_MONTH +
+            " ORDER BY c.filename LIMIT 1",
+            [content_sha, own_name, month, month]).fetchone()
         if row:
             return (row[0], "done")
+        row = self._read_identity_twin(con, "sha", content_sha, own_name, month)
+        if row:
+            return (row, "done")
         claimant = self._inbox_claims.get(content_sha)
         if claimant and claimant != own_name:
             return (claimant, "ingesting")
         return None
 
     def claim_inbox_content(self, content_sha: str, filename: str,
-                            content_sha2: str | None = None) -> tuple[str, str] | None:
+                            content_sha2: str | None = None,
+                            month: str | None = None) -> tuple[str, str] | None:
         """The inbox twin of claim_content_ingest (review 11 item 1.1): may
         `filename` (no queue row — dropped in the inbox, uploaded, chosen on
         the Files tab) load these bytes? Under the SAME write_lock as the link
@@ -3596,23 +3685,27 @@ class Store:
             for uid, nm, st in con.execute(
                     "SELECT id, coalesce(filename, url), status FROM url_queue "
                     "WHERE content_sha = ? AND status IN ('done', 'ingesting') "
-                    "AND filename IS DISTINCT FROM ? "
-                    "ORDER BY (status = 'done') DESC, id", [content_sha, filename]).fetchall():
+                    "AND filename IS DISTINCT FROM ? AND (status <> 'done' OR ? IS NULL "
+                    "OR NOT EXISTS (SELECT 1 FROM files f WHERE f.filename = url_queue.filename "
+                    "AND f.file_month IS NOT NULL AND f.file_month <> ?)) "
+                    "ORDER BY (status = 'done') DESC, id",
+                    [content_sha, filename, month, month]).fetchall():
                 # an 'ingesting' row no thread of THIS process holds is an
                 # orphan of a killed run: nothing is loading it, so it is no
                 # owner (review 12 item 1.3)
                 if st == "done" or uid in self._live_url_ingests:
                     # the loaded file's name (what the Files tab lists), else its link
                     return (nm.split("?", 1)[0], st)
-            other = self._loaded_or_claimed_locked(con, content_sha, filename)
+            other = self._loaded_or_claimed_locked(con, content_sha, filename, month)
             if other:
                 return other
-            same = self._same_content_locked(con, content_sha2, filename)
+            same = self._same_content_locked(con, content_sha2, filename, month)
             if same:
                 return same
             self._inbox_claims[content_sha] = filename
             if content_sha2:
                 self._content_claims[content_sha2] = filename
+                self._content_claim_owner[content_sha2] = None
         return None
 
     def release_inbox_claim(self, content_sha: str | None, filename: str) -> None:
@@ -3622,30 +3715,35 @@ class Store:
             if self._inbox_claims.get(content_sha) == filename:
                 del self._inbox_claims[content_sha]
 
-    def revive_skipped_duplicates(self, content_sha: str, failed_id: int) -> int:
+    def revive_skipped_duplicates(self, content_sha: str, failed_id: int,
+                                  twin_name: str | None = None) -> int:
         """The in-flight twin this sha's duplicates deferred to has FAILED:
         re-queue them. Their downloads were kept on disk, so they ingest
         without re-downloading (expired signed URLs don't matter).
 
+        `twin_name`: also the rows that deferred to that file's CONTENT
+        (the same document under other bytes — review 14 item 2.1: they
+        match by `duplicate_of`, never by the raw sha, and were never revived)
+        while it was loading ("will retry automatically"), not rows skipped as
+        copies of a loaded file of that name.
+
         Only kind='duplicate' rows qualify — those are the ones the DEDUP
         deferred. Rows the USER skipped or forgot share the sha but must
         never be resurrected behind their back."""
-        if not content_sha:
+        if not content_sha and not twin_name:
             return 0
+        where = ("status = 'skipped' AND kind = 'duplicate' AND id != ? AND ("
+                 "(? <> '' AND content_sha = ?) OR (? IS NOT NULL AND duplicate_of = ? "
+                 "AND error LIKE '%will retry automatically%'))")
+        args = [failed_id, content_sha or "", content_sha or "", twin_name, twin_name]
         with self.write_lock, self.connect() as con:
-            n = con.execute(
-                "SELECT count(*) FROM url_queue WHERE content_sha = ? "
-                "AND status = 'skipped' AND kind = 'duplicate' AND id != ?",
-                [content_sha, failed_id],
-            ).fetchone()[0]
+            n = con.execute(f"SELECT count(*) FROM url_queue WHERE {where}", args).fetchone()[0]
             if n:
                 con.execute(
                     "UPDATE url_queue SET status = 'queued', "
                     "error = 'the identical link this deferred to failed — "
                     f"retrying (from the kept download when still present)', {REQUEUE_RESET} "
-                    "WHERE content_sha = ? AND status = 'skipped' "
-                    "AND kind = 'duplicate' AND id != ?",
-                    [content_sha, failed_id])
+                    f"WHERE {where}", args)
         return n
 
     def skipped_duplicate_urls(self, content_sha: str, done_id: int) -> list[str]:
@@ -3925,6 +4023,15 @@ class Store:
                 "UPDATE url_queue SET status = 'queued', force_size = true, error = NULL, "
                 f"{REQUEUE_RESET} WHERE id = ?", [url_id])
             return True
+
+    def known_dedup_keys(self, keys: list[str]) -> set:
+        """Which of these dedup keys already have a queue row."""
+        if not keys:
+            return set()
+        with self.connect() as con:
+            return {r[0] for r in con.execute(
+                "SELECT dedup_key FROM url_queue WHERE dedup_key IN "
+                "(SELECT unnest(?::VARCHAR[]))", [list(keys)]).fetchall()}
 
     def requeue_urls(self, urls: list[str]) -> int:
         """Back to 'queued' (from done/failed/skipped) for these exact URLs —
@@ -4241,7 +4348,7 @@ class Store:
                 return
             if scope is None:
                 con.execute(
-                    "INSERT OR REPLACE INTO meta VALUES ('rollup_needs_full', '1')")
+                    "INSERT OR REPLACE INTO meta VALUES ('rollup_needs_full', ?)", [_needs_full_token()])
                 return
             payers, tins = scope
             gen, cur = self._read_pending_payers(con)
@@ -4258,7 +4365,7 @@ class Store:
         except Exception:  # noqa: BLE001 — never block the removal itself
             try:
                 con.execute(
-                    "INSERT OR REPLACE INTO meta VALUES ('rollup_needs_full', '1')")
+                    "INSERT OR REPLACE INTO meta VALUES ('rollup_needs_full', ?)", [_needs_full_token()])
             except Exception:  # noqa: BLE001
                 logging.getLogger(__name__).warning(
                     "could not record removed-part payers — rollups may lag "
@@ -5148,7 +5255,11 @@ class Store:
             "SELECT filename FROM files WHERE status = 'done' "
             "AND rows_emitted > 0 AND finished_at::VARCHAR = ?", [cover_ts]).fetchall()]
         pend_gen, pending_snapshot = self._read_pending_payers(con)
-        needs_full_snapshot = self._meta_get(con, "rollup_needs_full") == "1"
+        # the TOKEN, not a bool: only the raise this build started with is
+        # cleared at its end (review 14 item 2.6)
+        needs_full_snapshot = self._meta_get(con, "rollup_needs_full")
+        if not _needs_full_set(needs_full_snapshot):
+            needs_full_snapshot = None
         dir_names_ts = con.execute(
             "SELECT coalesce(max(enriched_at)::VARCHAR, '') "
             "FROM npi_directory").fetchone()[0]
@@ -5260,8 +5371,10 @@ class Store:
                     "INSERT OR REPLACE INTO meta VALUES ('rollup_covered_names', ?)",
                     [json.dumps(sorted(cover_names))])
                 if needs_full_snapshot:
-                    # set before we started -> satisfied; set mid-build -> keep
-                    con.execute("DELETE FROM meta WHERE key = 'rollup_needs_full'")
+                    # set before we started -> satisfied; raised again mid-build
+                    # (a new token) -> kept
+                    con.execute("DELETE FROM meta WHERE key = 'rollup_needs_full' "
+                                "AND value = ?", [needs_full_snapshot])
             if "tin_directory_tbl" in selected:
                 con.execute(
                     "INSERT OR REPLACE INTO meta VALUES ('directory_names_through', ?)",
@@ -5359,7 +5472,11 @@ class Store:
             "SELECT filename FROM files WHERE status = 'done' "
             "AND rows_emitted > 0 AND finished_at::VARCHAR = ?", [cover_ts]).fetchall()]
         pend_gen, pending = self._read_pending_payers(con)
-        needs_full = self._meta_get(con, "rollup_needs_full") == "1"
+        # the token of the raise this plan answers (review 14 item 2.6): a
+        # needs-full raised WHILE the plan runs (an unscopable forget) has a
+        # new token and survives the plan's end
+        needs_full = self._meta_get(con, "rollup_needs_full")
+        needs_full = needs_full if _needs_full_set(needs_full) else None
         dir_names_ts = con.execute(
             "SELECT coalesce(max(enriched_at)::VARCHAR, '') FROM npi_directory").fetchone()[0]
         try:
@@ -5599,9 +5716,14 @@ class Store:
                                 [json.dumps(sorted(plan["cover_names"]))])
                     con.execute("INSERT OR REPLACE INTO meta VALUES ('spine_token', ?)",
                                 [os.urandom(8).hex()])
-                    if plan.get("needs_full"):
-                        # set before the plan was made -> satisfied; set since -> kept
-                        con.execute("DELETE FROM meta WHERE key = 'rollup_needs_full'")
+                    nf = plan.get("needs_full")
+                    if nf:
+                        # set before the plan was made -> satisfied; raised
+                        # since (another token) -> kept (review 14 item 2.6).
+                        # A plan made by 0.7.7 recorded True: it answers the
+                        # legacy '1' only.
+                        con.execute("DELETE FROM meta WHERE key = 'rollup_needs_full' "
+                                    "AND value = ?", ["1" if nf is True else str(nf)])
                 con.execute("INSERT OR REPLACE INTO meta VALUES ('directory_names_through', ?)",
                             [plan["dir_names_ts"]])
                 con.execute("INSERT OR REPLACE INTO meta VALUES ('directory_schema_version', ?)",
@@ -5756,6 +5878,11 @@ class Store:
             # held every other cached reader waiting (round 7 P2)
             return copy.deepcopy(held)
         value = compute()
+        if _run_cancelled():
+            # computed under a Stop: a fault-isolated section may have caught
+            # the stop and degraded ("stopped" per client, a missing
+            # position) — never kept for the next caller (review 14 item 2.9)
+            return value
         with self._gen_cache_lock:
             if self._gen_cache.get("_gen") == gen:
                 if len(self._gen_cache) > 512:
@@ -5781,6 +5908,8 @@ class Store:
         if got is not _MISSING:
             return copy.deepcopy(got)
         value = compute()
+        if _run_cancelled():
+            return value                     # never cache under a Stop (2.9)
         with self._gen_cache_lock:
             held = self._spine_cache
             if held.get("_gen") == gen:

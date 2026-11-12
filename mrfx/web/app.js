@@ -113,6 +113,7 @@ function jobHost(bar) {
   else (document.getElementById(`view-${bar.view}`) || document.querySelector("main") || document.body).prepend(host);
   return host;
 }
+const _btnRuns = new WeakMap();
 function mountJobbar(bar, token) {
   const host = jobHost(bar);
   const el = document.createElement("div");
@@ -123,8 +124,15 @@ function mountJobbar(bar, token) {
   const fill = el.querySelector(".progress-fill"), lab = el.querySelector(".progress-label");
   lab.title = "weighted by how long each step typically takes on a store this size; the bar moves as DuckDB reports its progress";
   const btn = bar.anchor ? (typeof bar.anchor === "string" ? document.querySelector(bar.anchor) : bar.anchor) : null;
-  const wasDisabled = btn ? btn.disabled : false;
-  if (btn) btn.disabled = true;
+  // runs are COUNTED per button (review 14 item 2.10): a second run started
+  // while the first was in flight (Enter twice) recorded "disabled" as the
+  // state to restore, and the button stayed dead until a reload
+  if (btn) {
+    const rec = _btnRuns.get(btn) || { n: 0, was: btn.disabled };
+    rec.n += 1;
+    _btnRuns.set(btn, rec);
+    btn.disabled = true;
+  }
   let pct = 0, ended = false;
   // a cached answer arrives in a blink: no flicker under 250 ms
   const showTimer = setTimeout(() => el.classList.add("on"), 250);
@@ -140,7 +148,13 @@ function mountJobbar(bar, token) {
     if (ended) return;
     ended = true;
     clearTimeout(showTimer);
-    if (btn) btn.disabled = wasDisabled;
+    if (btn) {
+      const rec = _btnRuns.get(btn);
+      if (rec) {
+        rec.n -= 1;
+        if (rec.n <= 0) { btn.disabled = rec.was; _btnRuns.delete(btn); }
+      } else btn.disabled = false;
+    }
     el.classList.add(cls);
     if (text) say(text);
     if (cls === "done") { fill.style.width = "100%"; el.classList.add("on"); }
@@ -328,9 +342,15 @@ function parseHash(h) {
   new URLSearchParams(i < 0 ? "" : raw.slice(i + 1)).forEach((v, k) => { params[k] = v; });
   return { view, params };
 }
+// an SSN-pattern tax ID never goes into the address bar (review 14 item 2.5):
+// the link is made to be bookmarked and sent
+const ssnShaped = (v) => {
+  const d = String(v ?? "").replace(/[\s-]/g, "");
+  return /^[0-9]{9}$/.test(d) && SSN_PREFIXES.has(d.slice(0, 2));
+};
 function hashFor(view, params) {
   const q = new URLSearchParams();
-  for (const [k, v] of Object.entries(params || {})) if (v) q.set(k, v);
+  for (const [k, v] of Object.entries(params || {})) if (v && !ssnShaped(v)) q.set(k, v);
   const qs = q.toString();
   return "#" + view + (qs ? "?" + qs : "");
 }
@@ -3136,7 +3156,7 @@ async function loadClientDigest() {
     else if (!c.changes.n) chg = `<span class="muted" title="${esc(c.changes.span || "")}">no moves</span>`;
     else {
       const b = c.changes.biggest_pct;
-      chg = `<a href="#" data-cl-changes="${esc(c.subject)}"><b>${fmtInt(c.changes.n)}</b> line${c.changes.n === 1 ? "" : "s"} moved</a>
+      chg = `<a href="#" ${c.jump === null ? `data-no-jump="1" title="saved by a Social-Security-shaped tax ID — re-add this client by name to open its screens"` : `data-cl-changes="${esc(c.jump || c.subject)}"`}><b>${fmtInt(c.changes.n)}</b> line${c.changes.n === 1 ? "" : "s"} moved</a>
         <div class="sub">biggest: <span class="${b > 0 ? "peer-up" : "peer-down"}">${b > 0 ? "+" : ""}${b}%</span>
         on ${esc(c.changes.biggest_code || "")} (${esc(c.changes.biggest_payer || "")}${
           c.changes.biggest_span ? `, ${esc(c.changes.biggest_span)}` : ""})</div>`;
@@ -3145,18 +3165,18 @@ async function loadClientDigest() {
     if (!c.gaps) gaps = `<span class="muted">–</span>`;
     else if (c.gaps.error) gaps = `<span class="muted">${esc(c.gaps.error)}</span>`;
     else if (!c.gaps.n) gaps = `<span class="muted">none</span>`;
-    else gaps = `<a href="#" data-cl-gaps="${esc(c.subject)}"><b>${fmtInt(c.gaps.n)}</b> code${c.gaps.n === 1 ? "" : "s"}</a>
+    else gaps = `<a href="#" ${c.jump === null ? `data-no-jump="1" title="saved by a Social-Security-shaped tax ID — re-add this client by name to open its screens"` : `data-cl-gaps="${esc(c.jump || c.subject)}"`}><b>${fmtInt(c.gaps.n)}</b> code${c.gaps.n === 1 ? "" : "s"}</a>
       <div class="sub">${c.gaps.top.map(esc).join(", ")}${c.gaps.n > 3 ? "…" : ""}</div>`;
     let med;
     if (!d.have_medicare) med = `<span class="muted" title="import the Medicare layers on the Medicare tab to light this up">no referral data</span>`;
     else if (!c.lost_referrers) med = `<span class="muted">–</span>`;
     else if (!c.lost_referrers.length) med = `<span class="ok-tag">all sources in good standing</span>`;
-    else med = `<a href="#" data-cl-med="${esc(c.subject)}"><span class="warn-text"><b>${c.lost_referrers.length}</b> source${c.lost_referrers.length === 1 ? "" : "s"} lost standing</span></a>
+    else med = `<a href="#" ${c.jump === null ? `data-no-jump="1" title="saved by a Social-Security-shaped tax ID — re-add this client by name to open its screens"` : `data-cl-med="${esc(c.jump || c.subject)}"`}><span class="warn-text"><b>${c.lost_referrers.length}</b> source${c.lost_referrers.length === 1 ? "" : "s"} lost standing</span></a>
       <div class="sub">${c.lost_referrers.slice(0, 3).map((l) =>
         `${esc(l.name || l.npi)} (${l.kind === "removed" ? "off roster" : "lost Part B"}, ${fmtInt(l.patients)} pts)`).join("; ")}</div>`;
     return `<tr><td>${name}</td><td>${chg}</td><td>${gaps}</td><td>${med}</td>
       <td style="white-space:nowrap">
-        <button class="btn" data-cl-rc="${esc(c.subject)}" title="rate card">Rates</button>
+        <button class="btn" ${c.jump === null ? `data-no-jump="1" title="saved by a Social-Security-shaped tax ID — re-add this client by name to open its screens"` : `data-cl-rc="${esc(c.jump || c.subject)}"`} title="rate card">Rates</button>
         <button class="btn" data-cl-remove="${esc(c.subject)}">remove</button>
       </td></tr>`;
   }).join("");
@@ -4869,7 +4889,10 @@ async function loadFilesNow() {
       (bk.on ? ` <button class="btn" id="files-backup-now" style="padding:2px 8px;font-size:12px">Back up now</button>` : "") +
       `</div>`
     : "";
-  stateEl.innerHTML = anLine + rrLine + ruLine + pmLine + bkLine + (d.total > d.files.length
+  // older files being named by content (review 14 item 2.2)
+  const cb = d.content_backfill;
+  const cbLine = cb && cb.sentence ? `<div class="muted">${esc(cb.sentence)}</div>` : "";
+  stateEl.innerHTML = anLine + rrLine + ruLine + pmLine + bkLine + cbLine + (d.total > d.files.length
     ? `<div class="muted">Showing the newest ${fmtInt(d.files.length)} of ${fmtInt(d.total)} files.
         <button class="btn" id="files-more" style="padding:2px 8px;font-size:12px">show ${fmtInt(Math.min(d.total, (state.filesLimit || 500) * 4))}</button></div>`
     : "");

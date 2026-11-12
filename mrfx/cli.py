@@ -254,7 +254,9 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
     # files loaded before identities were kept: named from their kept copies
     # (review 13 item 5.2.6), off the start path
     from .ingest import backfill_identities
-    threading.Thread(target=lambda: backfill_identities(cfg, store),
+    # ...and files loaded before 0.7.7 are named by CONTENT too, so a
+    # re-encoded copy of one is recognised (review 14 item 2.2)
+    threading.Thread(target=lambda: backfill_identities(cfg, store, stop=stop),
                      name="mrfx-identity-backfill", daemon=True).start()
     threading.Thread(
         target=_watcher_loop, args=(cfg, store, stop), name="mrfx-watcher", daemon=True

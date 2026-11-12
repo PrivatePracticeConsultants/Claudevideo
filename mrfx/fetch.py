@@ -2486,7 +2486,7 @@ def early_duplicate_check(cfg: MrfxConfig, store: Store, own_filename: str,
                     continue
                 if chb not in heads:
                     heads[chb] = _sha_range(part, 0, chb)
-                if heads[chb] == c["head_sha"]:
+                if heads[chb] == c["head_sha"] and _same_name_month(own_filename, c.get("filename")):
                     hits.append(c)
             if hits and mine["magic"] in _PROVABLE and not mine.get("tail_sha"):
                 tb = min(total, EARLY_DEDUP_TAIL)
@@ -2517,6 +2517,16 @@ def early_duplicate_check(cfg: MrfxConfig, store: Store, own_filename: str,
     return check
 
 
+def _same_name_month(a: str | None, b: str | None) -> bool:
+    """Could these two names be copies? Not when both carry a date and the
+    months differ: the bytes may be equal, but the month a file name gives is
+    the month its rows are filed under when the header has none (review 14
+    Group 3) — the download goes on and the content claim decides by month."""
+    from .parser import month_in
+    ma, mb = month_in(a or ""), month_in(b or "")
+    return not (ma and mb and ma != mb)
+
+
 def _local_duplicate_verdict(cfg: MrfxConfig, store: Store, url_id: int, dest: Path):
     """Before reconnecting a row whose .part already holds its beginning and
     whose fingerprint (end + samples) was fetched earlier: decide from local
@@ -2533,7 +2543,8 @@ def _local_duplicate_verdict(cfg: MrfxConfig, store: Store, url_id: int, dest: P
             return None
         hits = [c for c in store.fingerprint_candidates(own["size"], url_id, dest.name)
                 if int(c["head_bytes"] or 0) == int(own["head_bytes"])
-                and c["head_sha"] == own["head_sha"]]
+                and c["head_sha"] == own["head_sha"]
+                and _same_name_month(dest.name, c.get("filename"))]
         return _verdict(own, hits)
     except Exception:  # noqa: BLE001
         log.debug("local duplicate check skipped", exc_info=True)
@@ -3216,7 +3227,20 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
             unlink_with_retry(dest)
             unlink_with_retry(_meta_path(dest))  # its sidecar too (review 11 2.15)
             return False
-        added = _enqueue_children(store, child_urls, url_id, cfg, only_if_expanding=True)
+        # review 14 item 2.8 (decided): the MONTHLY RE-CHECK of a loaded index
+        # (monthly_recheck, on by default; the tick re-queues the index with
+        # revalidate=1) only PROBES the files already loaded. A file the index
+        # lists for the first time — next month's, usually tens of GB — is
+        # counted and named on the index row, never downloaded behind the
+        # user's back. Pasting the index again, or monthly_refresh: true,
+        # loads them (round 13's decision, which the code did not keep).
+        new_unloaded = 0
+        if int(rec.get("revalidate") or 0) == 1 and not getattr(cfg, "monthly_refresh", False):
+            known = store.known_dedup_keys([dedup_key(u) for u in child_urls])
+            new_unloaded = sum(1 for u in child_urls if dedup_key(u) not in known)
+            added = 0 if store.url_status(url_id) == "expanding" else None
+        else:
+            added = _enqueue_children(store, child_urls, url_id, cfg, only_if_expanding=True)
         if added is None:
             # the user pressed "Clear queue" while this index was being read:
             # its files are not queued and the row keeps the user's status
@@ -3291,6 +3315,13 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
             if excluded.get("drug-pricing"):
                 left.append(f"{excluded['drug-pricing']:,} drug-pricing (NDC) file(s)")
             notes = [cap_note(cfg.max_toc_files)] if truncated else []
+            if new_unloaded:
+                notes.append(
+                    f"checked {_utcnow_date()}: {new_unloaded:,} new file"
+                    f"{'s' if new_unloaded != 1 else ''} listed — not downloaded (the monthly "
+                    "check only asks about the files already loaded); paste this index "
+                    "again, or turn on monthly_refresh, to load "
+                    f"{'them' if new_unloaded != 1 else 'it'}")
             if left:
                 notes.append("left out by their names (no medical rates): " + " and ".join(left))
             store.update_url(url_id, status="done", kind="toc", child_count=len(child_urls),
@@ -3411,8 +3442,9 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
         csha, csize = content_digest(dest)
         if csha and str(dest) in DOWNLOAD_IDENTITY:
             DOWNLOAD_IDENTITY[str(dest)].update(csha=csha, csize=csize)
+    from .ingest import _claim_month
     twin2 = store.claim_content_ingest(content_sha, url_id, pf.file_type, dest.name,
-                                       content_sha2=csha)
+                                       content_sha2=csha, month=_claim_month(pf, dest.name))
     if twin2:
         twin2_url, twin2_status = twin2
         if twin2_status == "done":
@@ -3433,8 +3465,18 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
                               rebuild_rollups=rebuild_rollups)
     except Exception as e:  # noqa: BLE001 — belt and suspenders; ingest_file already isolates
         store.update_url(url_id, status="failed", kind=pf.file_type, error=f"ingest crashed: {e}")
-        _revive_twins(store, content_sha, url_id)
+        _revive_twins(store, content_sha, url_id, dest.name)
         return False
+    finally:
+        # review 14 item 2.1 (a round-13 regression): the content claim was
+        # released only by a SUCCESSFUL load (_finish_ok), so after a failed
+        # one the same document under another link was skipped for good and
+        # an inbox copy waited forever. Every exit releases it here.
+        if csha:
+            try:
+                store.release_content_claim(csha, dest.name)
+            except Exception:  # noqa: BLE001 — the owner check covers a miss
+                log.debug("content claim release failed", exc_info=True)
 
     status = result.get("status")
     if status == "done":
@@ -3475,16 +3517,17 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
                          error="file exceeds the confirm_over_gb safety limit — press "
                                "\"download anyway\" on this row, or raise confirm_over_gb "
                                "in config/mrfx.yaml")
-        _revive_twins(store, content_sha, url_id)
+        _revive_twins(store, content_sha, url_id, dest.name)
     else:
         store.update_url(url_id, status="failed", kind=pf.file_type,
                          error=result.get("error") or status)
-        _revive_twins(store, content_sha, url_id)
+        _revive_twins(store, content_sha, url_id, dest.name)
     return False
 
 
-def _revive_twins(store: Store, content_sha: str, failed_id: int) -> None:
-    n = store.revive_skipped_duplicates(content_sha, failed_id)
+def _revive_twins(store: Store, content_sha: str, failed_id: int,
+                  name: str | None = None) -> None:
+    n = store.revive_skipped_duplicates(content_sha, failed_id, twin_name=name)
     if n:
         log.info("re-queued %d duplicate link(s) that deferred to the failed row "
                  "(they resume from their kept downloads)", n)
@@ -3715,7 +3758,8 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                         # still ends this row: revive any twins that deferred to its
                         # content so the shared content isn't orphaned as skipped
                         # (matches the DownloadError path at fetch_url_record).
-                        _revive_twins(store, rec.get("content_sha") or "", rec["id"])
+                        _revive_twins(store, rec.get("content_sha") or "", rec["id"],
+                                      rec.get("filename"))
                     except Exception:  # noqa: BLE001 — correlated failure (disk full
                         # breaking both download AND the DB write): the row stays
                         # 'downloading' with no owner; say so instead of silently
@@ -3811,7 +3855,8 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                         store.update_url(rec["id"], status="failed", error="unexpected worker error")
                         # duplicates may have deferred to this row while it
                         # was 'ingesting' — free them to retry
-                        _revive_twins(store, rec.get("content_sha") or "", rec["id"])
+                        _revive_twins(store, rec.get("content_sha") or "", rec["id"],
+                                      rec.get("filename"))
                     except Exception:  # noqa: BLE001 — even the recovery write can
                         # hit a locked store; if it does, the row is unstuck by
                         # recover_stuck_urls on the next start — but this THREAD

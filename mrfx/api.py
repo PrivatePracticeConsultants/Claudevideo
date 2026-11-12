@@ -1693,6 +1693,10 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         """A printable report as its HTML page, or — `?format=pdf` — printed
         to PDF by the optional headless browser (review 13 Group 6.1). No
         browser is a 422 sentence: the HTML is still one click away."""
+        # invariant 4 at the last step: no SSN-pattern tax ID in a report's
+        # page, its title or the PDF printed from it (review 14 item 2.5)
+        from .store import mask_ssn_text
+        html = mask_ssn_text(html)
         if str(fmt or "").lower() != "pdf":
             return HTMLResponse(html, headers=headers or None)
         from fastapi.responses import Response
@@ -2685,7 +2689,31 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 # (review 13 item 5.2.4): the Files tab offers to read them again
                 "reread": _reread_summary(),
                 # automatic backups (review 13 Group 6.3): off, or the last one
-                "backup": _backup_line()}
+                "backup": _backup_line(),
+                # older files being named by content (review 14 item 2.2)
+                "content_backfill": _content_backfill_line()}
+
+    def _content_backfill_line() -> dict | None:
+        try:
+            from .ingest import CONTENT_BACKFILL as cb
+            if cb.get("running") and cb.get("total"):
+                pct = int(100 * cb["done"] / max(1, cb["total"]))
+                return {"running": True, "pct": pct, "done": cb["done"], "total": cb["total"],
+                        "sentence": f"Naming {cb['total']:,} older file"
+                                    f"{'s' if cb['total'] != 1 else ''} by content (so a copy "
+                                    f"of one in another format is recognised) — {pct} %"}
+            if cb.get("no_copy"):
+                k = int(cb["no_copy"])
+                return {"running": False, "no_copy": k,
+                        "sentence": f"{k:,} file{'s' if k != 1 else ''} loaded before 0.7.7 "
+                                    f"{'have' if k != 1 else 'has'} no kept copy, so a copy of "
+                                    f"{'one' if k != 1 else 'it'} saved in another format "
+                                    "(decompressed, or compressed differently) cannot be "
+                                    "recognised and would load twice — remove such a second "
+                                    "copy from the Files list if one appears."}
+        except Exception:  # noqa: BLE001 — a note never fails the poll
+            pass
+        return None
 
     def _backup_line() -> dict:
         try:
@@ -4817,9 +4845,11 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             if hit is not None:
                 return hit
             result = market_overview(store, state)
-            if len(_overview_cache) > 64:
-                _overview_cache.clear()
-            _overview_cache[key] = result
+            from .store import _run_cancelled
+            if not _run_cancelled():          # never cache under a Stop (review 14 2.9)
+                if len(_overview_cache) > 64:
+                    _overview_cache.clear()
+                _overview_cache[key] = result
             return result
         finally:
             _overview_lock.release()

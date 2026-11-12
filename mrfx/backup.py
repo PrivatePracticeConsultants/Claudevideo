@@ -83,18 +83,47 @@ def write_zip(dest: Path, entries: list[tuple[Path, str]], *, store_dir: str,
         manifest["counts"] = counts
     part = dest.with_name(dest.name + ".part")
     total = 0
-    with zipfile.ZipFile(part, "w", zipfile.ZIP_STORED, allowZip64=True) as z:
-        for i, (src, rel) in enumerate(entries):
-            _progress.check_cancelled()
-            z.write(src, f"store/{rel}")
-            size = src.stat().st_size
-            manifest["files"][rel] = {"sha256": _sha(src), "bytes": size}
-            total += size
-            if on_file:
-                on_file(i + 1, len(entries), rel, size)
-        z.writestr("manifest.json", json.dumps(manifest, indent=1))
-    os.replace(part, dest)
+    try:
+        with zipfile.ZipFile(part, "w", zipfile.ZIP_STORED, allowZip64=True) as z:
+            for i, (src, rel) in enumerate(entries):
+                _progress.check_cancelled()
+                z.write(src, f"store/{rel}")
+                size = src.stat().st_size
+                manifest["files"][rel] = {"sha256": _sha(src), "bytes": size}
+                total += size
+                if on_file:
+                    on_file(i + 1, len(entries), rel, size)
+            z.writestr("manifest.json", json.dumps(manifest, indent=1))
+        os.replace(part, dest)
+    except BaseException:
+        # a stopped or failed backup leaves no store-sized `.zip.part` on the
+        # backup drive (review 14 item 2.4, P2-2)
+        try:
+            part.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     return {"bytes": total, "files": len(entries), "manifest": manifest}
+
+
+def _parts_rows(z: zipfile.ZipFile, manifest: dict) -> int | None:
+    """Rate rows the zip's own parts hold (store/rates/*.parquet — the
+    `rates` view's glob), read from each part's footer without inflating
+    it (members are STORED, so the read seeks). None when unreadable."""
+    try:
+        import pyarrow.parquet as pq
+    except Exception:  # noqa: BLE001
+        return None
+    n = 0
+    for rel in manifest.get("files", {}):
+        if not re.fullmatch(r"rates/[^/]+\.parquet", rel):
+            continue
+        try:
+            with z.open(f"store/{rel}") as fh:
+                n += pq.ParquetFile(fh).metadata.num_rows
+        except Exception:  # noqa: BLE001 — the checksum pass reports damage
+            return None
+    return n
 
 
 def verify_zip(path: Path, out=None) -> tuple[bool, str]:
@@ -128,6 +157,22 @@ def verify_zip(path: Path, out=None) -> tuple[bool, str]:
         return False, (f"\n{bad} of {n} files FAILED the checksum — this backup is "
                        "damaged; take a fresh one.")
     rates = manifest.get("counts", {}).get("rates")
+    if isinstance(rates, int):
+        # the rows a restore WOULD hold, from the parts in the zip — not the
+        # number the manifest recorded (review 14 item 2.4: a part committed
+        # while the backup waited for the lock was in the database copy and
+        # its count, not in the zip; verify said OK and the restore lost it)
+        try:
+            with zipfile.ZipFile(path) as z:
+                held = _parts_rows(z, manifest)
+        except (zipfile.BadZipFile, OSError):
+            held = None
+        if held is not None and held != rates:
+            return False, (f"this backup is incomplete: its parts hold {held:,} rate rows "
+                           f"but its database recorded {rates:,} — take a fresh one.")
+        if held is not None:
+            return True, (f"backup OK: {n} files match their checksums; its parts hold the "
+                          f"{rates:,} rate rows its database recorded")
     return True, (f"backup OK: {n} files match their checksums"
                   + (f"; recorded {rates:,} rate rows" if isinstance(rates, int) else ""))
 
@@ -137,8 +182,12 @@ def _gb(n: float) -> str:
 
 
 def _record(store, rec: dict) -> None:
+    import contextvars
     try:
-        store.meta_set(META_KEY, json.dumps(rec))
+        # in a fresh context: after a Stop the run's own Progress refuses every
+        # new connection, and "stopped before it finished" was never recorded
+        # (review 14 item 2.4, P2-2)
+        contextvars.Context().run(store.meta_set, META_KEY, json.dumps(rec))
     except Exception:  # noqa: BLE001 — the status line is cosmetic (invariant 3)
         log.exception("could not record the backup result")
 
@@ -188,6 +237,20 @@ def backup_status(cfg, store) -> dict:
                      + (" (checked OK)" if rec.get("verified") else ""))
     else:
         parts.append(f"No backup yet in {d}")
+    try:
+        dbb = sum(p.stat().st_size for p in (Path(store.dir) / "mrfx.duckdb",
+                                             Path(store.dir) / "mrfx.duckdb.wal") if p.exists())
+        # measured: the writer lock is held about 25 s per GB of database
+        # file (review 14 2.4, P2-8); the dashboard keeps answering
+        secs = int(dbb / 1e9 * 25)
+        if secs >= 10:
+            parts.append(f"while a backup copies the database, new files wait about "
+                         f"{secs // 60} min {secs % 60:02d} s to be saved (the screens keep answering)"
+                         if secs >= 60 else
+                         f"while a backup copies the database, new files wait about {secs} s "
+                         "to be saved (the screens keep answering)")
+    except OSError:
+        pass
     if rec.get("error"):
         parts.append(f"the last attempt ({rec.get('at', '')[:16].replace('T', ' ')} UTC) "
                      f"was not taken: {rec['error']}")
@@ -239,14 +302,24 @@ def _take(cfg, store, dest_dir: Path, now: dt.datetime) -> dict:
     except OSError as e:
         raise BackupRefused(f"the backup folder {dest_dir} cannot be used ({e})") from e
     root = Path(store.dir)
+    if _inside(dest_dir, root):
+        # every backup would carry all the earlier ones (review 14 2.4, P2-5)
+        raise BackupRefused(
+            f"backup_dir ({dest_dir}) is inside the data folder, so every backup would "
+            "contain all the earlier ones — point it at a folder outside the data "
+            "folder, ideally on another drive")
     snap = root / SNAPSHOT
     shutil.rmtree(snap, ignore_errors=True)        # a crash's leftover links
-    for stale in dest_dir.glob(".mrfx-backup-*.tmp"):
-        stale.unlink(missing_ok=True)
+    for stale in list(dest_dir.glob(".mrfx-backup-*.tmp")) + list(
+            dest_dir.glob("mrfx-backup-*.zip.part")):
+        stale.unlink(missing_ok=True)              # a stopped or killed run's leftovers
+    # a size ESTIMATE only — the parts a backup carries are listed under the
+    # write lock below (review 14 item 2.4)
     files = store_files(root, with_database=False)
     db_size = sum(p.stat().st_size for p in (root / "mrfx.duckdb", root / "mrfx.duckdb.wal")
                   if p.exists())
-    est = sum(p.stat().st_size for p in files) + db_size
+    parts_size = sum(p.stat().st_size for p in files if p.exists())
+    est = parts_size + db_size
     need = est + db_size + RESERVE_BYTES
     free = shutil.disk_usage(dest_dir).free
     if free < need:
@@ -255,6 +328,17 @@ def _take(cfg, store, dest_dir: Path, now: dt.datetime) -> dict:
             f"backup needs about {_gb(need)} (the store, a working copy of its "
             "database, and 1 GB kept free) — free some space there or point "
             "backup_dir at a bigger drive")
+    can_link = _can_hard_link(root, snap)
+    if not can_link:
+        # the parts are copied into the store's own folder first (review 14
+        # 2.4, P2-6): that drive needs the room too
+        sfree = shutil.disk_usage(root).free
+        if sfree < parts_size + RESERVE_BYTES:
+            raise BackupRefused(
+                f"not enough space: this drive cannot hard-link, so the backup copies the "
+                f"store's files next to it first — that needs about "
+                f"{_gb(parts_size + RESERVE_BYTES)} free on the data drive and it has "
+                f"{_gb(sfree)}")
     name = f"mrfx-backup-{now.strftime('%Y-%m-%d_%H%M')}.zip"
     dest = dest_dir / name
     if dest.exists():
@@ -262,6 +346,7 @@ def _take(cfg, store, dest_dir: Path, now: dt.datetime) -> dict:
     staging = dest_dir / f".{name}.duckdb.tmp"
     prog.stage("Copying the database (new data waits a moment)")
     linked = 0
+    to_copy: list[tuple[Path, tuple]] = []
     try:
         with store.write_lock:
             with store.connect() as con:
@@ -276,18 +361,43 @@ def _take(cfg, store, dest_dir: Path, now: dt.datetime) -> dict:
                     "rates": con.execute("SELECT count(*) FROM rates").fetchone()[0],
                     "files_done": con.execute(
                         "SELECT count(*) FROM files WHERE status = 'done'").fetchone()[0]}
-            # the parts the copied database refers to, pinned by hard links
-            # (copied under the lock where the disk cannot link)
+            # the parts the copied database refers to — listed HERE, under the
+            # same lock (review 14 item 2.4, P0: listed before it, a part
+            # swapped in while the backup waited for the lock was in the
+            # database copy and its count but not in the zip: 200 of 840 rows
+            # lost on restore, and verify said OK) — pinned by hard links
+            files = store_files(root, with_database=False)
             for p in files:
                 if not p.exists():
                     continue
                 t = snap / p.relative_to(root)
                 t.parent.mkdir(parents=True, exist_ok=True)
-                try:
-                    os.link(p, t)
-                    linked += 1
-                except OSError:
-                    shutil.copy2(p, t)
+                if can_link:
+                    try:
+                        os.link(p, t)
+                        linked += 1
+                        continue
+                    except OSError:
+                        pass
+                st = p.stat()
+                to_copy.append((p, (st.st_size, st.st_mtime_ns)))
+        if to_copy:
+            # a drive that cannot link: the copy runs OUTSIDE the lock (a USB
+            # disk copying a 100 GB store held every writer for minutes —
+            # 2.4 P2-6), then the parts are checked unchanged under the lock
+            prog.stage("Copying the store's files (this drive cannot hard-link)")
+            for p, _sig in to_copy:
+                _progress.check_cancelled()
+                shutil.copy2(p, snap / p.relative_to(root))
+            with store.write_lock:
+                changed = [p.name for p, sig in to_copy if not p.exists()
+                           or (p.stat().st_size, p.stat().st_mtime_ns) != sig]
+                now_parts = {q.relative_to(root) for q in store_files(root, with_database=False)}
+            if changed or now_parts != {p.relative_to(root) for p in files}:
+                raise BackupRefused(
+                    "the store changed while the backup copied it (this drive cannot "
+                    "hard-link, so the copy runs while files keep loading) — it is "
+                    "tried again later; nothing was kept from this attempt")
         entries = [(staging, "mrfx.duckdb")] + [
             (snap / p.relative_to(root), p.relative_to(root).as_posix())
             for p in files if (snap / p.relative_to(root)).exists()]
@@ -322,6 +432,33 @@ def _take(cfg, store, dest_dir: Path, now: dt.datetime) -> dict:
              res["files"])
     return {"path": str(dest), "bytes": res["bytes"], "files": res["files"],
             "counts": counts, "verdict": verdict, "deleted": deleted}
+
+
+def _inside(child: Path, parent: Path) -> bool:
+    try:
+        Path(child).resolve().relative_to(Path(parent).resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def _can_hard_link(root: Path, snap: Path) -> bool:
+    """One probe link inside the store folder (a FAT/exFAT drive refuses)."""
+    probe_src = root / ".backup_link_probe"
+    probe_dst = snap / ".backup_link_probe"
+    try:
+        snap.mkdir(parents=True, exist_ok=True)
+        probe_src.write_bytes(b"x")
+        os.link(probe_src, probe_dst)
+        return True
+    except OSError:
+        return False
+    finally:
+        for q in (probe_dst, probe_src):
+            try:
+                q.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def backup_loop(cfg, store, stop: threading.Event, first_wait: float = 600.0,
