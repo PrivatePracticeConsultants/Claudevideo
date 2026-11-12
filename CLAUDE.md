@@ -28,8 +28,8 @@ for correctness of the numbers.
 
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/pip install -e .
 .venv/bin/mrfx serve                       # dashboard http://localhost:8377 + inbox watcher + URL worker
-.venv/bin/python -m pytest tests/ -q       # the suite: real end-to-end drains against local HTTP servers (~30 min, 1194 tests)
-.venv/bin/python -m pytest tests/ -q -m quick   # inner loop, ~3.5 min (465 tests): skips tests/slow_tests.txt
+.venv/bin/python -m pytest tests/ -q       # the suite: real end-to-end drains against local HTTP servers (~36 min, 1247 tests)
+.venv/bin/python -m pytest tests/ -q -m quick   # inner loop, ~4.5 min (470 tests): skips tests/slow_tests.txt
 .venv/bin/ruff check mrfx/ tests/          # lint gate: narrow by design (see pyproject), stays at ZERO
 .venv/bin/pip-audit -r requirements.txt    # dependency CVEs: was 25 across 5 packages, now clean
 ```
@@ -61,8 +61,9 @@ changes into the cache), `mrfx hospital <file> [--state … --parity <practice>]
 standard-charges file + what the same payer pays the hospital vs the practice),
 `mrfx inflation [--year YYYY --value N]` (the price index behind real-terms
 erosion; a year with no value is refused, never estimated),
-`mrfx packets` (monthly client packets), `mrfx renewals [--clients]`,
-`mrfx backup <zip>` / `mrfx verify [zip]` (checksummed store backup + integrity check),
+`mrfx packets [--pdf]` (monthly client packets; `--pdf` prints each beside it), `mrfx renewals [--clients]`,
+`mrfx backup <zip>` / `mrfx verify [zip]` (checksummed store backup + integrity check; with
+`backup_dir` set, `serve` takes the same backup weekly without stopping — mrfx/backup.py),
 `mrfx update <new build zip>` (install a newer build; never writes data/, .venv/ or the user's
 config/mrfx.yaml — see mrfx/updater.py; `Update MRF Explorer.bat` is the drag-and-drop form),
 `mrfx reset --confirm`.

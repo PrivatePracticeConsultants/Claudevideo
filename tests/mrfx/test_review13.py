@@ -1,11 +1,14 @@
 """Review 13 (0.7.7): every item of Groups 1, 3, 4 and 5 and every feature of
 Group 6 of docs/NEXT_STEPS_PROMPT_13.md, pinned with a small hand-worked
 store. Each test FAILED on c8b80fc (0.7.6); the value it got there is in its
-docstring ("was: …") — 37 of 38, run from a `git archive` of c8b80fc with the
+docstring ("was: …") — 37 of 39, run from a `git archive` of c8b80fc with the
 editable install's fall-through to this checkout's new modules removed. The
-38th, test_5_2_7_a_list_landing_first_or_last_still_works, is a guard: the
-two orderings that always worked must keep working. The progress-bar tests of
-DESIGN §3.6.7 live in tests/mrfx/test_progress.py."""
+other two: test_5_2_7_a_list_landing_first_or_last_still_works, a guard (the
+two orderings that always worked must keep working), and
+test_5_2_6_a_kill_after_the_commit_keeps_the_file_the_same_file, the
+regression test for this round's own 5.2.6 change (c8b80fc's size-and-age
+guess covered that window). The progress-bar tests of DESIGN §3.6.7 live in
+tests/mrfx/test_progress.py."""
 
 from __future__ import annotations
 

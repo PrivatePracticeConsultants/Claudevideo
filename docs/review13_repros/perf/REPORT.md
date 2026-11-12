@@ -263,3 +263,60 @@ Not worth chasing (measured, cached, documented): trajectory national 27 s and c
 * The repository was not modified (`git status` clean). One mistake during the run: `real_fetch.py` was first launched with a RELATIVE config path, so `mrfx serve` fell back to the built-in defaults, created `data/mrfx_store` and `data/nppes` under the repo (gitignored, 1.5 GB, including an NPPES download) and started enrichment; the process was stopped by the script's Popen handle and both folders were deleted (`data/` is back to its Nov 5 contents: empty downloads/failed/inbox/processed).
 * Created and deleted at the end: `perf/realstore/` (the small real store, 458 MB) and `scratchpad/scale4n/packets/` (the packet build's output for the one watch-listed client; `packets_r6` from round 6 was left alone). Nothing under `scale4n/store` was written by this audit except what the served app writes itself (the new `practice_medians_disc_payer_v1.<key>.parquet` table, `summary_strips` cache, the exports temp dir, diagnostics).
 * Kept for the record: `perf/timings.csv`, `perf/timing_table.md`, `perf/bodies/`, `perf/realout_tx/`, `perf/realout_wy/`, `perf/prof.json`, `perf/prof.out`, `perf/ui/`, `perf/serve.log`, the scripts.
+
+## 7. After 0.7.7 (round 13) — the same method, the same store
+
+Measured on the 99,000,000-rate store through HTTP with `perf/driver.py`
+(cold = first call after a fresh `mrfx serve` with the page cache dropped,
+warm = the same call again). "Before" is §1 (c8b80fc). "After" is the second
+fresh start on the 0.7.7 code: the first start after a new sliced spine also
+builds the practice-median tables once (Overview 12,343 ms, rate card
+6,763 ms, `/api/stats` 8,886 ms that one time).
+
+| feature (route) | before cold / warm ms | after cold / warm ms |
+|---|---:|---:|
+| outreach, whole store (`/api/export/outreach.zip`, all) | 71,110 / 72,230 | 37,247 / 36,914 |
+| entity drawer by name (`/api/entity/entity/PRACTICE 18 · OR`) | 30,409 / 15,911 | 1,598 / 1,473 |
+| Overview (`/api/overview`) | 26,900 / 2 | 2,303 / 2 |
+| client digest (`/api/clients/digest`) | 17,255 | 4,962 |
+| outreach CSV, entity grain, MO | 15,577 | 8,266 |
+| validate a tax ID (`/api/validate`) | 13,890 / 2,666 | 550 / 549 |
+| outreach, one state (MO) | 11,555 / 11,448 | 4,889 |
+| fee schedule (`/api/schedule/fee`) | 10,174 | 215 (6,763 first start) |
+| city rate map (`/api/territory/local`) | 9,447 / 5,327 | 201 / 188 |
+| whole-store CSV refusal (`/api/export.csv`, 507) | 8,212 / 8,690 | 183 |
+| new-to-network | 8,043 / 9,241 | 5,902 / 2 |
+| market report (`/api/report/market`) | 7,299 / 5,134 | 2,500 / 221 |
+| market sizing (`/api/market/sizing`) | 7,018 / 8,259 | 783 / 717 |
+| header counts (`/api/stats`) | 6,823 / 8 | 1,025 (8,886 first start) |
+| leads CSV after the leads screen | 1,846 | 3 |
+
+Bodies: identical to §1's except the "Generated" minute and the version
+string. A final fetch of all 135 bodies on the release code (r13exec
+`perf_final`, under background load, so its timings are not quoted) differs
+from c8b80fc's in 26 bodies, every one explained: the new response fields
+(`/api/boot`, `/api/stats`, `/api/files`, `/api/payers`, `/api/months`,
+`/api/urls`: `analytics`, `covered`, `reread`, `backup`, identity notes), the
+version string in "Generated … v0.7.7" lines (CSV/ZIP members of the same
+size), the free-space figure in the whole-store export refusal, the 4.1
+quartile sentence (rate card, visit value, fee CSV), the 4.2 rule sentence
+(pitch, negotiation), and the 6.2 lines ("Not included, and why — Medicaid
+floor: … Hospital parity: …" in the negotiation one-pager, payer comparison,
+proposal and dossier). `perf/spot99.py` on those bodies: 330 checks, 0
+problems, its output identical to the same script on c8b80fc's bodies;
+`spot99_entity.py`: 637 drawer rows, 0 mismatches. (spot99.py's own
+newest-month entity loop prints "170 mismatches" on BOTH builds' bodies: it
+compares the drawer's all-months rows with the newest month only; the
+per-month check is spot99_entity.py.)
+
+The analytics build (Group 1.3): 0.7.6 full rebuild 738.3 s, peak RSS
+6.36 GB; 0.7.7 sliced build from an empty spine 363.1 s, 6.44 GB, 49 slices,
+first payer on screen at 33 s; killed after slice 25 of 49 and restarted: it
+resumed at slice 26 and ran 24 slices (186 s + 188 s); both builds
+byte-identical to 0.7.6's (375/375 payer x code cells, 64/64 directory
+buckets; 79,027,749 spine rows).
+
+Accuracy on a fresh three-file real store (BCBS WY 05_of_09, Moda TX, UHC
+HealthScope) with `perf/check_real.py`: TX 734 checks and WY 202 checks, 0
+differences; the visit-value "All payers" row now reads p26 · Q2 (was Q3,
+item 4.1); entity grain 2/2.

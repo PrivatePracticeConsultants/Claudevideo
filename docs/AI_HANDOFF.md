@@ -72,6 +72,11 @@ Two codebases live in this repo:
 | `mrfx/inflation.py` | Real-terms erosion — the one place the app says that a rate held flat is a pay CUT. CPI-U annual averages (BLS CUUR0000SA0, 1982-84=100) ship in `DEFAULT_VALUES`; the user extends them per published year with `mrfx inflation --year --value` or `POST /api/inflation`, stored in `inflation_index` (user years win). **A year with no index value REFUSES with a reason and a fix — never an extrapolation**; an explicit `assume_inflation_pct` is allowed and is echoed as an ASSUMPTION everywhere it is used, and it is validated even when the index makes it unnecessary. Real change is the compounding ratio `(1+nominal)/(1+inflation)-1`, not `nominal - inflation` — subtraction drifts over multi-year spans and drifts in the direction that makes a cut look smaller. Every output carries the CPI-is-a-consumer-basket caveat. `compute_payer_trajectory` gains `real_cumulative_pct` / `erosion_line` per payer. |
 | Closure feed (`nppes.closures`) | The mirror of the new-clinic feed, off the same bulk cache: therapy NPIs DEACTIVATED recently and **not since reactivated** (NPPES deactivates for paperwork lapses as often as closures, so a reactivated NPI never closed). `NPI Deactivation Date` / `NPI Reactivation Date` joined `_NPPES_CACHE_COLS` and `_NPPES_CACHE_SCHEMA` went to 4, so an existing cache rebuilds once. Two consulting uses: a closed REFERRAL SOURCE is a hole in a client's inbound volume, and a closed COMPETITOR is room — `in_store` marks the ones that carried published rates. Packet section 6 intersects a client's own inbound referral partners with the feed. Every surface says a deactivated NPI is a call to make, never a fact to print. |
 | `mrfx/tracker.py` | READ-ONLY discovery of a Medicare Order & Referring Tracker install (`ORF_DATA_DIR` → `%LOCALAPPDATA%\OrderReferringTracker` → `~/.order-referring-tracker`, or `tracker_dir` in config): its `snapshots/OrderReferring_<date>.csv`, its `referral-map/` datasets + `dataset-meta.json`, and which of those this store has already imported. Never writes to the tracker's folders — that data belongs to the other program, which has its own retention. The dashboard imports what discovery offered **in-process** (`POST /api/medicare/tracker/import`, daemon thread + polled job state): the CLI must refuse while `mrfx serve` holds the DB, but the server importing its own store is the one process that may — which is why the merge needs no stopping. Only paths discovery just returned are importable, so the endpoint can't be pointed at an arbitrary file. |
+| `mrfx/rollplan.py` + `Store._run_plan` | **The durable sliced analytics build** (round 13 Group 1). A full rebuild is a PLAN kept in `meta('rollup_plan')`: directory hash slices, one prune slice, then spine slices per payer x billing-code range `[lo, hi)` (a single heavy code is cut into hash halves). Each slice DELETEs and re-INSERTs exactly its rows and advances the plan pointer in ONE transaction, so a kill resumes at the last committed slice; an out-of-memory slice is halved (kept in the plan) and retried; a plan made under other rule / schema versions restarts; columns that differ build in `__next` shadow tables. Measured on 99M rates: 738 s (0.7.6 one-shot) -> 363 s from an empty spine; kill after 25 of 49 slices resumes at 26; byte-identical (375/375 payer x code cells, 64/64 directory buckets). |
+| `mrfx/progress.py` + `mrfx/progress_plans.py` | **The 0-100 % bar on every output** (round 13 Group 2). A `Progress` in a contextvar (the no-op default costs nothing); stages from the plan tables in the user's words, ticks, nested `group()`s, `waiting()`; DuckDB's own `query_progress()` sampled from a side thread on every connection the run opens (`Store.connect` attaches it); Stop = interrupt every attached connection and refuse the next `connect()` (`Stopped` subclasses `duckdb.InterruptException`, so fault-isolated loops still work). API: `ProgressMiddleware` (`X-Mrfx-Progress` header or `?progress=`), `_progress_route(plan)` on every output route, async `GET/DELETE /api/progress/{token}`; a superseded view query is cancelled. CLI: `TextBar`. |
+| `mrfx/pdf.py` | "Save as PDF" (round 13 6.1): prints a report's own HTML with the Chromium `render._launch` finds or installs, every request refused; `?format=pdf` on the eight report routes (`api._html_or_pdf`), `mrfx packets --pdf`. No browser = `PdfUnavailable` -> a 422 sentence, never a broken report. |
+| `mrfx/anchors.py` | Medicaid-floor and hospital-parity lines (round 13 6.2) in the negotiation one-pager, payer comparison, proposal and dossier. The practice's rate on a line is the rate the document already prints (passed in, never recomputed); Medicaid = newest loaded year of the state's schedule; hospitals = one rate per hospital under `hospital.hospital_filters` (the parity table's rule). A half with nothing loaded is omitted WITH its reason. |
+| `mrfx/backup.py` | Store backups: `store_files`, `write_zip` / `verify_zip` (one format and one check for `mrfx backup`, `mrfx verify` and the hot backup) and `hot_backup` — `serve`'s weekly backup (round 13 6.3; off until `backup_dir` is set). Under the write lock: CHECKPOINT, `ATTACH … COPY FROM DATABASE` into a staging file on the backup drive, hard links pinning every part in `<store>/.backup_snapshot`; the zip is written outside the lock, verified, and only then are the oldest `mrfx-backup-*.zip` beyond `backup_keep` deleted. Disk guard: store + database copy + 1 GB free, else `BackupRefused` with the sentence (recorded in `meta('last_backup')` for the Files tab). |
 | `mrfx/cli.py` | `mrfx serve / add / preflight / ingest / status / export / outreach / forget / enrich / speedtest / reset`. `speedtest <url>` pulls a slice of one real link on 1/2/4/8 connections (a DIFFERENT slice each time, so a CDN cache can't flatter the later runs) and either prints the `download_segments` line to paste or says extra connections don't help — it exists because "downloads are slow" has two opposite fixes and only a measurement on the user's own network distinguishes them. `add` hands URLs to a running server, else drains locally. `forget <filename>` (or DELETE `/api/files/{name}`, the Files-tab remove button) erases one file's rates + raw copies and flips its done url_queue row to 'skipped' so the dedup anchor never outlives the data; rollups rebuild after. |
 
 ## Step 3 — Internalize the invariants (violating these breaks real users)
@@ -779,6 +784,103 @@ fails on 68d9bc7); the reproducing scripts are under `docs/review12_repros/`.
   httpx2 stays out of `requirements.txt` with starlette pinned (decided,
   item 4.1j; `test_review12` fails if starlette moves without it).
 
+### Round 13 additions (Nov 12, 2026, v0.7.7) — rules a change must keep
+
+Pinned by `tests/mrfx/test_review13.py` (every case fails on c8b80fc, the
+value it got there in its docstring) and `tests/mrfx/test_progress.py` (the 14
+progress tests); the evidence is under `docs/review13_repros/`.
+
+- **The coverage contract** (item 1.2). The dashboard counts what is LOADED
+  (`files`), every screen answers from the ANALYTICS (the spine); the two can
+  differ for hours on a billion rows, and the app must always say by how
+  much. `Store.analytics_coverage()` -> `{state: current|behind|building|failed,
+  covered_files, done_files, covered_payers, loaded_payers, reason, pct, eta,
+  sentence}` from the files table, the coverage markers, the build plan and
+  the per-PART sets `part_payer_set` / `part_tin_set` (one scan of a new part,
+  never of the store). Carried by `/api/stats`, `/api/boot`, `/api/files`;
+  `/api/payers` and `/api/months` list what is loaded with `covered` = what
+  the analytics hold (uncovered chips greyed, still pickable, "no rows" says
+  why). Every methodology footer / sidecar prints `rollplan.coverage_sentence`
+  ("Analytics cover N of M payers (a of b files). … Every number here comes
+  from those") while not current. A new output must print it too
+  (`store.analytics_note()`). A payer counts as covered only when ALL its
+  slices of a part-way full build are committed (`Store.payers_part_way`):
+  a half-built payer has rows in the spine but is not "covered".
+- **The durable rollup plan** (item 1.3; `mrfx/rollplan.py`). Never a
+  one-statement rebuild of the whole store again. Slices commit with their
+  plan pointer; the spine generation advances per slice, so payers appear as
+  they commit. `update_rollups_incremental` refuses while a plan is
+  outstanding (the plan finishes first); a failure is noted with its sentence
+  (`rollup_failure`) and the queue retries after a 2..60 min back-off — it
+  never gives up for the run; an idle `serve` picks up a part-way plan
+  (`STALE_CHECK_SECONDS`). Any change to spine columns or rules must bump the
+  versions the plan checks, or a resumed plan mixes rules. Extrapolated: a
+  1.16 B-rate store builds in about 2-4 hours on a 4-core laptop (0.7.6's
+  one-shot grew faster than linearly: ~28 h on this box), the dashboard
+  usable throughout.
+- **The progress helper** (Group 2): an output route gets
+  `@_progress_route("<plan>")` and stages in its module
+  (`progress.current().stage(...)`); a stage not in the plan is appended at the
+  plan's median weight (the bar slows, never goes back); 100 % only with the
+  body in hand; a Stop answers 409 and never a partial document. Without a
+  token the route returns the same bytes as before (pinned). Never call a
+  progress method in a way that can raise into the work (invariant 3).
+- **Measured slow paths** (Group 3): `Store.pairs_relation()` is THE source
+  of (TIN, NPI) pairs (built once per part signature; NULLs kept so a
+  DISTINCT over it equals the same over `rates`) — never `SELECT DISTINCT
+  tin_value, npi FROM rates` in a request path; `parts_holding(id)` narrows
+  `/api/validate` to the parts that hold a TIN / NPI; spine counts persist per
+  spine key on disk; the leads screen and its CSV are one computation; the
+  entity drawer aggregates only its member TINs' spine rows.
+- **4.2 decided: disclose.** A practice's all-payer rate for a code is the
+  median over its published base LINES — a payer listing the code under two
+  place-of-service sets counts twice (median(46.29, 46.29, 67.15, 46.01, 20.33)
+  = 46.29, one-per-payer would be 46.15). Measured: the other rule would move
+  52 of 144,859 practice x code rates on real files (0.04 %, max $47.24).
+  `benchmark.PRACTICE_RATE_RULE` is printed with every all-payer figure.
+  Changing it is a numbers change: re-run every known-answer test and say so.
+- **Visit-value quartile** (4.1) is read from the PRINTED percentile (<25 Q1,
+  <50 Q2, <75 Q3, else Q4), never from P25 / median / P75 (ties).
+- **5.1 / 5.2.1 content identity.** Identity is the sha256 of the raw bytes
+  AND, beside it, the sha256 of the CONTENT (`identity._ContentHash`: gzip
+  inflated member by member, a plain file as is, a leading BOM dropped, a zip
+  through its chosen member; `content_fingerprints.content_sha/content_size`).
+  Both content claims (`claim_content_ingest`, `claim_inbox_content`) check
+  both; the skip says "the same content as X — the same document compressed
+  differently (or saved decompressed)". The 4 GB local-hash limit is gone.
+- **5.2.4 code sets.** `files.code_set` records the billing codes each file
+  was read for; after codes are ADDED, `/api/files` counts the files read
+  without them and `POST /api/files/reread` reads them again (kept copy, else
+  the link downloaded again, else the row asks for the file); pasting a loaded
+  link again re-reads it when the list grew. Removing codes re-reads nothing
+  (the rows are filtered at read time).
+- **5.2.7 a provider list landing during its payer's ingest** is applied:
+  `Store.refs_epochs()` (bumped in `finish_provider_refs`) is snapshotted at
+  the start of `ingest_file` and compared at its end; a change re-reads the
+  file and returns that read's result. Deterministic tests force both
+  orderings with hooks; the original race test ran 30/30.
+- **Group 6.** PDFs are the HTML printed, nothing recomputed; anchors lines
+  use the document's own rates; the hot backup copies the database under
+  the write lock with DuckDB's own copy and pins parts with hard links,
+  verifies before deleting anything, and deletes only files it named;
+  bookmarkable links (`#view?subject=…&state=…`) only fill the boxes the user
+  would. 6.5 (xlsx) and 6.6 (expected payment) were not built — see the
+  round-13 prompt's status block.
+
+#### The skip protocol in one page (amended in 0.7.7; rules 4, 7, 8, 9 changed)
+
+1. **A LINK is one queue row per `dedup_key`** = `scheme://host(lower)/path(as is)?sorted query minus signature params` (always: `expires signature policy key-pair-id awsaccesskeyid sig x-amz-<signing>`, GCS V4 `x-goog-*`, Akamai `__token__`, a lone JWT `token`; beside a signature param also the Azure SAS names and `token/st/policy` only when the value LOOKS like a signature part — JWT, date, epoch, `%`/`=`/`+`/`/`, 40+ hex). `http`/`https`, `:443`, trailing slash, percent-encoding and host aliases are DIFFERENT rows; content decides later. A paste of an existing key refreshes the row's url (not in flight) and revives `failed` / `skipped` / `oversize` / a done index; a known duplicate pasted again is answered from what is loaded, no byte downloaded. **A done RATE row is re-read by a paste only when billing codes were added since it was read**; otherwise only forget + paste, the monthly re-check, `requeue_url_for_file`, or a re-expansion that finds it republished.
+2. **Children**: `expand_toc` takes every http(s) location (no name filter, deduped by key, capped and SAID); the UHC/Optum `blobs` listing drops allowed-amounts and drug files by WHOLE name tokens and the listing row says what it left out; a child the re-expanded index no longer lists says so on its row; page links are only RANKED by name.
+3. **Early skip (15 MB)**: size + head equal to a LOADED file → fetch tail + 8 windows by Range; SKIP only when gz/zip on both sides and the twin's `trailer_proves = 1`; an earlier in-flight match WAITS. Plain `.json`, multi-member gz, and anything unprovable download in full. The row says "checksum-equal to <url> … skipped after X MB", `duplicate_of` set.
+4. **Identity = sha256 of the RAW bytes AND sha256 of the CONTENT** (both hashed while downloading / in one read of an inbox file, any size). The same content re-encoded (another gzip level, `.json` vs `.json.gz`, a BOM) is ONE file: the second is `skipped/duplicate` "the same content as X".
+5. **One content claim for every path** (`claim_content_ingest` / `claim_inbox_content`, one lock, raw sha OR content sha): a loaded twin → `skipped/duplicate` with the partner named; a twin loading now → defer (link) or wait (inbox), revived on the twin's failure, at start-up, or by `record_identity` when the twin's content is replaced. Exactly-once holds under concurrency and failure.
+6. **Same name in the inbox**: 'same' = recorded size+mtime (the identity row, or — after a kill between the 'done' commit and that row — `files.read_identity`, which the commit itself carries), or equal full sha, or sha-equal to the processed copy. A file with no identity row and no copy is never 'same' on size and age: it is HELD for Replace / Keep both (`/api/files` marks such files; `serve` names them from their copies in the background). Different bytes, same payer+month → HELD; another month → loaded beside as `name-<sha8>`.
+7. **Re-check of a loaded link** = one 1-byte ranged GET comparing EVERY signal: a different validator OR a different size is a republication → re-download; same validator and size → unchanged; a probe that states neither → "could not tell" (re-downloaded on the monthly re-check). Every probed child row says what was checked and how ("checked <date>: unchanged by the same version tag and size").
+8. **Monthly re-check is ON** (`monthly_recheck`): once a month every LOADED index — catalog or pasted by the user — is fetched again and its loaded files probed (rule 7); only changed files download; the index row says "last checked … · next check …". The opt-in `monthly_refresh` still queues NEW dated months of catalog sources.
+9. **0-row files** are done, fingerprinted and anchor dedup like any file; files read before billing codes were ADDED are counted on the Files tab and re-read by its button (`files.code_set`); `mrfx ingest --force` still re-reads everything.
+10. **Kind** is decided by content (first 1 MB of keys), never by the file name; the zip member read is the largest `.json`.
+11. **Forget** keeps the url row as `skipped` (sha kept, twins neutralised) so a re-paste reloads; the early/sha skip text always names the partner; a provider list that lands while its payer's rate file is being read is applied (5.2.7).
+
 ## Step 4 — Know the URL pipeline states
 
 The whole machine, derived by instrumenting every status-changing store
@@ -1045,7 +1147,7 @@ inbox, `inbox/.held/` or `inbox/.replacing/`.
 
 ## Step 7 — Test and verify like the history did
 
-- `.venv/bin/python -m pytest tests/ -q -m quick` — the ~3.5-min inner loop (CLAUDE.md
+- `.venv/bin/python -m pytest tests/ -q -m quick` — the ~4.5-min inner loop (CLAUDE.md
   has the current count and time)
   (497 of 866 tests, 2 min 48 s on Nov 6 2026; the >= 0.5 s ones are listed in
   `tests/slow_tests.txt` — regenerate it from a `--durations=0` run).

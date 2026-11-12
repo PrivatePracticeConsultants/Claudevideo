@@ -1221,5 +1221,5 @@ def test_paused_rows_block_forget_and_the_caches_and_version(cfg, store, capsys)
     assert hasattr(compute_rate_changes, "uncached") and hasattr(payer_months, "uncached")
     with pytest.raises(SystemExit):
         main(["--version"])
-    # bumped with every release (round 12: 0.7.6)
-    assert capsys.readouterr().out.strip() == f"mrfx {__version__}" == "mrfx 0.7.6"
+    # bumped with every release (round 13: 0.7.7)
+    assert capsys.readouterr().out.strip() == f"mrfx {__version__}" == "mrfx 0.7.7"

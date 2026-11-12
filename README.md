@@ -236,6 +236,19 @@ they matter:
   line on its own); therapy codes nearby practices bill that a client doesn't;
   and what local hospitals charge self-pay patients, from files already
   imported.
+- **Floors and hospital parity in the documents.** With a state Medicaid
+  schedule or hospital price files loaded, the negotiation one-pager, payer
+  comparison, proposal and dossier carry one line per code ("Medicaid pays
+  $30.00 for 97110 in MO; Payer A pays you $28.00 (below Medicaid)"); with
+  nothing loaded the line is omitted with the reason.
+- **Save as PDF** beside every printable report (the built-in headless
+  browser prints the same HTML), and `mrfx packets --pdf`.
+- **A progress bar with Stop on every output**, and a header line that says
+  how much of the loaded data the analytics already cover while a big store
+  is still being folded in.
+- **Weekly backups while the app runs** (`backup_dir`), checked and kept N
+  deep; bookmarkable links (`#benchmark?subject=…&state=MO`) and a "Find a
+  practice" box.
 
 ## Territory and growth
 

@@ -1,8 +1,159 @@
 # Prompt for the next session, round 13 — analytics that keep up with a billion rows, a progress bar on every output, the measured slow paths, the skip protocol, and the features worth adding (written for Claude Opus 5.5)
 
-> **STATUS: not started.** Baseline for every number and line reference below is
-> commit c8b80fc (version 0.7.6), the zip the user installed. When you are done,
-> replace this block with what closed, in which commit, with the numbers.
+> **STATUS (Nov 12, 2026, v0.7.7): Groups 1–5 closed (every item, plus the
+> lead's 5.2.7); Group 6: 6.1–6.4 built, 6.5 and 6.6 decided against (reasons
+> below); the carry-overs are listed with what happened to each.**
+> Commits: groups 1+2 1a33475 (one commit: they share `Store.connect`, the
+> rollup's progress object and the same api.py / app.js lines — the message
+> says which item landed where), group 3 95e98b4, group 4 0b09eb5, group 5
+> 935f419, group 5 follow-up 2f25ae9 (two tests the full suite caught), group
+> 6 8df8452, the real-Chromium fixes 3228216 (a half-built payer counted as
+> covered; the coverage sentence cut off at the header's edge; the PDF twins
+> squeezing their rows), the kill-window fix 1427445 (below), and the release
+> (docs, version, this block): the commit after 1427445.
+> `tests/mrfx/test_review13.py`: **39 cases; 37 fail on c8b80fc** (run from a
+> `git archive` of it with the editable install's fall-through to this
+> checkout's new modules removed — without that, one more passed by
+> importing the new `mrfx/pdf.py`; the value each got is in its docstring).
+> The two that pass there: `test_5_2_7_a_list_landing_first_or_last_still_works`,
+> a guard (the orderings that always worked), and
+> `test_5_2_6_a_kill_after_the_commit…`, the regression test for this
+> round's own 5.2.6 change (c8b80fc had the size-and-age guess it replaces). `tests/mrfx/test_progress.py`: the 14 tests of
+> DESIGN §3.6.7. Full suite **1247 passed, 0 failed, 36:00** on a quiet box after the last code
+> change; quick tier 470 tests, 470 passed, 4:18; ruff 0; pip-audit clean (no new dependency:
+> the PDF uses the Playwright already pinned). `tests/slow_tests.txt`
+> regenerated from that quiet run (>= 0.5 s: 788 of 1242 timed tests).
+> Existing tests changed on purpose, each with the reason in the test:
+> `test_hardening` — the clustering test checks clustering within each
+> payer's block (the spine is now built payer by payer), the async-route
+> whitelist adds `/api/progress/{token}` (the poll must answer while every
+> worker is busy), and `test_scan_inbox_rebuilds_once_per_pass`'s second file
+> is one byte different (its decompressed copy is now — correctly — the same
+> content, 5.2.1); `test_round7` — the version pin 0.7.6 -> 0.7.7.
+>
+> **Decisions.**
+> - **4.2: disclose, do not change.** Measured what one-rate-per-payer would
+>   move: 52 of 144,859 practice x code rates on the real 8-file store (0.04 %,
+>   52 of 6,246 practices, largest $47.24); 2,286,166 of 4,774,313 (47.9 %) on
+>   the 99M synthetic store (its POS variants are random). A payer's two POS
+>   lines are two contracted lines, and the other rule would move numbers the
+>   user has sold; `benchmark.PRACTICE_RATE_RULE` is printed with every
+>   all-payer figure and written in AI_HANDOFF.
+> - **5.2.4: remember the code list per file, offer one button.**
+>   `files.code_set`; after codes are ADDED the Files tab says "N loaded files
+>   were read before you added billing code(s) …" with "Re-read N files for
+>   the new codes" (kept copy, else the link downloaded again, else the row
+>   asks for the file); a loaded link pasted again re-reads it. Removing codes
+>   re-reads nothing (rows are filtered at read time). GETTING_STARTED and
+>   `mrfx status` said "re-add those links" (it did nothing: "0 added, 1
+>   already known") — both now describe this.
+> - **5.2.5: `monthly_recheck` on by default, `monthly_refresh` stays opt-in.**
+>   The re-check costs one 1-byte request per loaded file per month and
+>   downloads only what changed; queueing NEW dated months spends bandwidth
+>   and disk, so it stays the user's choice.
+> - **5.2.7 (the lead's P0).** A provider list that finished while its payer's
+>   rate file was being read (or still held its per-file claim) was never
+>   applied. `Store.refs_epochs()` is snapshotted at the start of `ingest_file`
+>   and compared at its end; a list that landed meanwhile re-reads the file.
+>   `test_parallel_ingest_matches_serial`: **before 3 of 12 failed on 0.7.6
+>   (c8b80fc) and 4 of 12 on 0.7.5 (68d9bc7)** (the lead's runs; failing runs
+>   ~5.3 s vs ~6.9 s); **after: 30 of 30 passed on the final code** (30/30 on the release code, 6.6-9.9 s each; also 30/30 before the kill-window fix).
+>   Deterministic tests force both orderings with hooks (no sleeps): was 4
+>   rows and "1 rate groups skipped", now 6 / 0.
+> - **Kill window found by the round-11 harness.** `ingest/s4_kill.py` on this
+>   round's code first gave 23/25: killed after the 'done' commit and before
+>   the identity row (the analytics update runs in between), the very file
+>   still in the inbox came back as "a different file with the same name"
+>   (5.2.6 had removed the size-and-age guess that covered this). The 'done'
+>   upsert now carries the read identity (`files.read_identity`) and the code
+>   list in the same write: **25/25 trials correct, 0/25 pool workers left alive 45 s after the kill** (seed 65474; 23/25 before the fix, seed 59200 — the two window trials held the same file as needs_choice).
+> - **6.5 Excel workbook: not built.** The exports were not rewritten to
+>   DuckDB COPY (Group 3 kept the Python writers), so an xlsx would be a
+>   second writer over six outputs, each needing its own number-format and
+>   sheet tests, plus a new dependency (openpyxl) on the user's PC; every CSV
+>   already opens in Excel with the methodology beside it. Worth doing as one
+>   generic writer over the export's row iterator, with a byte-level test that
+>   the xlsx and the CSV carry the same cells.
+> - **6.6 Expected payment per visit: not built.** No commercial payer in the
+>   store publishes its multiple-procedure or assistant reduction (the MRF
+>   schema has no field for either), so the only stateable rules are
+>   Medicare's; applying them to a commercial rate would print an assumption
+>   as a number. It stays the written caveat.
+> - **Carry-overs.** Round 11's 3.1 single-pass rollup: superseded by 1.3 (the
+>   per-slice durable build). Round 10's 1.5 / 1.9 residue: measured on the
+>   99M store in the audit's table — a name search 1.4 s / 1.0 s (rows) and
+>   1.6 s (strip), the unfiltered page 2.0 s / 1.1 s: under the P2 bar, left
+>   as it is. Round 11's 3.6 segment map, 4.4(h) monotonic clock through sleep
+>   and 4.4(c) filename cap (documented): not done this round — the P0s took
+>   the time; still open. Windows has still never been run (no Windows box
+>   here).
+>
+> **Group 1 numbers (99,000,000 rates, 79,027,749 spine rows, 4 cores, 6 GB
+> pool).** 0.7.6 full rebuild 738.3 s, peak RSS 6.36 GB; 0.7.7 sliced build
+> from an EMPTY spine 363.1 s, 6.44 GB, 49 slices, first payer on screen at
+> 33 s; `kill -9` after slice 25 of 49 and restart: resumed at slice 26, ran
+> 24 slices (186 s + 188 s; 0.7.6 starts over). Byte identity: 375/375
+> (payer, code) cells and 64/64 directory buckets identical to the 0.7.6
+> build, for the uninterrupted build AND the kill-then-resume one; the real
+> 8-file store 278/278 at 8 and at 125 forced slices. Extrapolated to 1.16 B
+> rates: about 2–4 hours on a 4-core laptop (0.7.6's one-shot: ~28 h on this
+> box), the dashboard usable throughout. Seen in Chromium on the 99M store
+> with a build killed after 6 slices: "Analytics cover 1 of 15 payers (3 of
+> 45 files). Rolling up the rest — 25 %, about 19 min left (Payer 01 ·
+> 92507–97161)", greyed chips, the outreach bar "Listing the organizations in
+> this view (1 of 5)" and its Stop ("stopped"), a `#benchmark?subject=…&state=MO`
+> link filled and run, "Save as PDF" -> pitch_report_2026-11-12.pdf (%PDF-,
+> 103 KB), the search box opening the drawer; 0 page errors.
+>
+> **Speed (99M store, quiet, cold / warm ms, before -> after):** outreach
+> whole store 71,110 / 72,230 -> 37,247 / 36,914 (target ~25 s not reached);
+> entity drawer by name 30,409 / 15,911 -> 1,598 / 1,473; Overview 26,900 ->
+> 2,303; client digest 17,255 -> 4,962; outreach entity CSV MO 15,577 ->
+> 8,266; validate 13,890 / 2,666 -> 550 / 549; outreach MO 11,555 -> 4,889;
+> fee schedule 10,174 -> 215; city rate map 9,447 / 5,327 -> 201 / 188;
+> whole-store CSV refusal 8,212 -> 183; new-to-network 8,043 / 9,241 ->
+> 5,902 / 2; market report 7,299 / 5,134 -> 2,500 / 221; market sizing
+> 7,018 / 8,259 -> 783 / 717; `/api/stats` 6,823 -> 1,025; leads CSV 1,846 ->
+> 3 (`perf/REPORT.md` §7).
+>
+> **Accuracy: 0 differences.** Fresh three-file real store,
+> `perf/check_real.py`: TX 734 checks, WY 202, 0 differences (the "All payers"
+> visit-value row now p26 · Q2, was Q3 — item 4.1); entity grain 2/2.
+> `perf/spot99.py` on 134 bodies fetched from the release code: 330 checks,
+> 0 problems, output identical to the same script on c8b80fc's bodies;
+> `spot99_entity.py` 637 drawer rows, 0 mismatches. The 26 bodies that differ
+> from c8b80fc's are all explained (`perf/REPORT.md` §7): new fields, the
+> version string, the 4.1 and 4.2 sentences, the 6.2 "Not included, and why"
+> lines; no number moved.
+>
+> **Rows: nothing loaded changed.** BCBS-MS (2,660,356 rows), UHC-NY
+> (20,741), Tufts zip (118,895), through the inbox AND through links (local
+> server): each part's row count and the sha256 of its sorted rows IDENTICAL
+> on c8b80fc and on this code. `fastcheck` 3/3 IDENTICAL (ND HMHS, UHC-NY,
+> BCBS-MS).
+>
+> **Kill harnesses on the final code** (copies under the scratchpad, paths
+> retargeted; s4_kill's `os.kill` of late orphans replaced by a report):
+> queue `s5_crash.py` seed 4242 x 20: no row stuck and no row-count mismatch in
+> 20/20, files == parts 9/9 in 19 (trial 2 dies before `add_urls`, as in
+> rounds 11–12), downloads left: none in 20/20 (the "PROBLEM" tag is the
+> harness counting `.verified_parts.json`, as before); download
+> `c10_kill.py` x 12 seed 39616: **12/12 OK**; ingest `s4_kill.py`: **25/25 trials correct, 0/25 pool workers left alive 45 s after the kill** (seed 65474; 23/25 before the fix, seed 59200 — the two window trials held the same file as needs_choice).
+>
+> **Repro scripts after the fixes.** skip/s1_dedupkey: 4 keys differing from
+> the stated expectation -> 0; s3_identity A1–A4 (gzip levels, .json vs .gz,
+> link then inbox): each was 2 done / 600 rates -> 1 done + 1 "the same content
+> as …" / 300 (case C still loads twice: it lowers the hash limit to 1 MB on
+> purpose, a limit that no longer exists); s10_known: a pasted index after
+> the monthly tick was 'done' (never re-checked) -> 'queued'; s7 C, the
+> re-paste of an unchanged done link, still costs 0 requests (right: the code
+> list did not grow); diff/p_g: left at 2026-05 -> re-downloaded, 2026-06;
+> mine/stale_pickers: no field anywhere -> `analytics` in /api/stats and
+> /api/boot, /api/payers {3 payers, covered 1}; diff/p_c (Clear-queue window)
+> unchanged by design (the confirm text now says it); diff/vm1_handworked: its
+> four quartile expectations encode the OLD rule — the 4.1 change, on purpose.
+>
+> **Zip:** built from the release commit with `git archive --format=zip --prefix=Claudevideo/` to the session scratchpad (`mrfx_project.zip`), extracted into a fresh folder and checked there — version 0.7.7, both .bat launchers CRLF, every committed file identical; the results are in the session report.
 
 ## What the user asked for, in their words
 
@@ -41,6 +192,16 @@
   in a DuckDB experiment (`docs/review13_repros/progress/DESIGN.md`, 691 lines).
 - **The skip protocol enumerated decision by decision** with a repro per
   decision (`docs/review13_repros/skip/SKIP_REVIEW.md`) — Group 5.
+- **The 0.7.6 zip's full suite, run by the session lead:** 1 failed, 1193
+  passed, 26:48 (log `scratchpad/audit13/full_suite_076_zip.log`). The
+  failure is a real pre-existing race, not noise:
+  `test_parallel_ingest_matches_serial` (parallel_ingests=2, two rate files
+  + the first payer's companion provider list) expects (6, 4) rows and the
+  failing runs give (4, 4) — the list finished while its payer's rate file
+  was being read and was never applied. Measured on pristine copies, 12 runs
+  each: 0.7.6 (c8b80fc) 3 failed, 0.7.5 (68d9bc7) 4 failed; failing runs
+  take ~5.3 s against ~6.9 s. Added as Group 5 item 5.2.7 (P0: rows silently
+  short until the user acts).
 - **The user's screenshot reproduced** on a scratch store
   (`docs/review13_repros/mine/stale_pickers.py`): header 3 payers, chips 1,
   Explorer counting 82,546 rows against 1,130,194 in the header, the store

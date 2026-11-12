@@ -192,7 +192,9 @@ skipped with a note saying which link it duplicates — your database stays
 clean even if you paste every state's index.
 
 - **The same link twice** is never downloaded again: once a link is done,
-  pasting it again (even with a fresh "signed" ending) is ignored.
+  pasting it again (even with a fresh "signed" ending) is ignored — unless
+  you have ADDED billing codes since it was read; then pasting it reads it
+  again for the new codes.
 - **The same file under a different link** is caught EARLY when it can be
   proven a copy: after the first 15 MB arrive, the app compares them with
   every file you have already loaded of exactly the same size (links AND
@@ -222,6 +224,23 @@ clean even if you paste every state's index.
   it to a big slot at once, before saving any of it. Change with
   `small_file_downloads:` / `small_file_mb:` in `config/mrfx.yaml` (0 = no
   lanes; add the lines if your file doesn't have them).
+
+> **When is a file skipped, and when is it loaded again?** (version 0.7.7)
+>
+> - **Skipped:** the same link pasted again; a file with the same contents as
+>   one already loaded — even if it is compressed differently, or one is the
+>   `.json` and the other the `.json.gz` ("the same content as X"); an
+>   allowed-amounts or drug-price file (no negotiated rates). The Files tab
+>   always says which file it duplicates, or why it was left out.
+> - **Loaded again:** a file the payer CHANGED (once a month the app asks
+>   every payer index you loaded whether each of its files changed — one tiny
+>   request per file — and downloads only the changed ones; the index row
+>   says "last checked … · next check …"); the files read before you ADDED
+>   billing codes (the Files tab's **Re-read N files for the new codes**
+>   button); a file you forgot and pasted again.
+> - **Held for you to decide:** a different file dropped into `data/inbox`
+>   under the name of one already loaded (Replace / Keep both).
+> - Nothing is ever counted twice: two files with the same contents load once.
 
 **Don't want to hunt for links at all?** The app ships ready to go:
 
@@ -788,9 +807,9 @@ prompt). They're an alternative to the dashboard buttons.
 | `mrfx export out.csv --cpt 97110 --payer "Aetna"` | Export a filtered CSV + methodology sidecar (state filtering lives in the dashboard and `mrfx outreach`) |
 | `mrfx outreach contacts.csv --state MO --cpt 97110,97140` | Contact/mail-merge CSV |
 | `mrfx enrich` | Fill in provider names/geography now (downloads this month's NPPES file first if needed — see "Provider names fill in automatically" above); `--bulk <zip>` uses a file you choose |
-| `mrfx packets` | Write this month's packet for every watchlist client |
+| `mrfx packets [--pdf]` | Write this month's packet for every watchlist client (`--pdf`: a PDF beside every document) |
 | `mrfx renewals --clients` | Contracts with a real published end date, soonest first |
-| `mrfx backup E:\backups\mrfx.zip` | Copy the whole store into one zip with a checksum manifest (stop the server first) |
+| `mrfx backup E:\backups\mrfx.zip` | Copy the whole store into one zip with a checksum manifest (stop the server first; or set `backup_dir` and the running app does it weekly) |
 | `mrfx verify [backup.zip]` | Check a backup against its manifest, or (no argument) the live store's integrity |
 | `mrfx medicare --from-tracker` | Find the Order & Referring Tracker's folder and import everything new from it (stop the server first; the dashboard's Import button needs no stopping) |
 | `mrfx medicare --eligibility <csv>` | Import the CMS Order & Referring roster the tracker downloaded (stop the server first) |
@@ -1031,6 +1050,118 @@ Downloads and files:
   factor that doesn't match the file's own is refused.
 - **"fee for service" / "fee_schedule"** spelled differently by a payer no
   longer drop rates.
+
+## What changed in version 0.7.7 (review 13)
+
+**The header says what the numbers are made of.** Loading a big payer is
+fast; folding it into the numbers every screen reads (the "analytics") takes
+longer — on a store of a billion rates, a few hours. Until 0.7.7 the screens
+answered from whatever had been folded in so far without a word, so with 49
+payers loaded the dashboard could quietly be showing 3. Now, while the
+analytics are behind, the line at the top right says so in orange:
+
+> 1,163,544,071 rates · 49 payers · 615 files · **Analytics cover 3 of 49
+> payers (3 of 615 files). Rolling up the rest — 41 %, about 2 h left**
+
+Payers not folded in yet are greyed in every payer list (you can still pick
+them; a screen with nothing for them says why), every report and export
+prints the same sentence in its methodology, and the line disappears when
+everything is covered. The fold-in itself is now done payer by payer and
+remembers where it was: stop the app half way and it carries on from there
+next time (it used to start over), and each payer shows up on screen as soon
+as its turn is done. On this program's 99-million-rate test store a full
+build went from 12 minutes to 6; for a store of 1.16 billion rates expect
+**about 2 to 4 hours on a laptop, the dashboard usable throughout, the header
+showing how far it is**. If it fails (for example out of memory), the line
+says why and it tries again by itself.
+
+**A progress bar on everything you build.** Every report, export, search
+and packet now shows a bar under its button, from 0 to 100 %, with what it is
+doing in words and a **Stop** button:
+
+> Rate card — **Comparing with peers** — 46 % ▕██████░░░░░░▏ Stop
+
+It only reaches 100 % when the result is in your hands; for a download it
+ends at "built — your browser is downloading it". Stop really stops the work
+on the computer (nothing half-built is shown). The `mrfx export / outreach /
+packets / orgreport` commands print the same steps in the terminal.
+
+**Faster.** Measured on the 99-million-rate store: a practice's details
+(the panel on the right) 30 s → 1.6 s; the Overview 27 s → 2.3 s; the
+outreach file for every practice 71 s → 37 s (one state 12 s → 5 s); the city
+rate map 9.4 s → 0.2 s; market sizing 7 s → 0.8 s; the client digest 17 s →
+5 s; "validate a tax ID" 14 s → 0.6 s; the header counts 6.8 s → 1 s. The
+numbers and files are byte-for-byte the same.
+
+**Save as PDF.** Beside every "Open printable" button (pitch report,
+negotiation one-pager, payer comparison, proposal, rate card, visit value,
+practice profile, market report) there is now **Save as PDF**: the same
+document, as a PDF file in your Downloads folder, ready to e-mail. It uses
+the small built-in browser the app already downloads the first time it needs
+one (the same one it uses for payer sites that need JavaScript). If that
+browser is not available, the button says so and "Open printable" + your
+browser's Print → Save as PDF still works. `mrfx packets --pdf` saves a PDF
+beside every document of the monthly packets.
+
+**Medicaid and hospital rates in your negotiation documents.** If you have
+loaded your state's Medicaid fee schedule (`mrfx floors`) or hospital price
+files (`mrfx hospital`), the negotiation one-pager, the payer comparison, the
+proposal and the practice profile now carry one line per code, for example:
+
+> Medicaid pays $30.00 for 97110 in MO; Alpha Health pays you $28.00 (below
+> Medicaid).
+> 97110: Alpha Health pays 2 MO hospitals a median $107.50 ($95.00–$120.00;
+> you: $28.00).
+
+Nothing loaded? The document says that line is left out and why.
+
+**Automatic backups.** Your store took weeks of downloads and lives only on
+this computer. In `config/mrfx.yaml`, set `backup_dir:` to a folder —
+ideally on an external or second drive, for example `D:/mrfx-backups` —
+and restart. While the dashboard runs, it writes a backup there every 7 days
+(`backup_every_days`) without stopping anything, checks it, and keeps the
+newest 4 (`backup_keep`; it only ever deletes backups it made). If the drive
+is too full it does not try — it says so instead. The **Files** tab shows
+"Last backup: date, size, folder (checked OK)" and a **Back up now** button.
+To restore: stop the app, unzip the backup, and put the contents of its
+`store` folder in place of your store folder (`data/mrfx_store` unless you
+changed `store_dir`). `mrfx verify <backup zip>` checks any backup first.
+Also on the command line: `mrfx backup` and `mrfx verify` as before.
+
+**Links you can bookmark, and one search box.** The address bar now follows
+the screen: after you run a benchmark it reads, for example,
+`…/#benchmark?subject=ACME%20REHAB&state=MO` — bookmark it, or send it to
+yourself, and opening it runs that benchmark again (Negotiate, Rate card,
+Rate changes and Medicare work the same way). At the top right, **Find a
+practice** takes a name, a 9-digit tax ID or a 10-digit NPI: press Enter and
+the practice's details open on the right.
+
+**What is skipped, and what loads again** (the box "When is a file skipped"
+in Step 5 has the whole rule):
+
+- The same document **compressed differently** (or saved unzipped) is now
+  recognised as the same file and loaded once — before, it could be counted
+  twice.
+- Once a month the app now asks every payer index you loaded — the ones you
+  pasted too — whether each of its files changed, and downloads only the
+  changed ones (`monthly_recheck: true`, on by default). A file whose size
+  changed under the same version tag is now treated as changed.
+- **After you add billing codes** to `codes.cpt_codes`, restart: the Files
+  tab says how many loaded files were read before the new codes and offers
+  **Re-read N files for the new codes** — press it once. (The old advice to
+  "re-add the links" did nothing.)
+- A provider list that finished downloading while its payer's rate file was
+  being read is now always applied (before, about one time in four, a few
+  rates of that payer were silently missing until the file was loaded again).
+- Payer listings no longer drop an employer whose name merely contains
+  "allowed" or "NDC"; what a listing leaves out is said on its row.
+
+**Numbers.** One small rule change: in "Visit value in this market" the
+quartile now follows the printed percentile (a practice at percentile 26 is
+in the second quartile, as you would read it). A practice's rate across all
+its payers is still the middle of its published lines (a payer that lists a
+code twice, for two places of service, counts twice) — that rule is now
+printed under every such figure. Nothing else changed.
 
 ## What changed in version 0.7.6 (review 12)
 
