@@ -6896,7 +6896,7 @@ class Store:
 # download) is deliberately absent: no worker waits on progress.
 # tests/mrfx/test_queue_signal.py fails if a url_queue writer is missing here.
 _QUEUE_WRITERS_ALWAYS = ("update_url", "pause_url", "park_url", "park_waiting", "record_identity",
-                         "forget_file", "reset")
+                         "forget_file", "reset", "note_unlisted_children")
 _QUEUE_WRITERS_IF_DONE = ("_claim_next", "enqueue_url", "enqueue_urls", "requeue_failed",
                           "requeue_oversize_within", "requeue_urls", "wake_paused_urls",
                           "wake_parked_urls",

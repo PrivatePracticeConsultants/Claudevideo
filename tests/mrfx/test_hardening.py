@@ -906,12 +906,17 @@ def test_scan_inbox_rebuilds_once_per_pass(cfg, store, monkeypatch):
     from tests.mrfx.conftest import drop
 
     drop(cfg, "innetwork_mixed.json", gz=True)
-    # same fixture under a second name = a second real ingest in one pass
+    # the same fixture under a second name, one byte different = a second
+    # real ingest in one pass. (Changed in 0.7.7, review 13 item 5.2.1: the
+    # byte-identical decompressed copy this used is now — correctly — the
+    # same CONTENT as the .gz and skipped as a duplicate; the trailing
+    # newline keeps this test about two real ingests.)
     import gzip
     import shutil
     src = cfg.inbox_dir / "innetwork_mixed.json.gz"
     with gzip.open(src) as fin, open(cfg.inbox_dir / "second_copy.json", "wb") as fout:
         shutil.copyfileobj(fin, fout)
+        fout.write(b"\n")
 
     calls = []
     real = store.rebuild_rollups
