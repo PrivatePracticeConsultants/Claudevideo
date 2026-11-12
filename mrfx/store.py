@@ -1003,6 +1003,45 @@ TIN_DIRECTORY_QUERY = (
     .replace("{small_practice}", str(THERAPY_SMALL_PRACTICE_NPIS))
 )
 
+# The directory reads the raw rates three ways — the (TIN, NPI) pairs, the
+# rows per (TIN, discipline), the (TIN, TIN type) pairs — and nothing else.
+# All three come exactly from ONE compact aggregate of the raw rows, built in
+# a single pass (0.8.1, `Store._dir_source`): a directory cut into k hash
+# classes of tin_value used to read the whole raw store k times (the hash
+# predicate cannot skip a row group) — 74 x ~4 min on a 1.18 B-rate store.
+# Exact: DISTINCT over the aggregate equals DISTINCT over the rows it groups,
+# and sum(n) equals count(*); rows with no TIN feed none of the three (the
+# pairs and the discipline counts filter them, and the TIN-type join never
+# matches a NULL). Pinned by test_v081 (directory byte-identical both ways).
+DIR_SOURCE_SELECT = (
+    "SELECT tin_value, npi, tin_is_really_npi, tin_type, discipline, count(*) AS n "
+    "FROM rates WHERE tin_value IS NOT NULL "
+    "GROUP BY tin_value, npi, tin_is_really_npi, tin_type, discipline")
+
+_DIR_READS = (
+    ("SELECT DISTINCT tin_value, npi\n        FROM rates\n",
+     "SELECT DISTINCT tin_value, npi\n        FROM {src}\n"),
+    ("SELECT tin_value, discipline, count(*) AS c\n              FROM rates WHERE",
+     "SELECT tin_value, discipline, sum(n) AS c\n              FROM {src} WHERE"),
+    ("(SELECT DISTINCT tin_value, tin_type FROM rates WHERE {part}) r",
+     "(SELECT DISTINCT tin_value, tin_type FROM {src} WHERE {part}) r"),
+)
+
+
+DIR_SOURCE_TABLE = "rollup_dir_source"
+
+
+def _dir_query_over(src: str) -> str:
+    """TIN_DIRECTORY_QUERY reading `src` (a table of DIR_SOURCE_SELECT's
+    columns) instead of the raw rates. Falls back to the raw query unless
+    every read was rewritten exactly once — never a half-rewritten query."""
+    q = TIN_DIRECTORY_QUERY
+    for old, new in _DIR_READS:
+        if q.count(old) != 1:
+            return TIN_DIRECTORY_QUERY
+        q = q.replace(old, new.replace("{src}", src))
+    return q if "FROM rates" not in q else TIN_DIRECTORY_QUERY
+
 
 # Every path that puts a finished / stopped / paused row back in the queue
 # resets the row's per-attempt bookkeeping through THIS fragment (review 11
@@ -5096,6 +5135,24 @@ class Store:
         if n_rows is None:
             n_rows = con.execute(
                 f"SELECT count(*) FROM rates WHERE {payer_pred}").fetchone()[0] or 0
+        # TOO BIG FOR ONE UPDATE (0.8.1). This update is ONE transaction cut
+        # into hash partitions, and every partition re-reads all the affected
+        # rows (a hash predicate cannot skip a row group): parts x rows read,
+        # nothing visible until the last part, everything lost on a restart.
+        # On the field store — 456 new files, 49 payers, 1.135 B rows, 296
+        # partitions — that was ~336 B rows read and it never finished in a
+        # night (restarted from part 1 after every stop). When it would read
+        # more than one pass over the WHOLE store, the durable payer-by-payer
+        # build is cheaper AND each payer appears as it lands AND a restart
+        # keeps what is done: say so and hand over (fold_in runs the plan).
+        parts = max(1, -(-int(n_rows or 0) // self._rollup_partition_rows(1, threads)))
+        if parts > 1:
+            total = con.execute("SELECT count(*) FROM rates").fetchone()[0] or 0
+            if parts * int(n_rows or 0) > total:
+                raise RollupNeedsFull(
+                    f"a large update ({int(n_rows):,} rows of the {total:,} loaded would be "
+                    f"re-read {parts} times in one go) — building payer by payer instead, "
+                    "each payer saved as it finishes")
         # escalate PARTITION fineness on OOM (never thread count) until it fits
         for split in (1, 2, 4, 8, 16, 32, 64):
             try:
@@ -5490,7 +5547,8 @@ class Store:
         rpp = self._rollup_partition_rows(1, threads)
         log.info("analytics build: planning (counting rows per payer and code)…")
         n_rows = con.execute("SELECT count(*) FROM rates").fetchone()[0] or 0
-        slices = list(rollplan.dir_slices(n_rows, rpp))
+        dir_part = list(rollplan.dir_slices(n_rows, rpp))
+        slices: list = []
         payers: list = []
         if kind == "full":
             counts = con.execute(
@@ -5499,9 +5557,15 @@ class Store:
             spine = rollplan.spine_slices(counts, rpp)
             payers = sorted({s["payer"] for s in spine if s["payer"] is not None})
             has_null = any(s["payer"] is None for s in spine)
+            # PAYERS FIRST (0.8.1): a payer is on every screen the moment its
+            # spine slices commit; the name directory — independent of the
+            # spine — comes after. 0.8.0 put the directory first, and on a
+            # 1.18 B-rate store no payer appeared for ~5 hours while it ran.
+            # (A plan stored by 0.8.0 keeps its own order when resumed.)
+            slices.extend(spine)
             slices.append({"t": "prune", "payers": payers, "null_payer": has_null,
                            "k": 1, "i": 0, "rows": 0, "work": 1})
-            slices.extend(spine)
+        slices.extend(dir_part)
         # where each table is built: in place (the live table, queryable as it
         # fills) when its columns are what this version writes; a fresh
         # `<table>__next` swapped in at the end when they are not (a schema
@@ -5532,6 +5596,9 @@ class Store:
                     else:
                         con.execute(f"CREATE OR REPLACE TABLE {tbl}__next ({ddl})")
                         targets[tbl] = f"{tbl}__next"
+                # a dropped plan's directory source never serves a new plan
+                con.execute(f"DROP TABLE IF EXISTS {DIR_SOURCE_TABLE}")
+                con.execute("DELETE FROM meta WHERE key = 'rollup_dir_source'")
                 plan = {
                     "id": os.urandom(6).hex(), "kind": kind,
                     "versions": self._plan_versions(),
@@ -5650,6 +5717,65 @@ class Store:
             log.info("analytics build finished in %.0fs", took)
             return took
 
+    def _dir_source(self, con: duckdb.DuckDBPyConnection, plan: dict, log) -> str | None:
+        """The plan's one-pass directory source (`DIR_SOURCE_SELECT`): built
+        the first time one of its directory slices runs, kept across a kill
+        or restart (`meta('rollup_dir_source')` = the plan id), dropped when
+        the plan finishes. A file that lands after it was built reaches the
+        directory through the next update (the coverage snapshot rule — its
+        TINs are recomputed from every part that holds them). None when it
+        cannot be built: the slices then read the raw rates as before —
+        slower, never wrong. Never raises."""
+        pid = str(plan.get("id") or "")
+        try:
+            if pid and self._meta_get(con, "rollup_dir_source") == pid and con.execute(
+                    "SELECT count(*) FROM information_schema.tables WHERE table_name = ?",
+                    [DIR_SOURCE_TABLE]).fetchone()[0]:
+                return DIR_SOURCE_TABLE
+        except duckdb.Error:
+            return None
+        log.info("analytics build: reading every practice's NPIs ONCE for the name "
+                 "directory (one pass over the store; the %s directory parts then "
+                 "read that, not the store)",
+                 sum(1 for s in plan.get("slices", []) if s.get("t") == "dir"))
+        job = getattr(self, "_rollup_job", None)
+        if isinstance(job, dict):
+            job["label"] = "practice names and places — one pass over the store"
+        t0 = time.monotonic()
+        try:
+            cols = con.execute("DESCRIBE " + DIR_SOURCE_SELECT.replace(
+                "WHERE tin_value IS NOT NULL", "WHERE FALSE")).fetchall()
+            ddl = ", ".join(f'"{name}" {typ}' for name, typ, *_ in cols)
+            with self.write_lock:       # catalog writes: never race _register_views
+                con.execute(f"DROP TABLE IF EXISTS {DIR_SOURCE_TABLE}")
+                con.execute("DELETE FROM meta WHERE key = 'rollup_dir_source'")
+                con.execute(f"CREATE TABLE {DIR_SOURCE_TABLE} ({ddl})")
+            # the long read runs OUTSIDE the write lock, like every slice
+            con.execute("BEGIN TRANSACTION")
+            try:
+                con.execute(f"INSERT INTO {DIR_SOURCE_TABLE} {DIR_SOURCE_SELECT}")
+                con.execute("INSERT OR REPLACE INTO meta VALUES ('rollup_dir_source', ?)",
+                            [pid])
+                con.execute("COMMIT")
+            except Exception:
+                try:
+                    con.execute("ROLLBACK")
+                except duckdb.Error:
+                    pass
+                raise
+            try:
+                con.execute("CHECKPOINT")
+            except duckdb.Error:
+                pass
+            n = con.execute(f"SELECT count(*) FROM {DIR_SOURCE_TABLE}").fetchone()[0]
+            log.info("analytics build: name-directory source ready — %s rows in %.0fs",
+                     f"{n:,}", time.monotonic() - t0)
+            return DIR_SOURCE_TABLE
+        except Exception as e:  # noqa: BLE001 — the raw read is always right
+            log.warning("analytics build: the one-pass name-directory source could not "
+                        "be built (%s) — the directory parts read the store directly", e)
+            return None
+
     def _run_slice(self, con: duckdb.DuckDBPyConnection, plan: dict, idx: int, log) -> None:
         """One slice: delete what it recomputes, insert it, advance the plan —
         one transaction. A spine slice writes a new spine token in the same
@@ -5659,13 +5785,20 @@ class Store:
         nxt = dict(plan, next=idx + 1, work_done=int(plan.get("work_done", 0)) + int(sl.get("work", 1)))
         spine = plan["targets"].get("rates_by_tin_tbl", "rates_by_tin_tbl")
         directory = plan["targets"].get("tin_directory_tbl", "tin_directory_tbl")
+        # a directory cut into k > 1 hash classes reads ONE compact source
+        # built from the raw rates in a single pass (0.8.1), never k passes
+        dir_query = TIN_DIRECTORY_QUERY
+        if sl["t"] == "dir" and int(sl.get("k", 1)) > 1:
+            src = self._dir_source(con, plan, log)
+            if src is not None:
+                dir_query = _dir_query_over(src)
         con.execute("BEGIN TRANSACTION")
         try:
             if sl["t"] == "dir":
                 pred = rollplan.slice_pred(sl)
                 con.execute(f"DELETE FROM {directory} WHERE {pred}")
                 con.execute(f"INSERT INTO {directory} BY NAME "
-                            + TIN_DIRECTORY_QUERY.format(part=pred))
+                            + dir_query.format(part=pred))
             elif sl["t"] == "prune":
                 keep = list(sl.get("payers") or [])
                 null_clause = "FALSE" if sl.get("null_payer") else "payer IS NULL"
@@ -5736,6 +5869,9 @@ class Store:
                 con.execute("INSERT OR REPLACE INTO meta VALUES ('directory_schema_version', ?)",
                             [str(DIRECTORY_SCHEMA_VERSION)])
                 con.execute("DELETE FROM meta WHERE key = 'rollup_plan'")
+                # the plan's one-pass directory source goes with the plan (0.8.1)
+                con.execute(f"DROP TABLE IF EXISTS {DIR_SOURCE_TABLE}")
+                con.execute("DELETE FROM meta WHERE key = 'rollup_dir_source'")
                 con.execute("DROP TABLE IF EXISTS rates_dedup_tbl")
                 con.execute(f"CREATE OR REPLACE VIEW rates_dedup AS {DEDUP_QUERY}")
                 con.execute("COMMIT")
@@ -6402,13 +6538,21 @@ class Store:
                     # whole store every minute while a billion-row rollup
                     # catches up competed with the rollup itself (review 13)
                     inv = self.loaded_inventory()
+                    rates_n = con.execute("SELECT count(*) FROM rates").fetchone()[0]
                     if inv.get("complete"):
-                        rates_n = con.execute("SELECT count(*) FROM rates").fetchone()[0]
                         tins, payers = inv["tins"], len(inv["payers"])
                     else:
-                        rates_n, tins, payers = con.execute(
-                            "SELECT count(*), count(DISTINCT tin_value), count(DISTINCT payer) "
-                            "FROM rates").fetchone()
+                        # NEVER a raw count(DISTINCT) over the store here
+                        # (0.8.1): on 1.18 B rows behind a running update that
+                        # one header poll took 55 minutes. Payers come from the
+                        # files table; TINs from what the per-part sets hold
+                        # so far, never below the last count shown (the sets
+                        # finish on the next polls, a few seconds each).
+                        payers = con.execute(
+                            "SELECT count(DISTINCT payer) FROM files WHERE status = 'done' "
+                            "AND rows_emitted > 0 AND payer IS NOT NULL").fetchone()[0] or 0
+                        prev = self._store_stats_cache[1] if self._store_stats_cache else {}
+                        tins = max(int(inv.get("tins") or 0), int(prev.get("tins") or 0))
             result = {"rates": rates_n, "tins": tins, "payers": payers}
             self._store_stats_cache = (time.monotonic(), result)
             return result
@@ -6842,6 +6986,13 @@ class Store:
         held = getattr(self, "_spine_payers_cache", None)
         if held is not None and held[0] == gen:
             return list(held[1])
+        # while a build commits a slice every few seconds the generation moves
+        # every few seconds: a DISTINCT over a spine of hundreds of millions
+        # of rows per slice competed with the build itself (0.8.1). Recount at
+        # most every 30 s while one runs; at once when nothing is building.
+        if held is not None and self._rollup_active and len(held) > 2 \
+                and time.monotonic() - held[2] < 30.0:
+            return list(held[1])
         try:
             with self.connect() as con:
                 if not con.execute("SELECT count(*) FROM information_schema.tables "
@@ -6852,7 +7003,7 @@ class Store:
                     "ORDER BY payer").fetchall()]
         except Exception:  # noqa: BLE001
             return list(held[1]) if held is not None else []
-        self._spine_payers_cache = (gen, got)
+        self._spine_payers_cache = (gen, got, time.monotonic())
         return list(got)
 
     def analytics_coverage(self, max_age_seconds: float = 3.0) -> dict:
@@ -6863,7 +7014,6 @@ class Store:
         spine DISTINCT per spine generation); cached a few seconds. Never
         raises: a failure reads as state 'current' with no numbers rather than
         a broken header."""
-        from . import rollplan
         held = getattr(self, "_coverage_cache", None)
         # while a build runs its percentage moves: half a second at most, so
         # the header and the panel's bar say the same number (review 14 1.2)
@@ -6871,6 +7021,26 @@ class Store:
         if held is not None and time.monotonic() - held[0] < age \
                 and held[2] == (self.data_generation, self._rollup_active):
             return held[1]
+        # single-flight (0.8.1): the header, the Files tab and the panel all
+        # poll this; behind a running billion-row update one computation can
+        # take minutes, and every poll started ANOTHER one — the 55-minute
+        # /api/stats in the field log. One computes; the rest get the last
+        # answer (seconds old), and only the very first caller ever waits.
+        lock = self.__dict__.setdefault("_coverage_lock", threading.Lock())
+        if not lock.acquire(blocking=False):
+            if held is not None:
+                return held[1]
+            lock.acquire()
+        try:
+            again = getattr(self, "_coverage_cache", None)
+            if again is not None and again is not held and time.monotonic() - again[0] < age:
+                return again[1]
+            return self._analytics_coverage_now()
+        finally:
+            lock.release()
+
+    def _analytics_coverage_now(self) -> dict:
+        from . import rollplan
         try:
             out = self._analytics_coverage()
         except Exception as e:  # noqa: BLE001

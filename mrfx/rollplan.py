@@ -41,6 +41,11 @@ DIR_ROWS_FACTOR = 16
 # slice scans every raw row but aggregates far less.
 DIR_WORK_FACTOR = 0.25
 
+# All the directory slices of a plan read from the one-pass source together
+# cost about this fraction of that pass (measured on the 99M store: the
+# source is a few percent of the raw rows) — the ETA weight only.
+DIR_SLICE_FROM_SOURCE = 0.1
+
 # Never cut a slice finer than this many hash classes: past it the failure is
 # not the slice's size (a broken disk, a full temp drive) and is reported.
 MAX_HASH_CLASSES = 1024
@@ -100,10 +105,21 @@ def spine_slices(counts: list[tuple], rows_per_slice: int) -> list[dict]:
 
 def dir_slices(n_rows: int, rows_per_slice: int) -> list[dict]:
     """Directory slices: hash classes of tin_value, cut DIR_ROWS_FACTOR times
-    coarser than a spine slice (see the constant)."""
+    coarser than a spine slice (see the constant).
+
+    Since 0.8.1 a plan with more than one directory slice reads the raw rates
+    ONCE, into a compact (TIN, NPI, …) source table (`Store._dir_source`), and
+    every slice reads that: the hash predicate cannot skip a row group, so k
+    slices over the raw store were k whole-store reads (74 x ~4 min on a
+    1.18 B-rate store). The work weights say so — the first slice carries the
+    one pass, the rest are small — so the ETA does not wait for 74 passes."""
     k = max(1, math.ceil(max(0, int(n_rows)) / max(1, rows_per_slice * DIR_ROWS_FACTOR)))
-    work = max(1, int(n_rows * DIR_WORK_FACTOR / k)) if n_rows else 1
-    return [{"t": "dir", "k": k, "i": i, "rows": int(n_rows), "work": work}
+    one_pass = max(1, int(n_rows * DIR_WORK_FACTOR)) if n_rows else 1
+    if k == 1:
+        return [{"t": "dir", "k": 1, "i": 0, "rows": int(n_rows), "work": one_pass}]
+    rest = max(1, int(one_pass * DIR_SLICE_FROM_SOURCE / k))
+    return [{"t": "dir", "k": k, "i": i, "rows": int(n_rows),
+             "work": one_pass if i == 0 else rest}
             for i in range(k)]
 
 

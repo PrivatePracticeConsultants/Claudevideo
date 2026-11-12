@@ -972,6 +972,57 @@ Pinned by `tests/mrfx/test_review14.py` (every Group 1-3 case fails on
   paste is durable (`meta('pending_paste')`, `resume_pending_paste`). A
   hospital of an already-loaded name from another file is refused.
 
+### 0.8.1 additions (Nov 13, 2026) — the field store's analytics; rules a change must keep
+
+Found on the user's store (1.18 B rates, 50 payers, 465 files, a Windows
+laptop): the analytics sat at "3 of 50 payers" all night. Pinned by
+`tests/mrfx/test_v081.py` (8 of its 10 cases fail on 7f60026 with the value
+in their docstrings; the other 2 are no-step-backwards pins).
+
+- **Cost rule for an update** (`Store._apply_rollup_delta`). The payer-scoped
+  incremental is ONE transaction cut into hash partitions, and every
+  partition re-reads ALL the affected rows (a hash predicate never skips a
+  row group): cost = partitions x affected rows, nothing visible until the
+  end, everything lost on a restart. When that exceeds one pass over the
+  whole store it raises `RollupNeedsFull("a large update …")` before writing
+  anything, and `foldin.fold_in` runs the durable plan instead. The field
+  case: 456 files, 1.135 B rows, 296 partitions (~336 B rows read). On the
+  99M store: 0.8.0 was at partition 12 of 33 after 240 s, nothing visible;
+  0.8.1 handed over and finished in 406 s with payers visible from ~12 s.
+  A small update (one partition) is unchanged. Never route a large delta
+  through hash partitions again; a payer-scoped PLAN (spine slices for the
+  affected payers only) would be the next improvement.
+- **Payers first** (`Store._new_plan`): a new full plan is spine slices, then
+  the prune, then the directory — the directory is independent of the spine
+  and a payer is on screen when its spine slices commit. A plan stored by
+  0.8.0 (directory first) resumes in ITS order; `_plan_versions` did not
+  change, so a running build is never discarded by this release.
+- **The directory in one pass** (`DIR_SOURCE_SELECT`, `Store._dir_source`,
+  `_dir_query_over`). The directory reads the raw rates three ways — (TIN,
+  NPI) pairs, rows per (TIN, discipline), (TIN, TIN type) — all exactly
+  derivable from ONE aggregate grouped by (tin_value, npi,
+  tin_is_really_npi, tin_type, discipline) with count(*) AS n. A plan with
+  k > 1 directory slices builds that aggregate once (table
+  `rollup_dir_source`, `meta('rollup_dir_source')` = the plan id; kept across
+  a kill, dropped by `_finish_plan` and by `_new_plan`), and each slice reads
+  it. Byte-identical: real files (spine 190,652 / directory 3,511 rows) and
+  the 99M store (79,027,749 / 194,000, fingerprints equal across 0.8.0, 0.8.1
+  and a kill-and-resume). A file landing after the source was built reaches
+  the directory through the next update (its TINs are recomputed from every
+  part holding them — the coverage snapshot rule). `_dir_query_over` falls
+  back to the raw query unless every read was rewritten exactly once: a
+  change to TIN_DIRECTORY_QUERY's reads must update `_DIR_READS`.
+- **The header never waits** (`/api/stats`): its body is computed by ONE
+  background thread at a time; a request waits at most `api.STATS_WAIT_S`
+  (8 s) and otherwise answers with the last body (or, before any, a minimal
+  one from the files table). A part-swap error in that computation is asked
+  again once (the SwapRetryMiddleware rule, review 11 1.8). `store_stats`
+  never runs a raw count(DISTINCT) over `rates` (payers from the files table,
+  TINs from the per-part sets, never below the last shown);
+  `analytics_coverage` is single-flight; `spine_payers` recounts at most every
+  30 s while a build runs. Measured on the 99M store during a build: median
+  0.03 s, p95 0.21 s, max 6.8 s (the field log: 5 s .. 55 min).
+
 #### The skip protocol in one page (amended in 0.7.7; rules 4, 7, 8, 9 changed)
 
 1. **A LINK is one queue row per `dedup_key`** = `scheme://host(lower)/path(as is)?sorted query minus signature params` (always: `expires signature policy key-pair-id awsaccesskeyid sig x-amz-<signing>`, GCS V4 `x-goog-*`, Akamai `__token__`, a lone JWT `token`; beside a signature param also the Azure SAS names and `token/st/policy` only when the value LOOKS like a signature part — JWT, date, epoch, `%`/`=`/`+`/`/`, 40+ hex). `http`/`https`, `:443`, trailing slash, percent-encoding and host aliases are DIFFERENT rows; content decides later. A paste of an existing key refreshes the row's url (not in flight) and revives `failed` / `skipped` / `oversize` / a done index; a known duplicate pasted again is answered from what is loaded, no byte downloaded. **A done RATE row is re-read by a paste only when billing codes were added since it was read**; otherwise only forget + paste, the monthly re-check, `requeue_url_for_file`, or a re-expansion that finds it republished.

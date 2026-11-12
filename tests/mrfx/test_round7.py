@@ -1221,6 +1221,6 @@ def test_paused_rows_block_forget_and_the_caches_and_version(cfg, store, capsys)
     assert hasattr(compute_rate_changes, "uncached") and hasattr(payer_months, "uncached")
     with pytest.raises(SystemExit):
         main(["--version"])
-    # bumped with every release (round 14: 0.8.0 — the analytics panel and the
-    # verified fold-in are a visible step)
-    assert capsys.readouterr().out.strip() == f"mrfx {__version__}" == "mrfx 0.8.0"
+    # bumped with every release (0.8.1: the field store's analytics — large
+    # updates payer by payer, the directory in one pass, the header never waits)
+    assert capsys.readouterr().out.strip() == f"mrfx {__version__}" == "mrfx 0.8.1"

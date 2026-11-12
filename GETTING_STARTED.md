@@ -1055,6 +1055,39 @@ Downloads and files:
 - **"fee for service" / "fee_schedule"** spelled differently by a payer no
   longer drop rates.
 
+## What changed in version 0.8.1
+
+A fix for very large stores, found on a real one (1.18 billion rates, 50
+payers, 465 files) where the analytics sat at "3 of 50 payers" all night.
+
+- **A big batch of new files is added payer by payer.** When many files
+  arrive at once (hundreds, or most of the store), the app no longer tries to
+  add them in one all-or-nothing update — that update re-read the new rows
+  hundreds of times, showed nothing until the very end, and started over
+  after every restart; on the store above it would have taken days. It now
+  uses the build that saves each part as it finishes: each payer appears on
+  screen as soon as its parts are done, and a stop or restart carries on from
+  the last saved part. Small batches (a few files) still go in the quick way.
+  The log says which: *"a large update … building payer by payer instead"*.
+- **Payers come first.** The build now adds every payer's rates before it
+  fills in practice names and places, so your numbers start appearing within
+  seconds of the build starting instead of hours later (on our 99-million-
+  rate test store: the first payer at 12 s, was 110 s).
+- **Practice names and places in one pass.** That part of the build used to
+  read the whole store once for every one of its parts (74 times on the store
+  above, about 4 minutes each). It now reads it once and works from a compact
+  summary — minutes instead of hours on a big store. The numbers are
+  identical to the old way (checked on real files and on the 99-million-rate
+  test store).
+- **The header never waits.** The counts at the top right are now worked out
+  in the background; while a big update runs they may be a few seconds old,
+  but the page no longer hangs (the log showed single refreshes taking up to
+  55 minutes).
+- **If you started a build with 0.8.0** (for example with the command we gave
+  you to get past the stuck update), updating to 0.8.1 does not start it over:
+  the next start continues it from its last saved part, and its remaining
+  "practice names and places" parts use the new one-pass read.
+
 ## What changed in version 0.8.0 (review 14)
 
 You asked: are the analytics really taking in every newly loaded file — and

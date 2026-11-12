@@ -74,6 +74,10 @@ from .store import SSN_PREFIXES, Store, mask_tin, sql_path
 
 log = logging.getLogger(__name__)
 
+# How long a header poll (/api/stats) waits for a fresh body before it answers
+# with the last one (0.8.1 — it never waits on an analytics update).
+STATS_WAIT_S = 8.0
+
 WEB_DIR = Path(__file__).parent / "web"
 
 
@@ -4966,9 +4970,75 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     # -- misc -------------------------------------------------------------------------------
 
+    # The header poll NEVER waits on an analytics update (0.8.1). In the field
+    # log, behind a billion-row update, /api/stats took 5 s ... 55 MINUTES per
+    # call: each part it reads (whole-store counts, names progress, coverage)
+    # is cached and single-flight, but the caller that happens to recompute
+    # one pays for it, and every 15 s poll queued another thread. Now the body
+    # is computed by ONE thread at a time; a request waits for it at most
+    # STATS_WAIT_S and otherwise answers with the last body (counts a few
+    # seconds old — the header says nothing it did not say a moment ago).
+    _stats_hold = {"body": None, "busy": None}
+    _stats_mu = threading.Lock()
+
+    def _stats_refresh() -> threading.Event:
+        """Start (or join) the one computation of the stats body; returns an
+        event set when it ends."""
+        with _stats_mu:
+            ev = _stats_hold["busy"]
+            if ev is not None:
+                return ev
+            ev = threading.Event()
+            _stats_hold["busy"] = ev
+
+        def run():
+            try:
+                try:
+                    body = _stats_body()
+                except Exception as e:  # noqa: BLE001
+                    # a read that met a part swap is asked again once — the
+                    # rule SwapRetryMiddleware keeps for requests (review 11
+                    # item 1.8); this body is computed off the request
+                    if not _part_swap_race(e):
+                        raise
+                    body = _stats_body()
+                with _stats_mu:
+                    _stats_hold["body"] = body
+            except Exception:  # noqa: BLE001 — the last body stands
+                log.debug("stats body unavailable", exc_info=True)
+            finally:
+                with _stats_mu:
+                    _stats_hold["busy"] = None
+                ev.set()
+        threading.Thread(target=run, name="mrfx-stats", daemon=True).start()
+        return ev
+
     @app.get("/api/stats")
     @_log_if_slow("/api/stats")
     def stats():
+        ev = _stats_refresh()
+        ev.wait(STATS_WAIT_S)          # module constant: tests shorten it
+        with _stats_mu:
+            body = _stats_hold["body"]
+        if body is not None:
+            return body
+        # nothing computed yet and the first computation is slow (a busy
+        # store right after start): answer from the files table alone
+        return _stats_minimal()
+
+    def _stats_minimal() -> dict:
+        with store.connect() as con:
+            rates_n, payers_n, files_done = con.execute(
+                "SELECT coalesce(sum(rows_emitted) FILTER (WHERE coalesce(file_type, '') "
+                "<> 'provider_reference'), 0), count(DISTINCT payer) FILTER (WHERE "
+                "rows_emitted > 0), count(*) FROM files WHERE status = 'done'").fetchone()
+        return {"rates": int(rates_n or 0), "tins": None, "payers": int(payers_n or 0),
+                "files_done": int(files_done or 0), "attention": [], "enrichment": None,
+                "enrichment_mode": cfg.enrichment.mode, "enrichment_bulk_active": False,
+                "default_grain": None, "data_generation": None, "analytics": None,
+                "counting": True}
+
+    def _stats_body() -> dict:
         # the whole-store counts are cached + single-flight (store_stats): this
         # endpoint is on the dashboard's 15s poll, and an uncached
         # count(DISTINCT) over 86M raw rows stacked concurrent HDD scans that
