@@ -280,16 +280,15 @@ def test_the_pairs_file_is_merged_from_per_file_pairs(cfg, vv_app, store, monkey
     new_part = f"{file_key('d_2026-06.json')}.parquet"
     spy = _Spy(store, monkeypatch)
     assert _kept_pairs(store) == _raw_pairs(store)
-    built = "\n".join(q for q in spy.sql if "tin_npi_pairs" in q or "part_pair_set" in q)
+    built = "\n".join(q for q in spy.sql if "tin_npi_pairs" in q or "part_pairs" in q)
     assert "FROM rates" not in built
     old_parts = [p.name for p in store.rates_dir.glob("*.parquet") if p.name != new_part]
     # each old part came from the kept set, never read again
     assert not any(f"{p}'" in built for p in old_parts)
     # a part not covered yet (the set lagging behind) is read in the merge
     monkeypatch.undo()
-    with store.connect() as con:
-        con.execute("DELETE FROM part_pair_set WHERE part = ?", [new_part])
-        con.execute("DELETE FROM part_pair_parts WHERE part = ?", [new_part])
+    for p in (store.dir / "part_pairs").glob(f"{new_part.removesuffix('.parquet')}.*"):
+        p.unlink()
     for p in store.dir.glob("tin_npi_pairs.*.parquet"):
         p.unlink()
     monkeypatch.setattr(store, "_pair_sets_current", lambda con, budget_s=None: False)

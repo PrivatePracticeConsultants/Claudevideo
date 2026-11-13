@@ -259,6 +259,17 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
     # re-encoded copy of one is recognised (review 14 item 2.2)
     threading.Thread(target=lambda: backfill_identities(cfg, store, stop=stop),
                      name="mrfx-identity-backfill", daemon=True).start()
+    # the kept per-part sets (NPIs, TINs, TIN-NPI pairs) the reports read
+    # instead of the whole store: brought up to date in the background, so a
+    # report never waits for them (0.8.3)
+    def _part_sets_loop():
+        if stop.wait(20):
+            return
+        while True:
+            store.warm_part_sets()
+            if stop.wait(60):
+                return
+    threading.Thread(target=_part_sets_loop, name="mrfx-part-sets", daemon=True).start()
     threading.Thread(
         target=_watcher_loop, args=(cfg, store, stop), name="mrfx-watcher", daemon=True
     ).start()

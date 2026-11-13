@@ -1001,6 +1001,26 @@ TIN give the same numbers).
   transaction (build, slice, prune, update, swap, is_latest migration,
   reset). Without the table (`rates_by_tin` = the live raw query) the parts
   still count. A new spine writer MUST write `spine_token`.
+- **(TIN, NPI) pairs kept per part** (`Store._pair_file`,
+  `_pair_sets_current`, `_write_pairs`): `pairs_relation` (practice drawer,
+  outreach, territory local/radius/steal-share, sizing, digest, org bundle,
+  new-to-network) and `placement_relation` (now built FROM the pairs: its
+  (TIN, NPI) counts are the pairs' counts summed over tin_is_really_npi)
+  re-aggregated every raw rate whenever a part changed — on the 1.19 B store
+  10 outputs answered 503 (temp disk exhausted at 4.6 GiB) and 5 returned
+  sections "could not be built". Each part's pairs are a small parquet in
+  `store/part_pairs/` named by the part and its size|mtime (a rewritten part
+  never reads old pairs; files of gone parts are deleted); written one part
+  at a time, no DB write, no lock (a first design kept them in a DuckDB table
+  and accumulated every part in one temp table before applying — 215 M rows,
+  silently failed). The merged file is `sum(c)` over those (+ the raw rows of
+  any part not covered, in the same statement), rebuilt in a loop if a part
+  changes meanwhile. `serve` runs `Store.warm_part_sets` 20 s after start and
+  every 60 s (NPI set, TIN/payer sets, pair files, then the merged pairs and
+  placement), so a report finds them built. 1.19 B store: all 540 pair files
+  73 s once (2.6 GB — every NPI there is in every payer's files, a worst
+  case), merge 24.3 s (1,939,999 pairs, sum(c) = 1,188,000,000), placement
+  from it 0.8 s.
 - **Measured** on a 1.19 B-rate store (the 99M store's parts in hash(npi,
   code) order — real files do not keep NPIs sorted — hard-linked 12x, 8 GB,
   4 cores; the data fits the page cache, so the old full scans look faster

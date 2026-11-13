@@ -1076,6 +1076,18 @@ card could sit for an hour without showing anything.
   summary is rebuilt quietly in the background when no analytics update is
   running. A file that finishes loading no longer makes it out of date; only
   the analytics adding new rates do.
+- **The practice drawer, Outreach, the local and radius maps, Leverage,
+  steal-share, market sizing, the dossier, the client digest and the Tracker
+  bundle no longer re-read the whole store.** They all use a list of which
+  NPIs work under which tax ID (and where). That list was rebuilt from every
+  rate whenever a file had finished loading; on a 1.19-billion-rate test
+  store those screens answered "needs more memory" after 15–25 seconds, or
+  took a minute with sections missing. The app now keeps that list per file
+  (each new file is read once, in the background, as it lands) and merges
+  it. Right after you install 0.8.3 it reads each loaded file once in the
+  background — a few minutes on a big store — and then only new files.
+  These kept lists take some disk space beside your data (on the
+  1.19-billion-rate test store: 2.6 GB; usually much less on real data).
 - Measured on a 1.19-billion-rate test store: a rate card by NPI in 0.5–5.7 s,
   Price a visit 0.1–0.4 s, Visit value 0.2–1.9 s (before: 5–13 s each on the
   same machine, with everything cached in memory; much longer on a real disk
