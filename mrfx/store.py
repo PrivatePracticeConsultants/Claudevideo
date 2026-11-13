@@ -6227,11 +6227,125 @@ class Store:
                     pass
             return f"read_parquet('{sql_path(path)}')"
 
+    def spine_materialised_current(self, name: str) -> str | None:
+        """`read_parquet(...)` of `name` when it is ALREADY built for the
+        spine as it stands (this process's generation, or a file another
+        start built for the same spine content), else None — never builds.
+
+        For readers that can answer exactly from a payer / code-scoped live
+        query (the rate card's peers, a visit's value in a market): on a
+        store whose spine is changing — a long analytics build commits a
+        part every few minutes, every loaded file changes spine_key — the
+        whole-store table was rebuilt on nearly every request (6.8 s on a
+        99M-rate store, ~80 s at 1.18 B, under the build's load), where the
+        scoped query reads only the codes asked about (0.35 s)."""
+        gen = self.spine_generation
+        held = self._spine_mat.get(name)
+        if held and held[0] == gen and held[1].exists():
+            return f"read_parquet('{sql_path(held[1])}')"
+        try:
+            path = self.dir / f"{name}.{self.spine_key()}.parquet"
+        except Exception:  # noqa: BLE001 — not current is always a safe answer
+            return None
+        if not path.exists():
+            return None
+        with self._spine_mat_guard:
+            self._spine_mat[name] = (gen, path)
+        return f"read_parquet('{sql_path(path)}')"
+
+    def warm_spine_materialised(self, name: str, select_sql: str, params=()) -> None:
+        """Build `name` in the background for the next request — once at a
+        time per table, and not while an analytics build is changing the
+        spine (it would be stale within minutes). Never raises."""
+        if self._rollup_active:
+            return
+        with self._spine_mat_guard:
+            lock = self._spine_mat_locks.setdefault(name, threading.Lock())
+        if lock.locked():
+            return
+
+        def run():
+            try:
+                self.spine_materialised(name, select_sql, params)
+            except Exception:  # noqa: BLE001 — a warm-up never fails real work
+                pass
+        threading.Thread(target=run, name=f"mrfx-warm-{name}", daemon=True).start()
+
+    def tins_billing_npi(self, npi: str) -> list[str]:
+        """The TINs whose rates name `npi` in the NPI column — exactly what
+        `SELECT DISTINCT tin_value FROM rates_dedup WHERE npi = ?` answers,
+        sorted — reading only the rate parts that can hold it.
+
+        The rate card / Price a visit / Visit value with an NPI as the
+        practice scanned every raw rate for it (22 s on a 99M-rate store,
+        several times per report; at 1.18 B unsorted rates, minutes each
+        under an analytics build). Now: a part the kept per-part NPI set
+        covers (rate_npi_parts signature = the part on disk; the dashboard's
+        poll keeps it current, enrichment_progress) is read only when its
+        set lists the NPI; a part the set does not cover yet is read as
+        before. Exact either way, never slower than the full scan; asked
+        again if a part changes meanwhile. Cached per set of parts."""
+        npi = str(npi or "").strip()
+        if not re.fullmatch(r"[0-9]{10}", npi):
+            with self.connect() as con:
+                return [r[0] for r in con.execute(
+                    "SELECT DISTINCT tin_value FROM rates_dedup "
+                    "WHERE npi = ? AND tin_value IS NOT NULL ORDER BY 1", [npi]).fetchall()]
+        cache = self.__dict__.setdefault("_npi_tins_cache", {})
+        where = ("WHERE npi = ? AND tin_value IS NOT NULL "
+                 "AND (negotiated_rate IS NULL OR isfinite(negotiated_rate))")
+        for _attempt in range(3):
+            current = self._part_sigs()
+            sig = hashlib.sha1(json.dumps(sorted(current.items())).encode()).hexdigest()
+            if (npi, sig) in cache:
+                return list(cache[(npi, sig)])
+            if not current:
+                return []
+            try:
+                with self.connect() as con:
+                    con.execute("BEGIN TRANSACTION")     # one snapshot of set + signatures
+                    try:
+                        known = dict(con.execute(
+                            "SELECT part, sig FROM rate_npi_parts").fetchall())
+                        covered = sorted(p for p, sg in current.items() if known.get(p) == sg)
+                        hits = {r[0] for r in con.execute(
+                            "SELECT DISTINCT part FROM rate_npi_set WHERE npi = ? "
+                            "AND part IN (SELECT unnest(?::VARCHAR[]))",
+                            [npi, covered]).fetchall()} if covered else set()
+                    finally:
+                        con.execute("COMMIT")
+                    scan = sorted(hits | (set(current) - set(covered)))
+                    got = [] if not scan else [r[0] for r in con.execute(
+                        "SELECT DISTINCT tin_value FROM read_parquet(["
+                        + ", ".join(f"'{sql_path(self.rates_dir / n)}'" for n in scan)
+                        + f"]) {where} ORDER BY 1", [npi]).fetchall()]
+            except duckdb.IOException:
+                continue                 # a part was swapped meanwhile: ask again
+            if self._part_sigs() != current:
+                continue                 # a part changed while it was read
+            if len(cache) > 256:
+                cache.clear()
+            cache[(npi, sig)] = list(got)
+            return got
+        with self.connect() as con:      # the store kept changing: the full scan
+            return [r[0] for r in con.execute(
+                "SELECT DISTINCT tin_value FROM rates_dedup "
+                "WHERE npi = ? AND tin_value IS NOT NULL ORDER BY 1", [npi]).fetchall()]
+
     def spine_key(self) -> str:
         """The identity of the spine's content: the token every spine write
-        stores in its own transaction, plus the rate parts' signatures and the
-        rollup bookkeeping (so a writer that forgot the token still changes
-        the key). Two processes on the same spine compute the same key."""
+        stores in its own transaction, plus the rollup bookkeeping. Two
+        processes on the same spine compute the same key.
+
+        The rate parts' signatures count only while there is NO spine table
+        (`rates_by_tin` is then the live query over the raw parts). With the
+        table, a part landing changes no spine row until a rollup writes
+        one — and every spine write (the build, a slice, the prune, the
+        update, the swap, the is_latest migration, a reset) stores a new
+        token in its own transaction. 0.8.2 keyed on the parts too, so every
+        file that finished loading made the materialised practice medians
+        "stale" and rebuilt over the whole spine (0.8.3: on a store loading
+        files, nearly every rate card)."""
         import hashlib
         with self.connect() as con:
             meta = dict(con.execute(
@@ -6239,6 +6353,9 @@ class Store:
                 "'rollup_covered_through', 'rollup_covered_names', "
                 "'rollup_pending_payers', 'rollup_needs_full', "
                 "'rollup_schema_version')").fetchall())
+            has_table = bool(con.execute(
+                "SELECT count(*) FROM information_schema.tables "
+                "WHERE table_name = 'rates_by_tin_tbl'").fetchone()[0])
         if not meta.get("spine_token"):
             with self.write_lock, self.connect() as con:
                 con.execute("INSERT INTO meta SELECT 'spine_token', ? WHERE NOT EXISTS "
@@ -6246,9 +6363,9 @@ class Store:
                             [os.urandom(8).hex()])
                 meta["spine_token"] = con.execute(
                     "SELECT value FROM meta WHERE key = 'spine_token'").fetchone()[0]
+        parts = [] if has_table else sorted(self._part_sigs().items())
         return hashlib.sha1(json.dumps(
-            [sorted(meta.items()), sorted(self._part_sigs().items())]
-        ).encode()).hexdigest()[:16]
+            [sorted(meta.items()), parts]).encode()).hexdigest()[:16]
 
     def note_user_edit(self) -> None:
         """A user edit that a cached answer reads (Store.cached) just landed:

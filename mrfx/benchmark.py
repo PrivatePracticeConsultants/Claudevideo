@@ -616,7 +616,8 @@ def _house_table_sql(per_payer: bool) -> tuple[str, list]:
 
 def practice_base_sql(store: Store, market: dict, *, per_payer: bool = False,
                       extra: str = "", extra_params=(), prefilter: str = "",
-                      prefilter_params=(), dollar_only: bool = False) -> tuple[str, list]:
+                      prefilter_params=(), dollar_only: bool = False,
+                      scoped_if_cold: bool = False) -> tuple[str, list]:
     """(sql, params) for ONE median rate per (billing_code, tin_value) — or
     per (payer, billing_code, tin_value) with `per_payer` — under `market`.
     Columns: [payer,] billing_code, tin_value, rate.
@@ -630,14 +631,32 @@ def practice_base_sql(store: Store, market: dict, *, per_payer: bool = False,
     `extra` (" AND …") may name only t.payer, t.billing_code, t.tin_value
     and td.*; its params bind after the market's. `prefilter` narrows the
     live relation (see _rates_relation). `dollar_only` adds is_dollar_rate
-    on the live path (the table holds dollar rows only)."""
+    on the live path (the table holds dollar rows only).
+
+    `scoped_if_cold` (a caller whose `prefilter` narrows the live query to
+    a few payers / codes): read the materialised table only when it is
+    already built for the spine as it stands; otherwise answer from the
+    scoped live query — the same rows — and build the table in the
+    background for next time. Building it in the request cost the whole
+    spine on nearly every rate card while files load or an analytics
+    build runs (each changes the spine's key)."""
+
+    def table(name: str, built) -> str | None:
+        if not (scoped_if_cold and prefilter):
+            return store.spine_materialised(name, *built())
+        rel = store.spine_materialised_current(name)
+        if rel is None:
+            store.warm_spine_materialised(name, *built())
+        return rel
     ia = bool(market.get("include_assistant"))
     ind = bool(market.get("include_non_dollar"))
     where, params = _market_where(market, ia, ind)       # validates the market too
     keys = (["t.payer"] if per_payer else []) + ["t.billing_code", "t.tin_value"]
     payers = market.get("payers") or []
+    rel = None
     if per_payer and _house_disc_eligible(market):
-        rel = store.spine_materialised(DISC_PAYER_PRACTICE_MEDIANS, *_house_disc_table_sql())
+        rel = table(DISC_PAYER_PRACTICE_MEDIANS, _house_disc_table_sql)
+    if rel is not None:
         clauses, cparams = ["t.discipline = ?"], [market["discipline"]]
         if payers:
             clauses.append(f"t.payer IN ({', '.join('?' for _ in payers)})")
@@ -653,7 +672,8 @@ def practice_base_sql(store: Store, market: dict, *, per_payer: bool = False,
     if _house_eligible(market) and (per_payer or len(payers) <= 1):
         use_payer = per_payer or len(payers) == 1
         name = PAYER_PRACTICE_MEDIANS if use_payer else PRACTICE_MEDIANS
-        rel = store.spine_materialised(name, *_house_table_sql(use_payer))
+        rel = table(name, lambda: _house_table_sql(use_payer))
+    if rel is not None:
         clauses, cparams = [], []
         if payers:
             clauses.append(f"t.payer IN ({', '.join('?' for _ in payers)})")
@@ -791,10 +811,10 @@ def _resolve_subject_tins(store: Store, subject: str) -> list[str]:
                 "SELECT 1 FROM tin_directory WHERE tin_value = ? LIMIT 1", [ident],
             ).fetchone()
             if not known_tin:
-                by_npi = [r[0] for r in con.execute(
-                    "SELECT DISTINCT tin_value FROM rates_dedup "
-                    "WHERE npi = ? AND tin_value IS NOT NULL", [ident],
-                ).fetchall()]
+                # only the parts that hold this NPI (the kept per-part NPI
+                # sets) — a scan of every raw rate took 22 s on a 99M-rate
+                # store and ran several times per rate card
+                by_npi = store.tins_billing_npi(ident)
                 if by_npi:
                     return by_npi
         # A partial name ("Gateway" for "Gateway Physical Therapy"). Only when

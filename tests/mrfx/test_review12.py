@@ -656,12 +656,16 @@ def test_visit_value_reads_the_materialised_medians(vv_app, store, monkeypatch):
     give the live query's numbers to the bit. was: 404 (no block)."""
     import mrfx.benchmark as bm
     from mrfx.visit_market import market_visit_value
-    built = []
-    real = store.spine_materialised
-    monkeypatch.setattr(store, "spine_materialised",
-                        lambda name, *a: built.append(name) or real(name, *a))
+    # (0.8.3: the table is read when it is already built for the spine;
+    # a cold request answers from the visit's codes and builds it in the
+    # background — tests/mrfx/test_v083.py)
+    store.spine_materialised(bm.DISC_PAYER_PRACTICE_MEDIANS, *bm._house_disc_table_sql())
+    read = []
+    real = store.spine_materialised_current
+    monkeypatch.setattr(store, "spine_materialised_current",
+                        lambda name: read.append(name) or real(name))
     fast = market_visit_value.uncached(store, VV_BODY["market"], None, "ortho", "730000003")
-    assert built == [bm.DISC_PAYER_PRACTICE_MEDIANS]
+    assert read == [bm.DISC_PAYER_PRACTICE_MEDIANS]
     monkeypatch.setattr(bm, "_house_eligible", lambda m: False)
     live = market_visit_value.uncached(store, VV_BODY["market"], None, "ortho", "730000003")
     assert json.dumps(fast, sort_keys=True) == json.dumps(live, sort_keys=True)

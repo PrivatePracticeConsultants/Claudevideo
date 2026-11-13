@@ -2012,9 +2012,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 # TIN slot: say which practices it bills under instead of a
                 # bare "No rates match" (review 10 item 1.7)
                 ident = fs.ident_value
-                tins = [mask_tin(r[0]) for r in con.execute(
-                    "SELECT DISTINCT tin_value FROM rates WHERE npi = ? AND tin_value IS NOT NULL "
-                    "ORDER BY 1 LIMIT 5", [str(ident)]).fetchall()]
+                # only the parts holding the NPI, not every rate row
+                tins = [mask_tin(t) for t in store.tins_billing_npi(str(ident))[:5]]
                 if tins:
                     hint = (f"NPI {ident} bills under tax ID {', '.join(tins)} — search that, "
                             "or switch to the NPI view.")

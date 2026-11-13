@@ -170,7 +170,14 @@ def market_visit_value(store: Store, market: dict | None, raw_lines=None,
     if not billed:
         raise VisitError("this visit bills no unit — add minutes to its codes")
     codes = [c for c, _ in billed]
-    sql, params = practice_base_sql(store, {**m, "codes": codes}, per_payer=True)
+    # the visit's codes only (billing_code is a partition-key column, so
+    # the newest-month rule is unchanged): the materialised table when it is
+    # already built, else this scoped read — never a whole-spine build in
+    # the request (benchmark.practice_base_sql, scoped_if_cold)
+    in_c = ", ".join("?" for _ in codes)
+    sql, params = practice_base_sql(store, {**m, "codes": codes}, per_payer=True,
+                                    prefilter=f"billing_code IN ({in_c})",
+                                    prefilter_params=list(codes), scoped_if_cold=True)
     with store.connect() as con:
         rows = con.execute(f"SELECT payer, billing_code, tin_value, rate FROM ({sql}) "
                            "ORDER BY payer, tin_value, billing_code", params).fetchall()

@@ -972,6 +972,44 @@ Pinned by `tests/mrfx/test_review14.py` (every Group 1-3 case fails on
   paste is durable (`meta('pending_paste')`, `resume_pending_paste`). A
   hospital of an already-loaded name from another file is refused.
 
+### 0.8.3 additions (Nov 13, 2026) — subject lookups and cold medians at a billion rates
+
+Field report: the Rate card with an NPI as the practice showed nothing for an
+hour (1.18 B rates, an analytics build running). Pinned by
+`tests/mrfx/test_v083.py` (5 of 6 fail on 4b1f307; the 6th pins that NPI and
+TIN give the same numbers).
+
+- **NPI -> TINs** (`Store.tins_billing_npi`, used by
+  `benchmark._resolve_subject_tins` and the Explorer's "bills under" hint):
+  never `rates_dedup WHERE npi = ?` over every part (22 s on the 99M store,
+  several times per card). A part whose `rate_npi_parts` signature equals the
+  part on disk is read only when `rate_npi_set` lists the NPI; a part the set
+  does not cover yet is read in full — exact either way, never slower than
+  the full scan. One snapshot of set + signatures (a transaction); asked
+  again if a part changes meanwhile; cached per set of part signatures. The
+  dashboard's `/api/stats` keeps the set current (`enrichment_progress`).
+- **`practice_base_sql(scoped_if_cold=True)`** (the fee schedule's peers, the
+  visit market — callers whose `prefilter` narrows to payers / codes): read
+  the materialised medians only when `Store.spine_materialised_current`
+  says they are built for the spine as it stands; otherwise the scoped live
+  query (the same rows — tests run both) and `warm_spine_materialised`
+  builds the table in a background thread, never while `_rollup_active`.
+  Never build a whole-spine table inside a scoped request again.
+- **`spine_key` no longer includes the rate parts' signatures when the
+  spine table exists** — a loaded file changes no spine row until a rollup
+  writes one, and every spine writer stores a new `spine_token` in its own
+  transaction (build, slice, prune, update, swap, is_latest migration,
+  reset). Without the table (`rates_by_tin` = the live raw query) the parts
+  still count. A new spine writer MUST write `spine_token`.
+- **Measured** on a 1.19 B-rate store (the 99M store's parts in hash(npi,
+  code) order — real files do not keep NPIs sorted — hard-linked 12x, 8 GB,
+  4 cores; the data fits the page cache, so the old full scans look faster
+  than on a real disk): old 5.3-13.1 s per NPI report; new 0.1-5.7 s, NPI
+  lookup 0.3-0.5 s in the set + ~2.8 s reading the 144 of 540 parts holding
+  it (every NPI is in every payer's files there — a worst case), then cached.
+  Results byte-identical to 0.8.2. Dashboard (99M, NPI, KS, PT): card 1.4 s,
+  Price a visit 1.6 s, Visit value 2.9 s.
+
 ### 0.8.2 additions (Nov 13, 2026) — the directory source in pieces
 
 Field log (the same 1.18 B-rate store, `duckdb_memory_gb: 8`, a 0.8.0 plan

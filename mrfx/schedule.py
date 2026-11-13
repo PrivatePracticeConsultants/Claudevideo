@@ -147,7 +147,11 @@ def compute_fee_schedule(store: Store, subject: str, market: dict, *,
                 prefilter_params=[*subj_payers, *subj_codes],
                 extra=(f" AND t.payer IN ({in_p}) AND t.billing_code IN ({in_c})"
                        " AND t.tin_value NOT IN (SELECT tin FROM subject_tins)"),
-                extra_params=[*subj_payers, *subj_codes])
+                extra_params=[*subj_payers, *subj_codes],
+                # the materialised table only when already built: building it
+                # here cost the whole spine on nearly every card while files
+                # load or a build runs; the scoped query is the same rows
+                scoped_if_cold=True)
             msql = f"""
             WITH subject_tins AS (SELECT unnest(?::VARCHAR[]) AS tin),
             per_tin AS ({peer_q})

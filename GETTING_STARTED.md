@@ -1055,6 +1055,32 @@ Downloads and files:
 - **"fee for service" / "fee_schedule"** spelled differently by a payer no
   longer drop rates.
 
+## What changed in version 0.8.3
+
+A fix for the **Rate card** (and **Price a visit** / **Visit value in this
+market**) on a very large store: with an NPI typed as the practice, the rate
+card could sit for an hour without showing anything.
+
+- **Typing an NPI is now quick.** To find which practice an NPI belongs to,
+  the app used to read every rate in the store (1.18 billion on the store
+  that showed the problem), several times per rate card. It now looks the
+  NPI up in the list it already keeps of which files hold which NPIs and
+  reads only those files. Same answer — checked against the old way on a
+  1.19-billion-rate test store — in seconds.
+- **No more rebuilding the market comparison inside your request.** The
+  "peer $" column and the visit value read a summary of every practice's
+  rates. That summary was rebuilt over the whole store whenever a file
+  finished loading or the analytics added a part — so on a busy store nearly
+  every rate card rebuilt it first. Now, when it is not ready, the report
+  reads just the payers and codes it needs (the same numbers), and the
+  summary is rebuilt quietly in the background when no analytics update is
+  running. A file that finishes loading no longer makes it out of date; only
+  the analytics adding new rates do.
+- Measured on a 1.19-billion-rate test store: a rate card by NPI in 0.5–5.7 s,
+  Price a visit 0.1–0.4 s, Visit value 0.2–1.9 s (before: 5–13 s each on the
+  same machine, with everything cached in memory; much longer on a real disk
+  while the analytics build runs).
+
 ## What changed in version 0.8.2
 
 A fix to 0.8.1, found on the same real store (1.18 billion rates, memory set
