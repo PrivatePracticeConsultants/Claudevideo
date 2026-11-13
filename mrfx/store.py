@@ -6864,6 +6864,11 @@ class Store:
         ).encode()).hexdigest()[:16]
         path = self.dir / f"tin_zip_place.{stamp}.parquet"
         if not path.exists():
+            # the (TIN, NPI) row counts from the kept pairs (0.8.3), not an
+            # aggregate of every raw rate: on a 1.19 B-rate store the leverage
+            # / radius / dossier / new-to-network placement ran out of temp
+            # disk after 16 s — the same rows (pairs carry count(*) per pair)
+            pairs = self.pairs_relation()
             with self._placement_lock:
                 if not path.exists():
                     therapy = therapy_taxonomy_sql("n.taxonomy_code", all_col="n.taxonomy_codes")
@@ -6876,7 +6881,7 @@ class Store:
                         con.execute(f"""
                             COPY (
                                 WITH tn AS (
-                                    SELECT tin_value, npi, count(*) AS c FROM rates
+                                    SELECT tin_value, npi, sum(c)::BIGINT AS c FROM {pairs}
                                     WHERE tin_value IS NOT NULL AND npi IS NOT NULL
                                     GROUP BY 1, 2
                                 ),

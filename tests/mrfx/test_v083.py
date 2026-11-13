@@ -307,3 +307,40 @@ def test_the_practice_drawer_lists_the_same_npis(vv_app, store):
             "SELECT DISTINCT npi FROM rates WHERE tin_value = ? AND npi IS NOT NULL ORDER BY 1",
             [T3_TIN]).fetchall()]
     assert listed == raw == [T3_NPI]
+
+
+def test_the_practice_placement_is_built_from_the_kept_pairs(cfg, vv_app, store, monkeypatch):
+    """(P0 — Leverage, the radius map, the dossier, new-to-network at 1.19 B)
+    The per-practice ZIP placement reads the kept (TIN, NPI) pairs, never
+    every raw rate, and holds the same rows as the raw computation — also
+    after a file lands.
+    was: an aggregate of every rate whenever any part had changed (Leverage
+    answered 503 after 16 s on a 1.19 B-rate store: temp disk exhausted)."""
+    from mrfx.catalog import therapy_taxonomy_sql
+    from mrfx.sqlfn import _HAS_ZIP, ZIP5
+
+    def raw():
+        therapy = therapy_taxonomy_sql("n.taxonomy_code", all_col="n.taxonomy_codes")
+        with store.connect() as con:
+            return con.execute(f"""
+                WITH tn AS (SELECT tin_value, npi, count(*) AS c FROM rates
+                            WHERE tin_value IS NOT NULL AND npi IS NOT NULL GROUP BY 1, 2),
+                     nz AS (SELECT n.npi, {ZIP5} AS zip, {therapy} AS is_t
+                            FROM npi_directory n WHERE {_HAS_ZIP})
+                SELECT tn.tin_value, nz.zip, sum(tn.c)::BIGINT, count(DISTINCT tn.npi),
+                       count(DISTINCT tn.npi) FILTER (nz.is_t)
+                FROM tn JOIN nz USING (npi) GROUP BY 1, 2 ORDER BY ALL""").fetchall()
+
+    def kept():
+        rel = store.placement_relation()
+        with store.connect() as con:
+            return con.execute(f"SELECT * FROM {rel} ORDER BY ALL").fetchall()
+    spy = _Spy(store, monkeypatch)
+    assert kept() == raw() and kept()
+    assert not any("tin_zip_place" in q and "FROM rates" in q for q in spy.sql)
+    monkeypatch.undo()
+    monkeypatch.setattr(store, "rebuild_rollups", lambda *a, **k: 0.0)
+    monkeypatch.setattr(store, "update_rollups_incremental", lambda *a, **k: 0.0)
+    (cfg.inbox_dir / "d_2026-06.json").write_text(json.dumps(_vv_doc("Payer D", {"T3": 70, "T8": 61})))
+    assert all(r["status"] == "done" for r in scan_inbox(cfg, store))
+    assert kept() == raw()
