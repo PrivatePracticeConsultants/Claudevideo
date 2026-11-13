@@ -382,7 +382,7 @@ def _ranked(store: Store, market: dict | None, raw_lines, preset, payer: str) ->
 def market_visit_practices(store: Store, market: dict | None, raw_lines=None,
                            preset: str | None = None, payer: str = ALL_PAYERS,
                            subject: str | None = None, offset: int = 0,
-                           limit: int = PRACTICES_PAGE, order: str = "desc") -> dict:
+                           limit: int | None = PRACTICES_PAGE, order: str = "desc") -> dict:
     """The practices behind one row of the block, ranked by visit value
     (highest first, or lowest first with order='asc'), one page at a time,
     each with its name, city, tax ID (SSN-pattern masked), NPIs and — per
@@ -395,7 +395,9 @@ def market_visit_practices(store: Store, market: dict | None, raw_lines=None,
     if order == "asc":
         rows = sorted(rows, key=lambda x: (x["value"], x["tin"]))
     offset = max(0, int(offset or 0))
-    limit = max(1, min(int(limit or PRACTICES_PAGE), PRACTICES_PAGE_MAX))
+    # None = every row in one pass (the CSV); a page is capped for the screen
+    limit = len(rows) if limit is None else max(1, min(int(limit or PRACTICES_PAGE),
+                                                        PRACTICES_PAGE_MAX))
     page = rows[offset:offset + limit]
     tins = [x["tin"] for x in page]
     stins: set[str] = set()
@@ -456,12 +458,12 @@ def practices_csv(store: Store, market: dict | None, raw_lines=None,
     """Every practice of one row, highest visit value first, as CSV."""
     import csv
     import io
+    # every practice in ONE pass: the directory and NPI lookups read the
+    # (TIN, NPI) pairs once — 500-row pages re-read them 30 times (34 s for
+    # 14,674 practices on a 1.19 B-rate store)
     first = market_visit_practices(store, market, raw_lines, preset, payer, subject,
-                                   0, PRACTICES_PAGE_MAX)
+                                   0, None)
     rows = list(first["rows"])
-    while len(rows) < first["total"]:
-        rows += market_visit_practices(store, market, raw_lines, preset, payer, subject,
-                                       len(rows), PRACTICES_PAGE_MAX)["rows"]
     buf = io.StringIO()
     w = csv.writer(buf)
     for line in (f"Visit value by practice — {first['payer']}, {first['state']}, "
