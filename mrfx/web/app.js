@@ -2771,6 +2771,7 @@ async function initRatecard() {
   $("#vv-report").addEventListener("click", () =>
     openReportWith("/api/report/visitvalue", state.lastVisitMarketPayload, null, { view: "ratecard", label: "Visit value report", anchor: "#vv-report" }));
   $("#vv-csv").addEventListener("click", downloadVisitMarketCsv);
+  initVisitPracticeLists();
 }
 
 /* ---- visit value in this market (mrfx/visit_market.py) ------------------ */
@@ -2828,7 +2829,9 @@ function renderVisitMarket(d) {
     <th class="num">Median</th><th class="num">P25</th><th class="num">P75</th>
     <th class="num" title="practice-payer pairs left out because the payer does not price every code of the visit">Partial visits left out</th>${
     subj ? `<th class="num">This practice</th><th class="num" title="mid-rank among the payer's practices, this practice included">Percentile</th>
-    <th class="num">Quartile</th><th class="num">vs average</th><th class="num">vs median</th>` : ""}`;
+    <th class="num">Quartile</th><th class="num">vs average</th><th class="num">vs median</th>` : ""}<th></th>`;
+  const listBtn = (payer) => `<td><button class="btn vv-list-btn" data-vv-payer="${esc(payer)}" aria-expanded="false"
+      title="list every practice in this row, highest visit value first">▸ Practices</button></td>`;
   const row = (r, all) => {
     const s = r.subject;
     let subjCells = "";
@@ -2843,11 +2846,11 @@ function renderVisitMarket(d) {
     }
     const excl = r.incomplete_excluded == null ? "" : fmtInt(r.incomplete_excluded);
     if (r.suppressed)
-      return `<tr${all ? ' class="best-row"' : ""}><td>${esc(r.payer)}</td><td class="muted" colspan="5">fewer than ${d.min_practices} practices — not shown</td><td class="num">${excl}</td>${subjCells}</tr>`;
+      return `<tr${all ? ' class="best-row"' : ""}><td>${esc(r.payer)}</td><td class="muted" colspan="5">fewer than ${d.min_practices} practices — not shown</td><td class="num">${excl}</td>${subjCells}<td></td></tr>`;
     return `<tr${all ? ' class="best-row"' : ""}><td>${all ? "<b>All payers</b>" : esc(r.payer)}</td>
       <td class="num">${fmtInt(r.practices)}</td><td class="num">${money(r.mean)}</td>
       <td class="num"><b>${money(r.median)}</b></td><td class="num">${money(r.p25)}</td>
-      <td class="num">${money(r.p75)}</td><td class="num">${excl}</td>${subjCells}</tr>`;
+      <td class="num">${money(r.p75)}</td><td class="num">${excl}</td>${subjCells}${listBtn(all ? "All payers" : r.payer)}</tr>`;
   };
   const body = d.rows.map((r) => row(r, false)).join("") + row(d.all_payers, true);
   return `<div class="rc-summary">${esc(d.headline)}</div>
@@ -2855,7 +2858,7 @@ function renderVisitMarket(d) {
       ${esc(d.label)} — ${esc(d.basket)} = <b>${d.units} units</b>${
       d.payers_filter.length ? ` · payers: ${esc(d.payers_filter.join(", "))}` : ""}</div>
     ${(d.flags || []).map((f) => `<div class="warn-text" style="margin-top:4px">${esc(f)}</div>`).join("")}
-    <div class="tablewrap" style="max-height:44vh;margin-top:8px"><table class="rc-table"><thead><tr>${head}</tr></thead>
+    <div class="tablewrap" style="max-height:75vh;margin-top:8px"><table class="rc-table vv-table"><thead><tr>${head}</tr></thead>
       <tbody>${body}</tbody></table></div>
     <div class="muted" style="font-size:11.5px;margin-top:6px">${fmtInt(d.incomplete_excluded)} practice-payer pair(s) left out as partial visits${
       d.suppressed_payers.length ? `; not shown (under ${d.min_practices} practices): ${esc(d.suppressed_payers.join(", "))}` : ""}.
@@ -2876,6 +2879,139 @@ async function downloadVisitMarketCsv() {
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 60000);
   } catch (e) { alert("CSV export failed: " + e.message); }
+}
+
+/* ---- the practices behind one Visit-value row, ranked (visit_market.py) -- */
+const VV_PAGE = 50;
+
+function vvPracticeRow(x, perPayer) {
+  const where = [(x.cities || []).join(", "), x.state].filter(Boolean).join(" · ");
+  // one NPI on the row (the organisation's own when it has one — listed
+  // first by the server), the others on hover; the CSV carries them all
+  const list = x.npis || [];
+  const others = list.length - 1 + (x.npis_more || 0);
+  const tip = list.slice(1).map((n) => `${n.npi}${n.name ? " " + n.name : ""}`).join("\n")
+    + (x.npis_more ? `\n+${x.npis_more} more (in the CSV)` : "");
+  const npis = list.length ? `<span style="font-family:ui-monospace,monospace">${esc(list[0].npi)}</span>${
+    list[0].name ? ` <span class="sub">${esc(list[0].name)}</span>` : ""}${
+    others > 0 ? ` <span class="sub" title="${esc(tip)}" style="cursor:help;text-decoration:underline dotted">+${fmtInt(others)} more</span>` : ""}` : "";
+  const made = perPayer
+    ? (x.rates || []).map((r) => `${esc(r.code)}${r.units > 1 ? "×" + r.units : ""} ${money(r.rate)}`).join(" · ")
+    : `median of ${x.payers} payer${x.payers === 1 ? "" : "s"} (${money(x.low)} – ${money(x.high)})`;
+  const cls = x.vs_median > 0 ? "peer-up" : x.vs_median < 0 ? "peer-down" : "";
+  return `<tr class="${x.is_subject ? "best-row" : ""}">
+    <td class="num">${fmtInt(x.rank)}</td>
+    <td><b>${esc(x.name)}</b>${x.is_subject ? ' <span class="sub">(this practice)</span>' : ""}${where ? `<div class="sub">${esc(where)}</div>` : ""}</td>
+    <td>${esc(x.tin || "")}</td>
+    <td>${npis || '<span class="sub">–</span>'}</td>
+    <td class="num">${x.therapy_npi_count == null ? "–" : fmtInt(x.therapy_npi_count)} <span class="sub">of ${x.npi_count == null ? "–" : fmtInt(x.npi_count)}</span></td>
+    <td class="num"><b>${money(x.value)}</b></td>
+    <td class="num"><span class="${cls}">${signedMoney(x.vs_median)}</span> <span class="sub">${signedPct1(x.vs_median_pct)}</span></td>
+    <td class="num">${x.percentile == null ? "–" : "p" + x.percentile}</td>
+    <td class="sub">${made}</td></tr>`;
+}
+
+async function vvLoadPractices(box, append) {
+  const offset = append ? Number(box.dataset.shown || 0) : 0;
+  const payload = { ...state.lastVisitMarketPayload, payer: box.dataset.payer, offset,
+                    limit: VV_PAGE, order: box.dataset.order || "desc" };
+  if (!append) box.innerHTML = `<div class="loading">Listing practices</div>`;
+  let d;
+  try { d = await postJson("/api/schedule/visit/market/practices", payload); }
+  catch (e) { box.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
+  const perPayer = d.payer !== "All payers";
+  const rows = d.rows.map((x) => vvPracticeRow(x, perPayer)).join("");
+  const shown = offset + d.rows.length;
+  box.dataset.shown = String(shown);
+  const more = shown < d.total
+    ? `<button class="btn" data-vv-more>Show ${fmtInt(Math.min(VV_PAGE, d.total - shown))} more</button>` : "";
+  const foot = `<span class="muted">${fmtInt(shown)} of ${fmtInt(d.total)} shown</span> ${more}`;
+  if (append) {
+    box.querySelector("tbody").insertAdjacentHTML("beforeend", rows);
+    box.querySelector(".vv-plist-foot").innerHTML = foot;
+    return;
+  }
+  const desc = d.order !== "asc";
+  box.innerHTML = `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:4px 0 6px">
+      <b>${fmtInt(d.total)} practice${d.total === 1 ? "" : "s"} — ${esc(d.payer)}</b>
+      <span class="muted">${esc(d.basket)} · median ${money(d.median)}</span>
+      <button class="btn${desc ? " primary" : ""}" data-vv-order="desc">Highest first</button>
+      <button class="btn${desc ? "" : " primary"}" data-vv-order="asc">Lowest first</button>
+      <button class="btn" data-vv-csv>Download this list (CSV)</button></div>
+    <div class="tablewrap" style="max-height:60vh"><table class="rc-table">
+      <thead><tr><th class="num">#</th><th>Practice</th><th>Tax ID</th><th>NPIs</th>
+        <th class="num" title="therapy NPIs (PT/OT/SLP taxonomy) of all the NPIs this tax ID bills under">Therapists</th>
+        <th class="num">Visit value</th><th class="num">vs median</th>
+        <th class="num" title="mid-rank among the other practices in this row">Percentile</th>
+        <th>${perPayer ? "Rates in this visit" : "Across payers"}</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>
+    <div class="vv-plist-foot" style="margin-top:6px">${foot}</div>
+    <div class="muted" style="font-size:11.5px;margin-top:4px">${esc(d.note)}</div>`;
+}
+
+async function vvTogglePractices(btn) {
+  const tr = btn.closest("tr");
+  const next = tr.nextElementSibling;
+  if (next && next.classList.contains("vv-detail")) {
+    next.remove();
+    btn.textContent = "▸ Practices";
+    btn.setAttribute("aria-expanded", "false");
+    return;
+  }
+  const cols = tr.closest("table").tHead.rows[0].cells.length;
+  const det = document.createElement("tr");
+  det.className = "vv-detail";
+  det.innerHTML = `<td colspan="${cols}"><div class="vv-plist" data-order="desc"></div></td>`;
+  const box = det.querySelector(".vv-plist");
+  box.dataset.payer = btn.dataset.vvPayer;
+  // held to the visible width of the table's scroll box and pinned at its
+  // left edge, so rank, practice and visit value stay in view when the
+  // payer table itself is wider than the panel (the subject's columns)
+  const wrap = tr.closest(".tablewrap");
+  if (wrap) {
+    box.style.position = "sticky";
+    box.style.left = "0";
+    box.style.width = `${Math.max(320, wrap.clientWidth - 32)}px`;
+  }
+  tr.after(det);
+  btn.textContent = "▾ Practices";
+  btn.setAttribute("aria-expanded", "true");
+  await vvLoadPractices(det.querySelector(".vv-plist"), false);
+}
+
+async function vvDownloadPractices(box) {
+  if (!state.lastVisitMarketPayload) return;
+  try {
+    const r = await fetch("/api/schedule/visit/market/practices.csv", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...state.lastVisitMarketPayload, payer: box.dataset.payer }),
+    });
+    if (!r.ok) { alert("CSV export failed.\n\n" + await refusalText(r)); return; }
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(await r.blob());
+    a.download = `visit_value_practices_${box.dataset.payer.replace(/[^A-Za-z0-9]+/g, "_")}.csv`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+  } catch (e) { alert("CSV export failed: " + e.message); }
+}
+
+function initVisitPracticeLists() {
+  $("#vv-out").addEventListener("click", (e) => {
+    const toggle = e.target.closest("[data-vv-payer]");
+    if (toggle) { vvTogglePractices(toggle); return; }
+    const box = e.target.closest(".vv-plist");
+    if (!box) return;
+    const order = e.target.closest("[data-vv-order]");
+    if (order) {
+      if (box.dataset.order !== order.dataset.vvOrder) {
+        box.dataset.order = order.dataset.vvOrder;
+        vvLoadPractices(box, false);
+      }
+      return;
+    }
+    if (e.target.closest("[data-vv-more]")) { vvLoadPractices(box, true); return; }
+    if (e.target.closest("[data-vv-csv]")) vvDownloadPractices(box);
+  });
 }
 
 /* ---- one standard visit, priced per payer (mrfx/visit.py) --------------- */

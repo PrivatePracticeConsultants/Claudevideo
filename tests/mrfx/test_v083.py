@@ -367,3 +367,108 @@ def test_the_npi_drawer_reads_only_the_files_that_hold_the_npi(vv_app, store, mo
     monkeypatch.setattr(store, "npi_parts", lambda npi: None)       # the old, full read
     old = vv_app.get(f"/api/entity/npi/{T3_NPI}").json()
     assert json.dumps(old["rates"], sort_keys=True) == json.dumps(full["rates"], sort_keys=True)
+
+
+# ---- Visit value in this market: the practices behind a row, ranked -------
+#
+# Hand-worked on test_review12's market (MO, PT, the ortho visit = 4 codes x
+# 1 unit, every code at the practice's one rate, so visit = 4 x rate):
+#   Payer A  T6 180, T5 160, T4 140, T3 120, T2 100, T1 80   (T8 is in KS)
+#            median 130; T6 percentile 5/5 = 100, T3 2/5 = 40
+#   Payer B  T5 200, T4 160, T3 140, T1 120, T2 120          (T6 partial)
+#            T1 and T2 tie at rank 4, listed by tax ID; T1 percentile
+#            (0 + 0.5 x 1) / 4 = 12.5 -> 13
+#   All      median of each practice's payers (C counts: T1 80,120,40 -> 80,
+#            T2 100,120,40 -> 100): T5 180, T6 180 (rank 1, by tax ID),
+#            T4 150, T3 130, T2 100, T1 80
+#   Payer C  2 practices: under the minimum of 5 -> refused, like its cell
+
+def _plist(client, payer, **kw):
+    body = {**VV_BODY, "payer": payer, **kw}
+    return client.post("/api/schedule/visit/market/practices", json=body)
+
+
+def _ids(d):
+    return [(VV_NAMES[x["name"]], x["value"], x["rank"]) for x in d["rows"]]
+
+
+VV_NAMES = {f"T{i} REHAB": f"T{i}" for i in range(1, 9)}
+
+
+def test_visit_value_practices_are_ranked_highest_first_with_hand_worked_numbers(vv_app):
+    """(feature) Each row of Visit value in this market opens the practices
+    behind it, highest visit value first: rank (ties share it, by tax ID),
+    percentile, vs median, the rates that make up the visit, name, city,
+    tax ID and NPIs.
+    was: POST /api/schedule/visit/market/practices answered 404."""
+    a = _plist(vv_app, "Payer A")
+    assert a.status_code == 200, a.text
+    a = a.json()
+    assert _ids(a) == [("T6", 180.0, 1), ("T5", 160.0, 2), ("T4", 140.0, 3),
+                       ("T3", 120.0, 4), ("T2", 100.0, 5), ("T1", 80.0, 6)]
+    assert (a["total"], a["median"], a["payer"]) == (6, 130.0, "Payer A")
+    top, t3 = a["rows"][0], a["rows"][3]
+    assert (top["percentile"], top["vs_median"], top["vs_median_pct"]) == (100, 50.0, 38.5)
+    assert (t3["percentile"], t3["vs_median"]) == (40, -10.0)
+    assert t3["rates"] == [{"code": c, "units": 1, "rate": 30.0}
+                           for c in ("97110", "97530", "97140", "97112")]
+    assert t3["tin"] == T3_TIN and t3["cities"] == ["Town"] and t3["state"] == "MO"
+    assert [n["npi"] for n in t3["npis"]] == [T3_NPI] and t3["npis"][0]["name"] == "T3 REHAB"
+    b = _plist(vv_app, "Payer B").json()
+    assert _ids(b) == [("T5", 200.0, 1), ("T4", 160.0, 2), ("T3", 140.0, 3),
+                       ("T1", 120.0, 4), ("T2", 120.0, 4)]
+    assert b["rows"][3]["percentile"] == 13
+    al = _plist(vv_app, "All payers").json()
+    assert _ids(al) == [("T5", 180.0, 1), ("T6", 180.0, 1), ("T4", 150.0, 3),
+                        ("T3", 130.0, 4), ("T2", 100.0, 5), ("T1", 80.0, 6)]
+    t1 = al["rows"][-1]
+    assert (t1["payers"], t1["low"], t1["high"]) == (3, 40.0, 120.0)
+    c = _plist(vv_app, "Payer C")
+    assert c.status_code == 422 and "fewer than 5" in c.json()["detail"]
+
+
+def test_visit_value_practices_agree_with_the_row_and_page_and_sort(vv_app):
+    """(feature) The list is the row's own population: its count and median
+    are the row's, the subject is marked and carries the block's value;
+    pages and lowest-first are the same rows in order; repeated calls are
+    byte-identical (invariant 7)."""
+    block = vv_app.post("/api/schedule/visit/market",
+                        json={**VV_BODY, "subject": T3_TIN}).json()
+    rows = {r["payer"]: r for r in block["rows"] + [block["all_payers"]]}
+    for payer in ("Payer A", "Payer B", "All payers"):
+        d = _plist(vv_app, payer, subject=T3_TIN).json()
+        assert (d["total"], d["median"], d["mean"]) == (
+            rows[payer]["practices"], rows[payer]["median"], rows[payer]["mean"])
+        mine = [x for x in d["rows"] if x["is_subject"]]
+        assert [x["value"] for x in mine] == [rows[payer]["subject"]["value"]]
+    full = _plist(vv_app, "Payer A").json()["rows"]
+    p1 = _plist(vv_app, "Payer A", offset=0, limit=4).json()
+    p2 = _plist(vv_app, "Payer A", offset=4, limit=4).json()
+    assert p1["rows"] + p2["rows"] == full and p2["total"] == 6
+    asc = _plist(vv_app, "Payer B", order="asc").json()["rows"]
+    assert [(VV_NAMES[x["name"]], x["value"]) for x in asc] == [
+        ("T1", 120.0), ("T2", 120.0), ("T3", 140.0), ("T4", 160.0), ("T5", 200.0)]
+    one = _plist(vv_app, "All payers").content
+    assert _plist(vv_app, "All payers").content == one
+    assert _plist(vv_app, "Payer Z").status_code == 422
+
+
+def test_visit_value_practices_csv_is_the_list(vv_app):
+    """(feature) The list's CSV holds every practice in the same order with
+    the same numbers, the per-code rates for a payer, and its labels."""
+    import csv
+    import io
+    d = _plist(vv_app, "Payer B", subject=T3_TIN).json()
+    r = vv_app.post("/api/schedule/visit/market/practices.csv",
+                    json={**VV_BODY, "payer": "Payer B", "subject": T3_TIN})
+    assert r.status_code == 200
+    assert "visit_value_practices_Payer_B.csv" in r.headers["content-disposition"]
+    text = r.text.lstrip("﻿")
+    assert "Visit value by practice — Payer B, MO, PT" in text
+    recs = list(csv.DictReader(io.StringIO(
+        "\n".join(ln for ln in text.splitlines() if not ln.startswith("#")))))
+    assert [(x["practice"], x["visit_value"], x["rank"]) for x in recs] == [
+        (x["name"], f"{x['value']:.2f}", str(x["rank"])) for x in d["rows"]]
+    t3 = next(x for x in recs if x["practice"] == "T3 REHAB")
+    assert (t3["rate_97110"], t3["this_practice"], t3["npis"], t3["percentile"]) == (
+        "35.00", "yes", T3_NPI, "50")

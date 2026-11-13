@@ -512,3 +512,9 @@ code.inline { background: var(--grid); border-radius: 4px; padding: 1px 5px; fon
 .an-mean { margin-top: 12px; padding: 8px 10px; background: #f4f7fb; border-radius: 6px; font-size: 13px; }
 .an-paused { color: #9a5b00; font-weight: 600; }
 .cov-line { cursor: pointer; }
+
+/* Visit value in this market: the ranked practices behind a row */
+.vv-list-btn { padding: 2px 8px; font-size: 12px; white-space: nowrap; }
+.vv-table tr.vv-detail > td { background: color-mix(in srgb, var(--accent) 4%, transparent); padding: 8px 10px 12px; }
+.vv-table tr.vv-detail:hover > td { background: color-mix(in srgb, var(--accent) 4%, transparent); }
+.vv-plist { white-space: normal; }

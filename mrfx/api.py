@@ -4604,6 +4604,45 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         except (VisitError, BenchmarkError, ValueError, TypeError) as e:
             raise HTTPException(422, str(e))
 
+    @app.post("/api/schedule/visit/market/practices")
+    @_progress_route("visit_market")
+    def schedule_visit_market_practices(body: dict = Body(...)):
+        """The practices behind one row of "Visit value in this market",
+        ranked by their visit value (highest first; order='asc' for lowest),
+        a page at a time, with name, city, tax ID, NPIs and the rates that
+        make up each visit (mrfx/visit_market.py market_visit_practices)."""
+        from .visit import VisitError
+        from .visit_market import market_visit_practices
+        subject = body.get("subject")
+        try:
+            return market_visit_practices(
+                store, body.get("market") or {}, body.get("lines") or None,
+                str(body["preset"]) if body.get("preset") else None,
+                str(body.get("payer") or "All payers"),
+                str(subject) if subject not in (None, "") else None,
+                int(body.get("offset") or 0), int(body.get("limit") or 50),
+                "asc" if str(body.get("order") or "").lower() == "asc" else "desc")
+        except (VisitError, BenchmarkError, ValueError, TypeError) as e:
+            raise HTTPException(422, str(e))
+
+    @app.post("/api/schedule/visit/market/practices.csv", response_class=PlainTextResponse)
+    @_progress_route("visit_market")
+    def schedule_visit_market_practices_csv(body: dict = Body(...)):
+        from .visit import VisitError
+        from .visit_market import practices_csv
+        subject = body.get("subject")
+        payer = str(body.get("payer") or "All payers")
+        try:
+            note = "".join(f"# {x}\n" for x in store.analytics_note())
+            text = practices_csv(store, body.get("market") or {}, body.get("lines") or None,
+                                 str(body["preset"]) if body.get("preset") else None, payer,
+                                 str(subject) if subject not in (None, "") else None)
+        except (VisitError, BenchmarkError, ValueError, TypeError) as e:
+            raise HTTPException(422, str(e))
+        safe = re.sub(r"[^A-Za-z0-9]+", "_", payer).strip("_") or "payer"
+        return PlainTextResponse("\ufeff" + note + text, headers={
+            "Content-Disposition": f'attachment; filename="visit_value_practices_{safe}.csv"'})
+
     @app.post("/api/report/visitvalue", response_class=HTMLResponse)
     @_progress_route("visit_market")
     def report_visit_value(body: dict = Body(...), fmt: str = Query("", alias="format")):

@@ -972,6 +972,31 @@ Pinned by `tests/mrfx/test_review14.py` (every Group 1-3 case fails on
   paste is durable (`meta('pending_paste')`, `resume_pending_paste`). A
   hospital of an already-loaded name from another file is refused.
 
+### 0.8.4 additions (Nov 13, 2026) — the practices behind a Visit-value row
+
+- `visit_market._compute_values` holds the per-(payer, TIN) visit values
+  both the block (`market_visit_value`) and the new ranked lists use — one
+  computation, so a list can never disagree with its row (count, median,
+  mean and the subject's value are pinned equal by tests/mrfx/test_v083.py).
+- `_ranked(store, market, lines, preset, payer)` (generation-cached, per
+  payer — never the whole table, which is deep-copied on every cache read):
+  value DESC, tax ID ASC (unique — invariant 7); rank = 1 + practices paid
+  more (ties share it); percentile = mid-rank among the others; per payer
+  the visit's per-code rates, for "All payers" the count / lowest / highest
+  of the practice's payer values. A suppressed cell (< MIN_PRACTICES) has
+  no list (422) — a list would print the cell.
+- `market_visit_practices` pages it (50, max 500; order asc/desc), adds
+  tin_directory (name, kind, state, cities, NPI / therapy-NPI counts) and
+  NPIs from `pairs_relation` + npi_directory (org NPI first, 5 kept, the
+  rest counted), masks TINs, marks the subject's TINs.
+  `POST /api/schedule/visit/market/practices` and `…/practices.csv`
+  (every practice, every NPI kept on the page, per-code rate columns).
+- Dashboard: a "▸ Practices" button per row opens an inline detail row
+  (event delegation on #vv-out); the list box is pinned to the scroll
+  box's visible width (sticky left) so rank / practice / value stay in view
+  when the subject's columns widen the payer table. 99M store, KS PT
+  (14,674 practices): list 0.8 s, show more / lowest first 0.2 s, CSV 6 s.
+
 ### 0.8.3 additions (Nov 13, 2026) — subject lookups and cold medians at a billion rates
 
 Field report: the Rate card with an NPI as the practice showed nothing for an

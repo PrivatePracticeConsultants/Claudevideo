@@ -1055,6 +1055,22 @@ Downloads and files:
 - **"fee for service" / "fee_schedule"** spelled differently by a payer no
   longer drop rates.
 
+## What changed in version 0.8.4
+
+- **Visit value in this market now shows the practices behind each row.**
+  Every payer row (and "All payers") has a **▸ Practices** button. It opens
+  the list of every practice that payer prices for the visit, **highest
+  visit value first** (or **Lowest first**), 50 at a time with **Show more**:
+  rank, practice name and city, tax ID, an NPI (the practice's own when it
+  has one; hover "+N more" for the others), how many of its NPIs are
+  therapists, the visit value, how far it is from the median, its
+  percentile, and the rates that make up the visit (for "All payers": the
+  spread of that practice's payers). Your practice, when one is picked, is
+  highlighted. **Download this list (CSV)** saves the whole list with every
+  NPI and per-code rate. The numbers are the same ones the row summarises —
+  a practice counts only when the payer prices every code of the visit. A
+  payer with fewer than 5 practices has no list, as it has no numbers.
+
 ## What changed in version 0.8.3
 
 A fix for the **Rate card** (and **Price a visit** / **Visit value in this

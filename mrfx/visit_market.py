@@ -147,12 +147,11 @@ def _visit_value(rates: dict, billed: list[tuple[str, int]]) -> float:
     return half_up(math.fsum(half_up(u * half_up(rates[c], 2), 2) for c, u in billed), 2)
 
 
-@generation_cached("visit_market.value")
-def market_visit_value(store: Store, market: dict | None, raw_lines=None,
-                       preset: str | None = None, subject: str | None = None) -> dict:
-    """The block's numbers (see the module docstring for every rule)."""
-    from .benchmark import (DISCIPLINES, basis_note_for, month_label, normalize_market,
-                            practice_base_sql, subject_tins_for_market)
+def _compute_values(store: Store, market: dict | None, raw_lines=None,
+                    preset: str | None = None) -> dict:
+    """Every practice's visit value per payer — the numbers both the block
+    (market_visit_value) and its ranked practice lists stand on."""
+    from .benchmark import DISCIPLINES, normalize_market, practice_base_sql
     m0 = market if isinstance(market, dict) else {}
     if not str(m0.get("state") or "").strip():
         raise VisitError("pick a state — a visit's value is a market figure, and a market "
@@ -193,6 +192,28 @@ def market_visit_value(store: Store, market: dict | None, raw_lines=None,
         else:
             incomplete[payer] = incomplete.get(payer, 0) + 1
             values.setdefault(payer, {})
+    return {"m": m, "disc": disc, "key": key, "label": label, "basis": basis,
+            "visit": visit, "billed": billed, "codes": codes, "pairs": pairs,
+            "values": values, "incomplete": incomplete}
+
+
+def _all_payer_values(values: dict[str, dict[str, float]]) -> dict[str, float]:
+    """All payers: each practice's ONE value = the median of its own payers'."""
+    per_tin: dict[str, list[float]] = {}
+    for payer in sorted(values):
+        for tin, v in values[payer].items():
+            per_tin.setdefault(tin, []).append(v)
+    return {t: half_up(statistics.median(v), 2) for t, v in per_tin.items()}
+
+
+@generation_cached("visit_market.value")
+def market_visit_value(store: Store, market: dict | None, raw_lines=None,
+                       preset: str | None = None, subject: str | None = None) -> dict:
+    """The block's numbers (see the module docstring for every rule)."""
+    from .benchmark import basis_note_for, month_label, subject_tins_for_market
+    b = _compute_values(store, market, raw_lines, preset)
+    m, disc, key, label, basis = b["m"], b["disc"], b["key"], b["label"], b["basis"]
+    visit, billed, values, incomplete = b["visit"], b["billed"], b["values"], b["incomplete"]
     payers = sorted(values)
 
     subj = None
@@ -242,11 +263,7 @@ def market_visit_value(store: Store, market: dict | None, raw_lines=None,
             + "Try another visit, the latest month, or more payers.")
 
     # all payers: each practice's ONE value = the median of its own payers'
-    per_tin: dict[str, list[float]] = {}
-    for payer in payers:
-        for tin, v in values[payer].items():
-            per_tin.setdefault(tin, []).append(v)
-    all_vals = {t: half_up(statistics.median(v), 2) for t, v in per_tin.items()}
+    all_vals = _all_payer_values(values)
     all_row = {"payer": "All payers", "incomplete_excluded": None}
     if len(all_vals) < MIN_PRACTICES:
         all_row.update(suppressed=True, practices=None, mean=None, median=None, p25=None, p75=None)
@@ -295,6 +312,186 @@ def market_visit_value(store: Store, market: dict | None, raw_lines=None,
         "subject_note": SUBJECT_NOTE if subject else None,
         "units_rule": UNITS_RULE, "value_note": VALUE_NOTE,
     }
+
+
+ALL_PAYERS = "All payers"
+PRACTICES_PAGE = 50
+PRACTICES_PAGE_MAX = 500
+PRACTICES_NOTE = (
+    "Every practice priced for this visit, by its visit value — the same values "
+    "the row above summarises (a practice counts only when the payer prices EVERY "
+    "code of the visit for it). Rank: 1 + the practices paid more (ties share a "
+    "rank, listed by tax ID). Percentile: its mid-rank among the others — those "
+    "paid less plus half of those paid the same, as a share of the others. "
+    "'All payers': each practice's value is the median of its own per-payer "
+    "visit values. Names, cities and NPIs are the NPPES records of the NPIs "
+    "each tax ID bills under.")
+
+
+@generation_cached("visit_market.ranked")
+def _ranked(store: Store, market: dict | None, raw_lines, preset, payer: str) -> dict:
+    """One payer's (or All payers') practices, highest visit value first:
+    [tin, value, rank, percentile, detail]. A suppressed cell (fewer than
+    MIN_PRACTICES practices) has no list either — it would print the cell."""
+    b = _compute_values(store, market, raw_lines, preset)
+    values, billed = b["values"], b["billed"]
+    if payer == ALL_PAYERS:
+        vals = _all_payer_values(values)
+        by_tin: dict[str, list[tuple[str, float]]] = {}
+        for p_ in sorted(values):
+            for tin, v in values[p_].items():
+                by_tin.setdefault(tin, []).append((p_, v))
+        detail = {t: {"payers": len(pv), "low": min(v for _p, v in pv),
+                      "high": max(v for _p, v in pv)} for t, pv in by_tin.items()}
+    else:
+        if payer not in values:
+            raise VisitError(f"{payer!r} prices no practice for this visit in "
+                             f"{b['m']['state']} — pick a payer from the table")
+        vals = values[payer]
+        detail = {t: {"rates": [{"code": c, "units": u,
+                                  "rate": half_up(b["pairs"][(payer, t)][c], 2)}
+                                 for c, u in billed]} for t in vals}
+    if len(vals) < MIN_PRACTICES:
+        raise VisitError(f"{payer} prices this visit for fewer than {MIN_PRACTICES} "
+                         f"practices in {b['m']['state']}, so its practices are not "
+                         "listed (the house minimum behind any market figure)")
+    st = _stats(list(vals.values()))
+    ranked = sorted(vals.items(), key=lambda kv: (-kv[1], kv[0]))   # unique: tin
+    n = len(ranked)
+    allv = sorted(vals.values())
+    import bisect
+    rows = []
+    for tin, v in ranked:
+        below = bisect.bisect_left(allv, v)
+        tied_others = bisect.bisect_right(allv, v) - below - 1
+        higher = n - bisect.bisect_right(allv, v)
+        pct = 100.0 * (below + 0.5 * tied_others) / (n - 1) if n > 1 else None
+        rows.append({"tin": tin, "value": v, "rank": higher + 1,
+                     "percentile": None if pct is None else int(half_up(pct, 0)),
+                     "vs_median": half_up(v - st["_median"], 2),
+                     "vs_median_pct": (half_up(100.0 * (v - st["_median"]) / st["_median"], 1)
+                                       if st["_median"] else None),
+                     **detail[tin]})
+    return {"payer": payer, "state": b["m"]["state"], "discipline": b["disc"],
+            "month": b["m"]["month"], "label": b["label"],
+            "basket": " + ".join(f"{c}×{u}" for c, u in billed),
+            "codes": [c for c, _ in billed], "median": st["median"], "mean": st["mean"],
+            "rows": rows}
+
+
+def market_visit_practices(store: Store, market: dict | None, raw_lines=None,
+                           preset: str | None = None, payer: str = ALL_PAYERS,
+                           subject: str | None = None, offset: int = 0,
+                           limit: int = PRACTICES_PAGE, order: str = "desc") -> dict:
+    """The practices behind one row of the block, ranked by visit value
+    (highest first, or lowest first with order='asc'), one page at a time,
+    each with its name, city, tax ID (SSN-pattern masked), NPIs and — per
+    payer — the rates that make up its visit."""
+    from .benchmark import subject_tins_for_market
+    from .store import mask_tin
+    payer = str(payer or ALL_PAYERS).strip() or ALL_PAYERS
+    r = _ranked(store, market, raw_lines, preset, payer)
+    rows = r["rows"]
+    if order == "asc":
+        rows = sorted(rows, key=lambda x: (x["value"], x["tin"]))
+    offset = max(0, int(offset or 0))
+    limit = max(1, min(int(limit or PRACTICES_PAGE), PRACTICES_PAGE_MAX))
+    page = rows[offset:offset + limit]
+    tins = [x["tin"] for x in page]
+    stins: set[str] = set()
+    subject = str(subject or "").strip() or None
+    if subject:
+        try:
+            stins = set(subject_tins_for_market(store, subject, {"state": r["state"]}))
+        except Exception:  # noqa: BLE001 — the list never fails on the highlight
+            stins = set()
+    info: dict[str, dict] = {}
+    npis: dict[str, list[dict]] = {}
+    if tins:
+        with store.connect() as con:
+            cur = con.execute(
+                "SELECT tin_value, display_name, entity_kind, primary_state, cities, "
+                "npi_count, therapy_npi_count, primary_discipline FROM tin_directory "
+                "WHERE tin_value IN (SELECT unnest(?::VARCHAR[]))", [tins])
+            cols = [d[0] for d in cur.description]
+            for row in cur.fetchall():
+                info[row[0]] = dict(zip(cols, row))
+            for tin, npi, name, etype, city, st_, zip_ in con.execute(
+                    f"SELECT p.tin_value, p.npi, n.org_name, n.entity_type, n.city, n.state, "
+                    f"n.zip FROM (SELECT DISTINCT tin_value, npi FROM {store.pairs_relation()} "
+                    "WHERE tin_value IN (SELECT unnest(?::VARCHAR[])) AND npi IS NOT NULL) p "
+                    "LEFT JOIN npi_directory n USING (npi) "
+                    "ORDER BY p.tin_value, (n.entity_type = 'NPI-2') DESC NULLS LAST, p.npi",
+                    [tins]).fetchall():
+                npis.setdefault(tin, []).append(
+                    {"npi": npi, "name": name, "type": etype, "city": city, "state": st_,
+                     "zip": (str(zip_)[:5] if zip_ else None)})
+    out = []
+    for x in page:
+        d = info.get(x["tin"], {})
+        all_npis = npis.get(x["tin"], [])
+        out.append({
+            **{k: v for k, v in x.items() if k != "tin"},
+            "tin": mask_tin(x["tin"]),
+            "name": d.get("display_name") or f"TIN {mask_tin(x['tin'])}",
+            "kind": d.get("entity_kind"),
+            "state": d.get("primary_state"),
+            "cities": list(d.get("cities") or [])[:3],
+            "npi_count": d.get("npi_count") if d.get("npi_count") is not None else len(all_npis),
+            "therapy_npi_count": d.get("therapy_npi_count"),
+            "discipline": d.get("primary_discipline"),
+            "npis": all_npis[:5], "npis_more": max(0, len(all_npis) - 5),
+            "is_subject": x["tin"] in stins})
+    return {"payer": r["payer"], "state": r["state"], "discipline": r["discipline"],
+            "month": r["month"], "label": r["label"], "basket": r["basket"],
+            "codes": r["codes"], "median": r["median"], "mean": r["mean"],
+            "order": "asc" if order == "asc" else "desc",
+            "total": len(rows), "offset": offset, "limit": limit, "rows": out,
+            "note": PRACTICES_NOTE}
+
+
+def practices_csv(store: Store, market: dict | None, raw_lines=None,
+                  preset: str | None = None, payer: str = ALL_PAYERS,
+                  subject: str | None = None) -> str:
+    """Every practice of one row, highest visit value first, as CSV."""
+    import csv
+    import io
+    first = market_visit_practices(store, market, raw_lines, preset, payer, subject,
+                                   0, PRACTICES_PAGE_MAX)
+    rows = list(first["rows"])
+    while len(rows) < first["total"]:
+        rows += market_visit_practices(store, market, raw_lines, preset, payer, subject,
+                                       len(rows), PRACTICES_PAGE_MAX)["rows"]
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    for line in (f"Visit value by practice — {first['payer']}, {first['state']}, "
+                 f"{first['discipline']}, as of {first['month']}",
+                 f"Visit: {first['label']} — {first['basket']}", first["note"]):
+        buf.write("# " + " ".join(str(line).split()) + "\n")     # a comment line, as-is
+    per_code = first["payer"] != ALL_PAYERS
+    head = ["rank", "practice", "tax_id", "state", "cities", "npi_count",
+            "therapy_npi_count", "npis", "visit_value", "vs_median", "vs_median_pct",
+            "percentile", "this_practice"]
+    head += [f"rate_{c}" for c in first["codes"]] if per_code else ["payers", "lowest_payer_value",
+                                                                    "highest_payer_value"]
+    w.writerow(head)
+    for x in rows:
+        line = [x["rank"], x["name"], x["tin"], x["state"] or "", "; ".join(x["cities"]),
+                x["npi_count"] if x["npi_count"] is not None else "",
+                x["therapy_npi_count"] if x["therapy_npi_count"] is not None else "",
+                "; ".join(n["npi"] for n in x["npis"]) + (f" (+{x['npis_more']} more)"
+                                                          if x["npis_more"] else ""),
+                f"{x['value']:.2f}", f"{x['vs_median']:.2f}",
+                "" if x["vs_median_pct"] is None else f"{x['vs_median_pct']:.1f}",
+                "" if x["percentile"] is None else x["percentile"],
+                "yes" if x["is_subject"] else ""]
+        if per_code:
+            rates = {r_["code"]: r_["rate"] for r_ in x["rates"]}
+            line += [f"{rates[c]:.2f}" for c in first["codes"]]
+        else:
+            line += [x["payers"], f"{x['low']:.2f}", f"{x['high']:.2f}"]
+        w.writerow([defuse_csv(str(v)) for v in line])
+    return buf.getvalue()
 
 
 # ------------------------------------------------------------- rendering --

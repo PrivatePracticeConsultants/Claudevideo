@@ -894,3 +894,6 @@ tests/mrfx/test_v083.py::test_the_pairs_file_is_merged_from_per_file_pairs
 tests/mrfx/test_v083.py::test_the_practice_drawer_lists_the_same_npis
 tests/mrfx/test_v083.py::test_the_practice_placement_is_built_from_the_kept_pairs
 tests/mrfx/test_v083.py::test_the_npi_drawer_reads_only_the_files_that_hold_the_npi
+tests/mrfx/test_v083.py::test_visit_value_practices_are_ranked_highest_first_with_hand_worked_numbers
+tests/mrfx/test_v083.py::test_visit_value_practices_agree_with_the_row_and_page_and_sort
+tests/mrfx/test_v083.py::test_visit_value_practices_csv_is_the_list
