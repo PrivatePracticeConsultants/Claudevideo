@@ -6271,26 +6271,55 @@ class Store:
                 pass
         threading.Thread(target=run, name=f"mrfx-warm-{name}", daemon=True).start()
 
+    def npi_parts(self, npi: str) -> list[str] | None:
+        """The rate parts (file names) that can hold `npi` in the NPI column:
+        a part the kept NPI set covers (rate_npi_parts signature = the part on
+        disk; serve keeps it current) when the set lists the NPI, and every
+        part the set does not cover yet. One snapshot of set + signatures.
+        None when it cannot say (not a 10-digit NPI, or an error): read every
+        part. A part missing from the list holds no row for the NPI."""
+        npi = str(npi or "").strip()
+        if not re.fullmatch(r"[0-9]{10}", npi):
+            return None
+        current = self._part_sigs()
+        try:
+            with self.connect() as con:
+                con.execute("BEGIN TRANSACTION")
+                try:
+                    known = dict(con.execute("SELECT part, sig FROM rate_npi_parts").fetchall())
+                    covered = sorted(p for p, sg in current.items() if known.get(p) == sg)
+                    hits = {r[0] for r in con.execute(
+                        "SELECT DISTINCT part FROM rate_npi_set WHERE npi = ? "
+                        "AND part IN (SELECT unnest(?::VARCHAR[]))",
+                        [npi, covered]).fetchall()} if covered else set()
+                finally:
+                    con.execute("COMMIT")
+        except duckdb.Error:
+            return None
+        return sorted(hits | (set(current) - set(covered)))
+
+    def npi_rates_source(self, npi: str) -> str:
+        """`rates`, or the read_parquet of only the parts that can hold `npi`
+        (npi_parts) — the same rows for any query filtered to that NPI."""
+        parts = self.npi_parts(npi)
+        if parts is None:
+            return "rates"
+        if not parts:
+            return "(SELECT * FROM rates WHERE FALSE)"
+        return ("read_parquet([" + ", ".join(
+            f"'{sql_path(self.rates_dir / n)}'" for n in parts) + "])")
+
     def tins_billing_npi(self, npi: str) -> list[str]:
         """The TINs whose rates name `npi` in the NPI column — exactly what
         `SELECT DISTINCT tin_value FROM rates_dedup WHERE npi = ?` answers,
-        sorted — reading only the rate parts that can hold it.
+        sorted — reading only the rate parts that can hold it (npi_parts).
 
         The rate card / Price a visit / Visit value with an NPI as the
         practice scanned every raw rate for it (22 s on a 99M-rate store,
         several times per report; at 1.18 B unsorted rates, minutes each
-        under an analytics build). Now: a part the kept per-part NPI set
-        covers (rate_npi_parts signature = the part on disk; the dashboard's
-        poll keeps it current, enrichment_progress) is read only when its
-        set lists the NPI; a part the set does not cover yet is read as
-        before. Exact either way, never slower than the full scan; asked
-        again if a part changes meanwhile. Cached per set of parts."""
+        under an analytics build). Exact, never slower than the full scan;
+        asked again if a part changes meanwhile; cached per set of parts."""
         npi = str(npi or "").strip()
-        if not re.fullmatch(r"[0-9]{10}", npi):
-            with self.connect() as con:
-                return [r[0] for r in con.execute(
-                    "SELECT DISTINCT tin_value FROM rates_dedup "
-                    "WHERE npi = ? AND tin_value IS NOT NULL ORDER BY 1", [npi]).fetchall()]
         cache = self.__dict__.setdefault("_npi_tins_cache", {})
         where = ("WHERE npi = ? AND tin_value IS NOT NULL "
                  "AND (negotiated_rate IS NULL OR isfinite(negotiated_rate))")
@@ -6299,26 +6328,12 @@ class Store:
             sig = hashlib.sha1(json.dumps(sorted(current.items())).encode()).hexdigest()
             if (npi, sig) in cache:
                 return list(cache[(npi, sig)])
-            if not current:
-                return []
+            src = self.npi_rates_source(npi)
             try:
                 with self.connect() as con:
-                    con.execute("BEGIN TRANSACTION")     # one snapshot of set + signatures
-                    try:
-                        known = dict(con.execute(
-                            "SELECT part, sig FROM rate_npi_parts").fetchall())
-                        covered = sorted(p for p, sg in current.items() if known.get(p) == sg)
-                        hits = {r[0] for r in con.execute(
-                            "SELECT DISTINCT part FROM rate_npi_set WHERE npi = ? "
-                            "AND part IN (SELECT unnest(?::VARCHAR[]))",
-                            [npi, covered]).fetchall()} if covered else set()
-                    finally:
-                        con.execute("COMMIT")
-                    scan = sorted(hits | (set(current) - set(covered)))
-                    got = [] if not scan else [r[0] for r in con.execute(
-                        "SELECT DISTINCT tin_value FROM read_parquet(["
-                        + ", ".join(f"'{sql_path(self.rates_dir / n)}'" for n in scan)
-                        + f"]) {where} ORDER BY 1", [npi]).fetchall()]
+                    got = [r[0] for r in con.execute(
+                        f"SELECT DISTINCT tin_value FROM {src} {where} ORDER BY 1",
+                        [npi]).fetchall()]
             except duckdb.IOException:
                 continue                 # a part was swapped meanwhile: ask again
             if self._part_sigs() != current:

@@ -893,3 +893,4 @@ tests/mrfx/test_v083.py::test_a_loaded_file_leaves_the_practice_medians_current
 tests/mrfx/test_v083.py::test_the_pairs_file_is_merged_from_per_file_pairs
 tests/mrfx/test_v083.py::test_the_practice_drawer_lists_the_same_npis
 tests/mrfx/test_v083.py::test_the_practice_placement_is_built_from_the_kept_pairs
+tests/mrfx/test_v083.py::test_the_npi_drawer_reads_only_the_files_that_hold_the_npi

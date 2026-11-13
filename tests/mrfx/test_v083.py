@@ -343,3 +343,27 @@ def test_the_practice_placement_is_built_from_the_kept_pairs(cfg, vv_app, store,
     (cfg.inbox_dir / "d_2026-06.json").write_text(json.dumps(_vv_doc("Payer D", {"T3": 70, "T8": 61})))
     assert all(r["status"] == "done" for r in scan_inbox(cfg, store))
     assert kept() == raw()
+
+
+def test_the_npi_drawer_reads_only_the_files_that_hold_the_npi(vv_app, store, monkeypatch):
+    """(P1) The practice drawer at the NPI grain reads only the rate parts
+    that can hold the NPI and shows the same rows as the full view.
+    was: rates_dedup over every part (7 s on a 1.19 B-rate store held in
+    memory; minutes from disk)."""
+    _index(store)
+    full = vv_app.get(f"/api/entity/npi/{T3_NPI}").json()
+    assert full["rates"]
+    holding = _parts_with(store, T3_NPI)
+    every = sorted(p.name for p in store.rates_dir.glob("*.parquet"))
+    store._npi_tins_cache = {}
+    spy = _Spy(store, monkeypatch)
+    again = vv_app.get(f"/api/entity/npi/{T3_NPI}").json()
+    read = "\n".join(q for q in spy.sql if "unit_id = ?" in q)
+    assert read and "rates_dedup" not in read
+    assert all(p in read for p in holding)
+    assert not any(p in read for p in set(every) - set(holding))
+    assert json.dumps(again["rates"], sort_keys=True) == json.dumps(full["rates"], sort_keys=True)
+    monkeypatch.undo()
+    monkeypatch.setattr(store, "npi_parts", lambda npi: None)       # the old, full read
+    old = vv_app.get(f"/api/entity/npi/{T3_NPI}").json()
+    assert json.dumps(old["rates"], sort_keys=True) == json.dumps(full["rates"], sort_keys=True)

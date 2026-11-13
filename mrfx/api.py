@@ -2252,8 +2252,18 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                     "service_code_set, is_dollar_rate, tin_value, negotiated_rate",
                     [members, unit_id])) if members else []
             else:
+                rel = GRAIN_REL[grain]
+                if grain == "npi":
+                    # only the parts that can hold this NPI (Store.npi_parts):
+                    # rates_dedup over every part read 1.19 B rates for one
+                    # NPI (7 s with the store in memory; minutes from disk)
+                    src = store.npi_rates_source(unit_id)
+                    if src != "rates":
+                        from .store import DEDUP_QUERY
+                        dedup = DEDUP_QUERY.replace("FROM rates\n", f"FROM {src}\n", 1)
+                        rel = rel.replace("FROM rates_dedup d", f"FROM ({dedup}) d", 1)
                 rows = _dicts(con.execute(
-                    f"SELECT * FROM ({GRAIN_REL[grain]}) WHERE unit_id = ? "
+                    f"SELECT * FROM ({rel}) WHERE unit_id = ? "
                     "ORDER BY billing_code, payer, modifier_set, file_month, billing_class, "
                     "service_code_set, is_dollar_rate, tin_value, negotiated_rate",
                     [unit_id],
@@ -2304,7 +2314,9 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             # beside June's GP row of the same contract (review 12 item 1.1:
             # $41 here vs $42 on the TIN drawer, the Explorer and the Code page).
             if grain == "npi":
-                chart_rel = (f"SELECT * FROM ({GRAIN_REL['npi']}) WHERE unit_id = ? "
+                # `rel`: the NPI relation over only the parts that can hold
+                # it (above) — the window partitions by NPI, so the same rows
+                chart_rel = (f"SELECT * FROM ({rel}) WHERE unit_id = ? "
                              f"{_NPI_LATEST_QUALIFY}")
             elif grain == "entity":
                 chart_rel = (f"SELECT * FROM ({_entity_rel(_member_tin_rows(latest=True), True)}) "
