@@ -249,3 +249,61 @@ def test_a_loaded_file_leaves_the_practice_medians_current(cfg, vv_app, store, m
     store.rebuild_rollups()
     assert store.spine_key() != key
     assert store.spine_materialised_current(bm.DISC_PAYER_PRACTICE_MEDIANS) is None
+
+
+def _raw_pairs(store):
+    with store.connect() as con:
+        return con.execute(
+            "SELECT tin_value, npi, tin_is_really_npi, count(*) FROM rates "
+            "GROUP BY ALL ORDER BY ALL").fetchall()
+
+
+def _kept_pairs(store):
+    with store.connect() as con:
+        return con.execute(f"SELECT * FROM {store.pairs_relation()} ORDER BY ALL").fetchall()
+
+
+def test_the_pairs_file_is_merged_from_per_file_pairs(cfg, vv_app, store, monkeypatch):
+    """(P0 — the practice drawer at 1.19 B rates) The (TIN, NPI) pairs file
+    behind the practice drawer, the city map, sizing, the digest, outreach,
+    new-to-network and steal-share is merged from pairs kept per rate part:
+    a file that lands is aggregated ALONE — the rest come from the kept
+    sets — and the result equals the raw aggregate exactly (a part not
+    covered yet is read in the same statement).
+    was: every rate of the store aggregated whenever any part changed (on a
+    1.19 B-rate store the drawer ran out of temp disk after 16 s)."""
+    assert _kept_pairs(store) == _raw_pairs(store)
+    (cfg.inbox_dir / "d_2026-06.json").write_text(json.dumps(_vv_doc("Payer D", {"T3": 70, "T8": 61})))
+    monkeypatch.setattr(store, "rebuild_rollups", lambda *a, **k: 0.0)
+    monkeypatch.setattr(store, "update_rollups_incremental", lambda *a, **k: 0.0)
+    assert all(r["status"] == "done" for r in scan_inbox(cfg, store))
+    new_part = f"{file_key('d_2026-06.json')}.parquet"
+    spy = _Spy(store, monkeypatch)
+    assert _kept_pairs(store) == _raw_pairs(store)
+    built = "\n".join(q for q in spy.sql if "tin_npi_pairs" in q or "part_pair_set" in q)
+    assert "FROM rates" not in built
+    old_parts = [p.name for p in store.rates_dir.glob("*.parquet") if p.name != new_part]
+    # each old part came from the kept set, never read again
+    assert not any(f"{p}'" in built for p in old_parts)
+    # a part not covered yet (the set lagging behind) is read in the merge
+    monkeypatch.undo()
+    with store.connect() as con:
+        con.execute("DELETE FROM part_pair_set WHERE part = ?", [new_part])
+        con.execute("DELETE FROM part_pair_parts WHERE part = ?", [new_part])
+    for p in store.dir.glob("tin_npi_pairs.*.parquet"):
+        p.unlink()
+    monkeypatch.setattr(store, "_pair_sets_current", lambda con, budget_s=None: False)
+    assert _kept_pairs(store) == _raw_pairs(store)
+
+
+def test_the_practice_drawer_lists_the_same_npis(vv_app, store):
+    """(no step backwards) The practice drawer's NPI list off the merged
+    pairs equals the raw (TIN, NPI) pairs."""
+    r = vv_app.get(f"/api/entity/tin/{T3_TIN}")
+    assert r.status_code == 200, r.text
+    listed = sorted(n["npi"] for n in r.json()["npis"])
+    with store.connect() as con:
+        raw = [x[0] for x in con.execute(
+            "SELECT DISTINCT npi FROM rates WHERE tin_value = ? AND npi IS NOT NULL ORDER BY 1",
+            [T3_TIN]).fetchall()]
+    assert listed == raw == [T3_NPI]

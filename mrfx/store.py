@@ -2549,6 +2549,14 @@ class Store:
                                                        file_month VARCHAR, n BIGINT);
             CREATE TABLE IF NOT EXISTS part_tin_set (part VARCHAR, tin_value VARCHAR);
             CREATE TABLE IF NOT EXISTS part_set_parts (part VARCHAR PRIMARY KEY, sig VARCHAR);
+            -- every (TIN, NPI, NPI-in-the-slot) pair of each rate PART with its
+            -- row count (0.8.3) — kept per part like the sets above, so the
+            -- whole-store pairs file (Store.pairs_relation) is a merge of these
+            -- and a loaded file costs one scan of ITSELF, never of the store
+            CREATE TABLE IF NOT EXISTS part_pair_set (part VARCHAR, tin_value VARCHAR,
+                                                      npi VARCHAR,
+                                                      tin_is_really_npi BOOLEAN, c BIGINT);
+            CREATE TABLE IF NOT EXISTS part_pair_parts (part VARCHAR PRIMARY KEY, sig VARCHAR);
             -- Which health PLANS a rate file serves, harvested from the payer's
             -- table-of-contents (the rate file itself never names a plan).
             -- Keyed by the URL's dedup_key so it joins to url_queue, which
@@ -6898,7 +6906,63 @@ class Store:
                             pass
         return f"read_parquet('{sql_path(path)}')"
 
-    PAIRS_SCHEMA = 1
+    PAIRS_SCHEMA = 2
+
+    def _pair_sets_current(self, con: duckdb.DuckDBPyConnection,
+                           budget_s: float | None = None) -> bool:
+        """Bring part_pair_set up to date with the parts on disk — the
+        rate_npi_set / part_tin_set pattern: new or rewritten parts are
+        scanned one at a time with NO lock held, the result applied in one
+        short transaction under the writer lock. True when every part is
+        covered (False: the budget ran out, a part could not be read, or a
+        writer held the lock; the next call continues)."""
+        current = self._part_sigs()
+        known = dict(con.execute("SELECT part, sig FROM part_pair_parts").fetchall())
+        gone = [p for p in known if p not in current]
+        changed = sorted(p for p, sig in current.items() if known.get(p) != sig)
+        if not gone and not changed:
+            return True
+        t0 = time.monotonic()
+        con.execute("CREATE OR REPLACE TEMP TABLE __pair_new (part VARCHAR, tin_value VARCHAR, "
+                    "npi VARCHAR, tin_is_really_npi BOOLEAN, c BIGINT)")
+        scanned, complete = [], True
+        for name in changed:
+            if budget_s is not None and time.monotonic() - t0 > budget_s:
+                complete = False
+                break
+            src = f"read_parquet('{sql_path(self.rates_dir / name)}')"
+            try:
+                con.execute(f"INSERT INTO __pair_new SELECT ?, tin_value, npi, tin_is_really_npi, "
+                            f"count(*) FROM {src} GROUP BY tin_value, npi, tin_is_really_npi",
+                            [name])
+                scanned.append(name)
+            except duckdb.Error:
+                con.execute("DELETE FROM __pair_new WHERE part = ?", [name])
+                complete = False      # unreadable right now: next call
+        drop = gone + scanned
+        if not drop:
+            return complete and not changed
+        if not self.write_lock.acquire(timeout=3):
+            return False
+        try:
+            con.execute("BEGIN TRANSACTION")
+            try:
+                for tbl in ("part_pair_set", "part_pair_parts"):
+                    con.execute(f"DELETE FROM {tbl} WHERE part IN "
+                                "(SELECT unnest(?::VARCHAR[]))", [drop])
+                con.execute("INSERT INTO part_pair_set SELECT * FROM __pair_new")
+                for name in scanned:
+                    con.execute("INSERT INTO part_pair_parts VALUES (?, ?)", [name, current[name]])
+                con.execute("COMMIT")
+            except Exception:
+                try:
+                    con.execute("ROLLBACK")
+                except duckdb.Error:
+                    pass
+                raise
+        finally:
+            self.write_lock.release()
+        return complete
 
     def pairs_relation(self) -> str:
         """`read_parquet(...)` of every (tin_value, npi, tin_is_really_npi)
@@ -6907,40 +6971,91 @@ class Store:
         `SELECT DISTINCT tin_value, npi FROM rates` ran on EVERY call of the
         city rate map, market sizing, the client digest, outreach, new-to-
         network, steal-share and the entity drawer — 2-12 s of raw scan each on
-        a 99M-rate store (1,939,999 pairs). Built once from the raw rows and
-        stamped with the parts' signatures like placement_relation, so a part
-        landing, changing or leaving yields a new file on the next request and
-        never a stale pair. NULL npi (TIN-only rows) and NULL tin are kept, so
-        a reader's DISTINCT over this equals the same DISTINCT over `rates`."""
+        a 99M-rate store (1,939,999 pairs). Stamped with the parts' signatures
+        like placement_relation, so a part landing, changing or leaving yields
+        a new file on the next request and never a stale pair. NULL npi
+        (TIN-only rows) and NULL tin are kept, so a reader's DISTINCT over this
+        equals the same DISTINCT over `rates`.
+
+        0.8.3: merged from the kept per-part pairs (part_pair_set) — 0.8.2
+        aggregated every raw rate whenever ANY part had changed: on a 1.19 B-
+        rate store the practice drawer ran out of temp disk after 16 s, and on
+        a store loading files nearly every such report re-read the store. A
+        part the per-part set does not cover yet is aggregated from its own
+        rows in the same statement — exact either way."""
         import hashlib
         import json as _json
-        stamp = hashlib.sha1(_json.dumps(
-            [sorted(self._part_sigs().items()), self.PAIRS_SCHEMA]).encode()).hexdigest()[:16]
-        path = self.dir / f"tin_npi_pairs.{stamp}.parquet"
-        if not path.exists():
-            lock = self.__dict__.setdefault("_pairs_lock", threading.Lock())
+        lock = self.__dict__.setdefault("_pairs_lock", threading.Lock())
+        for _attempt in range(3):
+            sigs = self._part_sigs()
+            stamp = hashlib.sha1(_json.dumps(
+                [sorted(sigs.items()), self.PAIRS_SCHEMA]).encode()).hexdigest()[:16]
+            path = self.dir / f"tin_npi_pairs.{stamp}.parquet"
+            if path.exists():
+                return f"read_parquet('{sql_path(path)}')"
             with lock:
-                if not path.exists():
-                    tmp = self.dir / f"tin_npi_pairs.{stamp}.parquet.{os.getpid()}.tmp"
-                    try:
-                        with self.connect() as con:
-                            con.execute(
-                                "COPY (SELECT tin_value, npi, tin_is_really_npi, count(*) AS c "
-                                "FROM rates GROUP BY tin_value, npi, tin_is_really_npi "
-                                "ORDER BY tin_value, npi) "
-                                f"TO '{sql_path(tmp)}' (FORMAT PARQUET)")
-                        os.replace(tmp, path)
-                    except BaseException:
+                if path.exists():
+                    return f"read_parquet('{sql_path(path)}')"
+                tmp = self.dir / f"tin_npi_pairs.{stamp}.parquet.{os.getpid()}.tmp"
+                try:
+                    self._write_pairs(sigs, tmp)
+                    if self._part_sigs() != sigs:
+                        # a part changed while it was read: this file would be
+                        # named for parts that are gone — build again
                         tmp.unlink(missing_ok=True)
-                        raise
-                    olds = sorted((p for p in self.dir.glob("tin_npi_pairs.*.parquet")
-                                   if p != path), key=lambda p: p.stat().st_mtime, reverse=True)
-                    for old in olds[1:]:
-                        try:
-                            old.unlink()
-                        except OSError:
-                            pass
-        return f"read_parquet('{sql_path(path)}')"
+                        continue
+                    os.replace(tmp, path)
+                except BaseException:
+                    tmp.unlink(missing_ok=True)
+                    raise
+                olds = sorted((p for p in self.dir.glob("tin_npi_pairs.*.parquet")
+                               if p != path), key=lambda p: p.stat().st_mtime, reverse=True)
+                for old in olds[1:]:
+                    try:
+                        old.unlink()
+                    except OSError:
+                        pass
+                return f"read_parquet('{sql_path(path)}')"
+        # the parts kept changing: the pairs straight from the raw rows
+        return ("(SELECT tin_value, npi, tin_is_really_npi, count(*) AS c FROM rates "
+                "GROUP BY tin_value, npi, tin_is_really_npi)")
+
+    def _write_pairs(self, sigs: dict, tmp: Path) -> None:
+        """The pairs file for the parts `sigs` names: the kept per-part pairs
+        of every part they cover, merged with the parts they do not cover
+        yet read from their own rows — one snapshot, exact either way."""
+        with self.connect() as con:
+            try:
+                self._pair_sets_current(con, None)
+            except duckdb.Error:
+                pass                  # what is covered is used; the rest is read
+            con.execute("BEGIN TRANSACTION")
+            try:
+                known = dict(con.execute("SELECT part, sig FROM part_pair_parts").fetchall())
+                covered = sorted(n for n, sg in sigs.items() if known.get(n) == sg)
+                rest = sorted(set(sigs) - set(covered))
+                srcs = []
+                if covered:
+                    srcs.append("SELECT tin_value, npi, tin_is_really_npi, c FROM part_pair_set "
+                                "WHERE part IN (SELECT unnest(?::VARCHAR[]))")
+                if rest:
+                    srcs.append(
+                        "SELECT tin_value, npi, tin_is_really_npi, count(*) AS c "
+                        "FROM read_parquet([" + ", ".join(
+                            f"'{sql_path(self.rates_dir / n)}'" for n in rest)
+                        + "]) GROUP BY tin_value, npi, tin_is_really_npi")
+                if not srcs:
+                    srcs.append("SELECT NULL::VARCHAR AS tin_value, NULL::VARCHAR AS npi, "
+                                "NULL::BOOLEAN AS tin_is_really_npi, 0::BIGINT AS c WHERE FALSE")
+                con.execute(
+                    "COPY (SELECT tin_value, npi, tin_is_really_npi, sum(c)::BIGINT AS c FROM ("
+                    + " UNION ALL ".join(srcs)
+                    + ") GROUP BY tin_value, npi, tin_is_really_npi "
+                    "ORDER BY tin_value, npi, tin_is_really_npi) "
+                    f"TO '{sql_path(tmp)}' (FORMAT PARQUET)",
+                    [covered] if covered else [])
+            finally:
+                con.execute("COMMIT")
 
     def _part_sigs(self) -> dict[str, str]:
         """{part file name: size|mtime} for the rate parts on disk: every
@@ -7182,6 +7297,10 @@ class Store:
         try:
             with self.connect() as con:
                 complete = self._part_sets_current(con, budget_s)
+                try:            # the pairs set rides the same poll (0.8.3)
+                    self._pair_sets_current(con, budget_s)
+                except Exception:  # noqa: BLE001 — a warm-up never fails the poll
+                    pass
                 payers = con.execute(
                     "SELECT payer, sum(n) FROM part_payer_set WHERE part IN "
                     "(SELECT part FROM part_set_parts) GROUP BY payer ORDER BY payer").fetchall()
@@ -7820,6 +7939,7 @@ class Store:
                     "DELETE FROM rate_npi_parts; DELETE FROM rate_npi_set; "
                     "DELETE FROM part_payer_set; DELETE FROM part_tin_set; "
                     "DELETE FROM part_set_parts; "
+                    "DELETE FROM part_pair_set; DELETE FROM part_pair_parts; "
                     # part-operation and rollup bookkeeping of the wiped store
                     "DELETE FROM meta WHERE key IN ('parked_parts', "
                     "'rollup_pending_payers', 'rollup_needs_full', 'rollup_plan', "
