@@ -1055,6 +1055,24 @@ Downloads and files:
 - **"fee for service" / "fee_schedule"** spelled differently by a payer no
   longer drop rates.
 
+## What changed in version 0.8.7
+
+- **A new look.** The dashboard was redesigned: dark navy surfaces, one
+  indigo accent, green and red only for "above" and "below the market",
+  cleaner cards, tables and controls, and icons in the menu. Every screen
+  and every feature works as before.
+- **iPad and iPhone layouts.** On an iPad the menu becomes a slim icon rail.
+  On an iPhone a tab bar at the bottom opens Overview, My rates, Negotiate and
+  Market rates; **More** opens the full menu.
+- **Benchmark draws your position.** Above the table: how many of your codes
+  are at or above the market median (a ring), your biggest gaps, and one bar
+  per code showing the middle half of the market (p25–p75), its p10–p90
+  range, the median and your rate. Hover (or tap) a bar for every figure.
+  A code fewer than 5 practices price shows "Not enough data" — never a number.
+- **Updating from a design file.** A zip that holds only dashboard pages (a
+  design or prototype, e.g. from a design tool) is not an MRF Explorer build;
+  "Update MRF Explorer" now says exactly that and changes nothing.
+
 ## What changed in version 0.8.6
 
 Built around one job: showing a practice owner how their rates compare with

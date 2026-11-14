@@ -52,6 +52,14 @@ def _members(z: zipfile.ZipFile) -> tuple[str, dict[str, zipfile.ZipInfo]]:
     if not prefixes or (not good and any(r + "mrfx/__init__.py" not in all_names for r in reqs)):
         # (a build whose only mrfx/__init__.py is tests/mrfx/__init__.py is
         # not a build — say THAT, not "missing requirements.txt")
+        base = {f.rsplit("/", 1)[-1] for f in all_names}
+        if "index.html" in base and ({"app.js", "charts.js", "tokens.css", "app.css"} & base):
+            # a dashboard design export (e.g. a redesign prototype): web files
+            # only, often on sample data — installing it would replace the app
+            raise UpdateError("this zip is a dashboard design (web pages only — index.html, app.js, …), "
+                              "not an MRF Explorer build, so there is nothing here to install. The design "
+                              "has to be built into the app first; the build that carries it is a zip "
+                              "with an mrfx folder inside")
         raise UpdateError("this zip doesn't contain MRF Explorer (no mrfx/__init__.py) — "
                           "check you picked the right file")
     prefix = (good or prefixes)[0]

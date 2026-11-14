@@ -2,42 +2,78 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0d12">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>MRF Explorer</title>
 <link rel="stylesheet" href="styles.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect x='1' y='8' width='3' height='7' fill='%232a78d6'/><rect x='6' y='4' width='3' height='11' fill='%232a78d6'/><rect x='11' y='1' width='3' height='14' fill='%232a78d6'/></svg>">
 </head>
 <body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-overview" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="7" height="7" rx="2"/><rect x="13.5" y="3.5" width="7" height="4.5" rx="2"/><rect x="13.5" y="11" width="7" height="9.5" rx="2"/><rect x="3.5" y="13.5" width="7" height="7" rx="2"/></symbol>
+  <symbol id="i-clients" viewBox="0 0 24 24"><circle cx="9" cy="8.5" r="3.5"/><path d="M2.8 19.5c.7-3.2 3.2-5 6.2-5s5.5 1.8 6.2 5"/><path d="M15.5 5.3a3.4 3.4 0 0 1 0 6.4M17.5 14.7c1.9.6 3.2 2.3 3.7 4.8"/></symbol>
+  <symbol id="i-rates" viewBox="0 0 24 24"><path d="M5 3.5h14v17l-3-1.8-2 1.8-2-1.8-2 1.8-2-1.8-3 1.8z"/><path d="M8.5 8.5h7M8.5 12h7M8.5 15.5h4"/></symbol>
+  <symbol id="i-negotiate" viewBox="0 0 24 24"><path d="M12 3.5v17M5 7.5h14"/><path d="M5 7.5 2.5 14a3 3 0 0 0 5 0zM19 7.5 16.5 14a3 3 0 0 0 5 0z"/><path d="M8.5 20.5h7"/></symbol>
+  <symbol id="i-market" viewBox="0 0 24 24"><path d="M3.5 20.5h17"/><rect x="5" y="11" width="3" height="6.5" rx="1"/><rect x="10.5" y="6" width="3" height="11.5" rx="1"/><rect x="16" y="9" width="3" height="8.5" rx="1"/></symbol>
+  <symbol id="i-changes" viewBox="0 0 24 24"><path d="M3.5 16.5 9 11l4 4 7.5-7.5"/><path d="M15 7.5h5.5V13"/></symbol>
+  <symbol id="i-leads" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="1" fill="currentColor"/></symbol>
+  <symbol id="i-medicare" viewBox="0 0 24 24"><path d="M3 12h4l2.5-6 4 12 2.5-6h5"/></symbol>
+  <symbol id="i-files" viewBox="0 0 24 24"><path d="M12 3.5v11M7.5 10l4.5 4.5 4.5-4.5"/><path d="M4 15.5v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></symbol>
+  <symbol id="i-sources" viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="7.5" ry="2.8"/><path d="M4.5 6v6c0 1.6 3.4 2.8 7.5 2.8s7.5-1.2 7.5-2.8V6M4.5 12v6c0 1.6 3.4 2.8 7.5 2.8s7.5-1.2 7.5-2.8v-6"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></symbol>
+  <symbol id="i-chev-r" viewBox="0 0 24 24"><path d="m9.5 6 6 6-6 6"/></symbol>
+  <symbol id="i-chev-d" viewBox="0 0 24 24"><path d="m6 9.5 6 6 6-6"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M7 7l10 10M17 7 7 17"/></symbol>
+  <symbol id="i-filter" viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 19.5h14"/></symbol>
+  <symbol id="i-print" viewBox="0 0 24 24"><path d="M7 9V3.5h10V9"/><rect x="3.5" y="9" width="17" height="7.5" rx="2"/><path d="M7 14h10v6.5H7z"/></symbol>
+  <symbol id="i-run" viewBox="0 0 24 24"><path d="M7.5 5v14l11-7z"/></symbol>
+  <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5.5" cy="12" r="1.3" fill="currentColor"/><circle cx="12" cy="12" r="1.3" fill="currentColor"/><circle cx="18.5" cy="12" r="1.3" fill="currentColor"/></symbol>
+  <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3.5 21.5 20h-19z"/><path d="M12 10v4.5M12 17.3v.2"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5.5M12 7.8v.2"/></symbol>
+  <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3L19.5 9"/><path d="M19.5 4v5h-5"/></symbol>
+  <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></symbol>
+  <symbol id="i-logo" viewBox="0 0 24 24"><path d="M4 18V6l5 7 3-4 3 4 5-7v12" stroke-width="2.2"/></symbol>
+</svg>
 
 <aside id="side">
   <div class="brand">
-    <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1" y="8" width="3" height="7" rx="1"/><rect x="6" y="4" width="3" height="11" rx="1"/><rect x="11" y="1" width="3" height="14" rx="1"/></svg>
-    MRF <span>Explorer</span>
+    <span class="brand-mark"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-logo"/></svg></span>
+    <span class="brand-name">MRF Explorer <span>· rates</span></span>
+    <button id="side-close" class="btn" type="button" aria-label="Close menu"><svg class="icon"><use href="#i-x"/></svg></button>
   </div>
   <nav>
     <div class="navgroup">
       <span class="navlabel">Practice</span>
-      <button data-view="overview">Overview</button>
-      <button data-view="clients">Clients</button>
+      <button data-view="overview" title="Overview"><svg class="icon"><use href="#i-overview"/></svg><span class="nl">Overview</span></button>
+      <button data-view="clients" title="Clients"><svg class="icon"><use href="#i-clients"/></svg><span class="nl">Clients</span></button>
     </div>
     <div class="navgroup">
       <span class="navlabel">Rates</span>
-      <button data-view="ratecard" data-group="myrates">My rates</button>
-      <button data-view="negotiate">Negotiate</button>
-      <button data-view="explorer" data-group="market" class="active">Market rates</button>
-      <button data-view="changes">Rate changes</button>
+      <button data-view="ratecard" data-group="myrates" title="My rates"><svg class="icon"><use href="#i-rates"/></svg><span class="nl">My rates</span></button>
+      <button data-view="negotiate" title="Negotiate"><svg class="icon"><use href="#i-negotiate"/></svg><span class="nl">Negotiate</span></button>
+      <button data-view="explorer" data-group="market" class="active" title="Market rates"><svg class="icon"><use href="#i-market"/></svg><span class="nl">Market rates</span></button>
+      <button data-view="changes" title="Rate changes"><svg class="icon"><use href="#i-changes"/></svg><span class="nl">Rate changes</span></button>
     </div>
     <div class="navgroup">
       <span class="navlabel">Growth</span>
-      <button data-view="leads">Leads</button>
-      <button data-view="medicare">Medicare</button>
+      <button data-view="leads" title="Leads"><svg class="icon"><use href="#i-leads"/></svg><span class="nl">Leads</span></button>
+      <button data-view="medicare" title="Medicare"><svg class="icon"><use href="#i-medicare"/></svg><span class="nl">Medicare</span></button>
     </div>
     <div class="navgroup">
       <span class="navlabel">Data</span>
-      <button data-view="files">Files &amp; imports</button>
-      <button data-view="sources">Sources</button>
+      <button data-view="files" title="Files &amp; imports"><svg class="icon"><use href="#i-files"/></svg><span class="nl">Files &amp; imports</span></button>
+      <button data-view="sources" title="Sources"><svg class="icon"><use href="#i-sources"/></svg><span class="nl">Sources</span></button>
     </div>
   </nav>
+  <div class="side-foot">Your data stays on this computer.</div>
 </aside>
 
 <div id="shell">
@@ -1188,6 +1224,15 @@
 <aside id="drawer" aria-hidden="true"></aside>
 <div id="tooltip"></div>
 
+
+<div class="tabbar" role="navigation" aria-label="Main">
+  <button type="button" data-tab="overview"><svg class="icon"><use href="#i-overview"/></svg>Overview</button>
+  <button type="button" data-tab="myrates"><svg class="icon"><use href="#i-rates"/></svg>My rates</button>
+  <button type="button" data-tab="negotiate"><svg class="icon"><use href="#i-negotiate"/></svg>Negotiate</button>
+  <button type="button" data-tab="market"><svg class="icon"><use href="#i-market"/></svg>Market</button>
+  <button type="button" data-tab="more"><svg class="icon"><use href="#i-more"/></svg>More</button>
+</div>
+<script src="charts.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

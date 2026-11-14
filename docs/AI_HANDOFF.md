@@ -972,6 +972,41 @@ Pinned by `tests/mrfx/test_review14.py` (every Group 1-3 case fails on
   paste is durable (`meta('pending_paste')`, `resume_pending_paste`). A
   hospital of an already-loaded name from another file is refused.
 
+### 0.8.7 additions (Nov 14, 2026) — the dashboard redesign, on the real app
+
+The user's design-tool handoff (`mrf-explorer-redesign.zip`: tokens.json /
+tokens.css, app.css, charts.js, a 14-screen prototype on SAMPLE data.js, and
+screen boards) was dropped on the updater and refused — correctly: it holds no
+`mrfx/`. It was NOT installed as the front end (sample data, and none of the
+real app's file queue / progress / proposals / analytics panel). Instead:
+
+- `mrfx/web/styles.css` starts with the handoff's token sheet (dark); the old
+  names (`--surface-1`, `--border`, `--good`, `--side-*` …) are aliases of the
+  new tokens, so every existing rule follows; the light / prefers-color-scheme
+  blocks and hard-coded light colours are gone. A "0.8.7 redesign layer" at
+  the end restyles the shell (sidebar with icons, top bar, sub-tabs), cards,
+  controls, tables and badges, and holds the responsive rules: ≥1200 desktop,
+  768–1199 icon rail, <768 bottom tab bar + "More" sheet (`body.nav-open`),
+  coarse-pointer 44 px targets, reduced motion, a light print sheet.
+- `mrfx/web/charts.js` = the handoff's chart library, vendored unchanged
+  (`window.MRFX`: bullet, ring, histogram, heat grid/canvas, dot matrix,
+  calendar, state tiles, city map, tooltip; MIN_N = 5 — "Not enough data",
+  never a number). Loaded before app.js.
+- `index.html`: the handoff's inline icon sprite; each menu button is
+  icon + `<span class="nl">` label (titles for the rail); `.tabbar` with
+  `data-tab` overview / myrates / negotiate / market / more — each tab clicks
+  the sidebar's own button (`syncTabbar` keeps it in step in `switchView`).
+- Benchmark: `benchVisual(bench)` draws the ring (codes at/above median),
+  the four biggest gaps and a bullet per code from the real rows
+  (p10/p25/p50/p75/p90, subject_rate, n_peers) above the unchanged table.
+- Fixed on the way: `switchView` passed `undefined` to `classList.toggle`
+  for screens outside a group (it FLIPS) — every other menu entry lit up in
+  turn; Benchmark / Negotiate results kept their `.empty` placeholder class
+  (centred text). The updater names a design-only zip for what it is.
+- Pinned by `tests/mrfx/test_v087.py`. Next: port the handoff's richer screen
+  layouts (Overview KPIs + feed, Rate card heat map, Market maps) one at a
+  time, each against the real endpoints listed in the handoff's MAPPING.md.
+
 ### 0.8.6 additions (Nov 14, 2026) — outpatient rehab clinics as the comparison group
 
 User ask: optimize the outputs for a private practice owner — compare with

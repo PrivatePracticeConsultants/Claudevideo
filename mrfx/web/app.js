@@ -312,6 +312,28 @@ $$("nav button").forEach((b) => b.addEventListener("click", () => {
   switchView(g && state.lastInGroup && state.lastInGroup[g] ? state.lastInGroup[g] : b.dataset.view);
 }));
 renderSubtabs(state.view);   // the screen the page opens on (no switchView ran)
+// iPhone (0.8.7): a bottom tab bar for the four screens used most; "More"
+// opens the full menu as a sheet. Each tab clicks the sidebar's own button,
+// so a tab behaves exactly like the menu (a group reopens its last screen).
+const TAB_OF = (view) => {
+  const g = groupOf(view);
+  if (g) return g;
+  return ["overview", "negotiate"].includes(view) ? view : "more";
+};
+function syncTabbar(view) {
+  $$(".tabbar [data-tab]").forEach((b) => b.classList.toggle("active", b.dataset.tab === TAB_OF(view)));
+}
+$$(".tabbar [data-tab]").forEach((b) => b.addEventListener("click", () => {
+  const t = b.dataset.tab;
+  if (t === "more") { document.body.classList.toggle("nav-open"); return; }
+  document.body.classList.remove("nav-open");
+  const sel = t === "myrates" || t === "market" ? `#side nav button[data-group="${t}"]` : `#side nav button[data-view="${t}"]`;
+  const btn = $(sel);
+  if (btn) btn.click();
+}));
+if ($("#side-close")) $("#side-close").addEventListener("click", () => document.body.classList.remove("nav-open"));
+$$("#side nav button").forEach((b) => b.addEventListener("click", () => document.body.classList.remove("nav-open")));
+syncTabbar(state.view);
 function switchView(view) {
   state.view = view;
   // the address bar follows the screen (review 13 6.4); a link's own
@@ -319,10 +341,13 @@ function switchView(view) {
   if (!_openingHash && parseHash().view !== view) setHash(view, undefined, true);
   const g = groupOf(view);
   if (g) (state.lastInGroup = state.lastInGroup || {})[g] = view;
+  // !! — toggle(name, undefined) FLIPS the class: for a screen outside a
+  // group every other menu entry lit up in turn (0.8.6)
   $$("nav button").forEach((b) => b.classList.toggle("active",
-    b.dataset.view === view || (g && b.dataset.group === g)));
+    !!(b.dataset.view === view || (g && b.dataset.group === g))));
   $$(".view").forEach((v) => v.classList.toggle("active", v.id === `view-${view}`));
   renderSubtabs(view);
+  if (typeof syncTabbar === "function") syncTabbar(view);
   const active = $$("nav button").find((b) => b.dataset.view === view || (g && b.dataset.group === g));
   const tt = $("#topbar-title");
   if (active && tt) {
@@ -2299,6 +2324,61 @@ function pstrip(pct) {
           <span class="pctlbl">P${Math.round(pct)}</span>`;
 }
 
+// The design's Benchmark visuals (0.8.7): the share of codes at or above the
+// market median (ring), the biggest gaps, and one bullet per code — the
+// middle half of the market (p25–p75), its p10–p90 range, the median line and
+// you. Codes priced by fewer than 5 practices are "not enough data" (never a
+// number); the table below keeps every figure.
+function benchVisual(bench) {
+  if (!window.MRFX) return "";
+  const M = window.MRFX, MIN = M.MIN_N;
+  const rows = bench.rows.filter((r) => r.p50 != null).map((r) => ({
+    code: r.billing_code, desc: r.description || "", you: r.subject_rate, n: r.n_peers || 0,
+    p10: r.p10 ?? r.p25, p25: r.p25, median: r.p50, p75: r.p75, p90: r.p90 ?? r.p75,
+    pctile: r.subject_percentile ?? 0 }));
+  const ok = rows.filter((r) => r.n >= MIN && r.you != null);
+  if (!ok.length) return "";
+  const at = ok.filter((r) => r.you >= r.median).length;
+  const gaps = ok.filter((r) => r.you < r.median)
+    .map((r) => ({ ...r, rel: r.you / r.median - 1 }))
+    .sort((a, b) => a.rel - b.rel || (a.code < b.code ? -1 : 1)).slice(0, 4);
+  const month = bench.market.month === "latest" ? "latest month" : bench.market.month;
+  const bullets = rows.map((r) => {
+    const thin = r.n < MIN;
+    const rel = !thin && r.you != null ? r.you / r.median - 1 : null;
+    const tip = M.bulletTip(r, { n: r.n, month, group: bench.peer_set });
+    return `<div class="bullet-row" data-tip="${tip}" tabindex="0">
+      <div class="code"><b>${esc(r.code)}</b><span>${esc(r.desc)}</span></div>
+      ${M.bullet(r, { key: "bm-" + bench.subject + "-" + r.code })}
+      <div class="val">${thin ? '<span class="muted">Not enough data</span>'
+        : r.you == null ? '<span class="muted">No rate</span>'
+        : `<b>${money(r.you)}</b><span class="delta ${rel >= 0 ? "up" : "down"}">${rel >= 0 ? "▲" : "▼"} ${M.fmt.signedPct(rel)}</span>`}</div>
+    </div>`;
+  }).join("");
+  const html = `<div class="bm-grid">
+    <div class="bm-card bm-sum">
+      <div><h3>At or above market</h3>
+      <div class="sub">${fmtInt(ok.length)} codes with enough data (5+ practices)</div>
+      <div class="ring">${M.ring(at / ok.length, { label: "codes at or above the median", key: "bm-ring-" + bench.subject })}
+        <div class="ring-txt"><b>${fmtInt(at)} of ${fmtInt(ok.length)} codes</b>
+          <span>at or above the median. The rest are where to negotiate.</span></div></div></div>
+      ${gaps.length ? `<ul class="bm-gaps">${gaps.map((g) => `<li><code>${esc(g.code)}</code>
+        <span>${money(g.median - g.you)} to median</span>
+        <span class="delta down">▼ ${M.fmt.signedPct(g.rel)}</span></li>`).join("")}</ul>`
+        : `<p class="muted" style="margin:0">Every code with enough data is at or above the median.</p>`}
+    </div>
+    <div class="bm-card">
+      <h3>Your rate vs p25 · median · p75</h3>
+      <div class="sub">Band = middle half of the market · line = median · dot = you · hover a row for every figure</div>
+      <div class="legend" style="margin-bottom:8px"><span><i style="background:var(--accent-soft);box-shadow:inset 0 0 0 1px rgba(114,134,255,.35)"></i>p25–p75</span>
+        <span><i style="background:var(--raised)"></i>p10–p90</span><span><i class="line-key" style="background:var(--ink-2)"></i>Median</span>
+        <span><i style="background:var(--accent);border-radius:50%"></i>You</span></div>
+      <div class="bullets">${bullets}</div>
+    </div></div>`;
+  requestAnimationFrame(() => { if (M.animateRings) M.animateRings(document); });
+  return html;
+}
+
 function renderBenchmark(out, bench, opp) {
   if (!bench || !bench.rows || !bench.rows.length) {
     // a header-only empty table reads as broken; say why there's nothing
@@ -2353,9 +2433,12 @@ function renderBenchmark(out, bench, opp) {
         <td class="num"><b>${money(o.opportunity_at_target)}</b></td></tr>`).join("")}
       </tbody></table></div>
     <div class="bench-note">${esc(opp.assumptions)}</div>` : "";
+  const visual = benchVisual(bench);
+  out.classList.remove("empty");   // results, not the placeholder (its centring)
   out.innerHTML = `
     <h2 style="font-size:15px;margin:0 0 4px">${esc(bench.subject)} vs market — as of ${esc(bench.market.month === "latest" ? "latest available" : bench.market.month)}</h2>
-    <div class="muted" style="margin-bottom:10px">${esc(bench.peer_set)} · target p${t}</div>
+    <div class="muted" style="margin-bottom:14px">${esc(bench.peer_set)} · target p${t}</div>
+    ${visual}
     <div class="tablewrap"><table>
       <thead><tr><th>Code</th><th class="num">You</th><th class="num">P25</th><th class="num">Median</th>
       <th class="num">P75</th><th class="num">Target</th><th class="num">Gap</th>
@@ -2834,6 +2917,7 @@ async function runNegotiate() {
   const compNotes = d.comparables.filter((c) => c.n_shared_codes).map((c) =>
     `<li><b>${esc(c.name)}</b>: paid more than you on ${c.n_paid_more}/${c.n_shared_codes} shared codes` +
     (c.median_premium_pct != null ? ` (median ${c.median_premium_pct > 0 ? "+" : ""}${c.median_premium_pct}% vs your rate)` : "") + `</li>`).join("");
+  out.classList.remove("empty");   // results, not the placeholder (its centring)
   out.innerHTML = `
     <div class="stats-row">${cards}</div>
     ${compNotes ? `<ul class="note" style="margin:8px 0 12px">${compNotes}</ul>` : ""}
