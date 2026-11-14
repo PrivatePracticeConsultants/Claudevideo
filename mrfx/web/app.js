@@ -2740,14 +2740,17 @@ async function loadPaidMore(payload) {
   const rows = d.clinics.map((x) => {
     const where = (x.cities || []).join(", ");
     const tag = NAME_SOURCE_TAG[x.name_source] ? ` <span class="sub">· ${esc(NAME_SOURCE_TAG[x.name_source])}</span>` : "";
-    const rates = x.rates.filter((r) => r.gap > 0).slice(0, 6)
-      .map((r) => `${esc(r.code)} ${money(r.rate)} <span class="peer-up">+${money(r.gap)}</span>`).join(" · ");
+    // the biggest gaps first; the CSV carries every code
+    const paid = x.rates.filter((r) => r.gap > 0).sort((a, b) => b.gap - a.gap || (a.code < b.code ? -1 : 1));
+    const rates = paid.slice(0, 8)
+      .map((r) => `${esc(r.code)} ${money(r.rate)} <span class="peer-up">+${money(r.gap)}</span>`).join(" · ")
+      + (paid.length > 8 ? ` · <i>+${paid.length - 8} more in the CSV</i>` : "");
     return `<tr><td class="num">${x.rank}</td>
-      <td><b title="${esc(x.type_reason || "")}">${esc(x.name)}</b>${tag}<div class="sub">${esc(where)}</div></td>
+      <td style="white-space:normal"><b title="${esc(x.type_reason || "")}">${esc(x.name)}</b>${tag}<div class="sub">${esc(where)}</div>
+        ${rates ? `<div class="sub" style="margin-top:3px">Paid more: ${rates}</div>` : ""}</td>
       <td>${esc(x.tin || "")}</td>
       <td class="num">${fmtInt(x.codes_paid_more)} <span class="sub">of ${fmtInt(x.codes_compared)}</span></td>
-      <td class="num">${x.median_gap_pct == null ? "–" : "+" + x.median_gap_pct + "%"}</td>
-      <td class="sub">${rates}</td></tr>`;
+      <td class="num">${x.median_gap_pct == null ? "–" : "+" + x.median_gap_pct + "%"}</td></tr>`;
   }).join("");
   box.innerHTML = `<div class="validate-card">
     <h3>Clinics ${esc(d.payer)} pays more — ${esc(d.where)}</h3>
@@ -2760,7 +2763,7 @@ async function loadPaidMore(payload) {
       <th class="num">Clinics paid more</th></tr></thead><tbody>${codes}</tbody></table></div>
     ${d.clinics.length ? `<div class="tablewrap" style="max-height:60vh;margin-top:10px"><table class="rc-table">
       <thead><tr><th class="num">#</th><th>Clinic</th><th>Tax ID</th><th class="num">Codes paid more</th>
-      <th class="num">Median gap</th><th>Where they are paid more (rate, gap)</th></tr></thead>
+      <th class="num">Median gap</th></tr></thead>
       <tbody>${rows}</tbody></table></div>` : ""}
     <div class="muted" style="font-size:11.5px;margin-top:6px">${esc(d.note)}</div></div>`;
   $("#ng-paidmore-csv").addEventListener("click", async () => {
