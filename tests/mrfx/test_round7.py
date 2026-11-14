@@ -1221,7 +1221,8 @@ def test_paused_rows_block_forget_and_the_caches_and_version(cfg, store, capsys)
     assert hasattr(compute_rate_changes, "uncached") and hasattr(payer_months, "uncached")
     with pytest.raises(SystemExit):
         main(["--version"])
-    # bumped with every release (0.8.8: slow screens pre-loaded at launch;
+    # bumped with every release (0.8.9: answers kept across restarts;
+    # 0.8.8: slow screens pre-loaded at launch;
     # 0.8.7: the dashboard redesign — dark design
     # system, iPad rail, iPhone tab bar, Benchmark bullets)
-    assert capsys.readouterr().out.strip() == f"mrfx {__version__}" == "mrfx 0.8.8"
+    assert capsys.readouterr().out.strip() == f"mrfx {__version__}" == "mrfx 0.8.9"

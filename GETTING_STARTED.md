@@ -1055,6 +1055,23 @@ Downloads and files:
 - **"fee for service" / "fee_schedule"** spelled differently by a payer no
   longer drop rates.
 
+## What changed in version 0.8.9
+
+- **Screens open instantly after a restart.** Every whole-store answer (the
+  Market overview, Rate changes, the payer trajectory, leads, the
+  leaderboard, payer / month lists, …) is now saved next to your data once
+  it has been computed. When you start MRF Explorer again and nothing has
+  changed, those screens are read back in milliseconds instead of being
+  computed again from the whole store.
+- **Never an out-of-date number:** a saved answer is used only for exactly
+  the data it was computed from. New files folded into the analytics, new
+  practice names, a Medicare import, an entity-map or website edit, or a new
+  version of the app all make the saved answers unusable, and the screen is
+  computed fresh (and saved again). The saved answers live in the store's
+  `answers` folder and are deleted by `mrfx reset`.
+- Starting the app no longer counts as an edit of your entity map (it threw
+  away every cached answer at each start).
+
 ## What changed in version 0.8.8
 
 - **Slow screens are ready when you open them.** As soon as MRF Explorer

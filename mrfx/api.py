@@ -5011,12 +5011,19 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             hit = _overview_cache.get(key)  # re-check under the lock
             if hit is not None:
                 return hit
+            from .store import _MISSING, _run_cancelled
+            # saved by an earlier run on exactly this data (0.8.8): instant
+            saved = store.answer_get("overview", state)
+            if saved is not _MISSING:
+                _overview_cache[key] = saved
+                return saved
             result = market_overview(store, state)
-            from .store import _run_cancelled
             if not _run_cancelled():          # never cache under a Stop (review 14 2.9)
                 if len(_overview_cache) > 64:
                     _overview_cache.clear()
                 _overview_cache[key] = result
+                if store.data_generation == key[1]:     # the data did not move meanwhile
+                    store.answer_put("overview", state, result)
             return result
         finally:
             _overview_lock.release()

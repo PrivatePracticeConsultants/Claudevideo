@@ -972,6 +972,27 @@ Pinned by `tests/mrfx/test_review14.py` (every Group 1-3 case fails on
   paste is durable (`meta('pending_paste')`, `resume_pending_paste`). A
   hospital of an already-loaded name from another file is refused.
 
+### 0.8.9 additions (Nov 14, 2026) — answers kept across restarts
+
+- `Store.answer_get / answer_put` (serve only: `persist_answers` =
+  keep_warm): `Store.cached` (every `generation_cached` reader + months,
+  payers, new-to-network) and `/api/overview` read a saved answer before
+  computing and save after (only when the generation did not move during the
+  computation). Files: `store/answers/<sig>/<sha(name,key)>.pkl` (pickle of
+  (name, key, value), ≤ 32 MB, atomic; other `<sig>` folders are removed on
+  each save; `reset` deletes the folder).
+- `<sig>` = sha of [app version, `data_epoch.txt`, `spine_key()`,
+  `practice_names_stamp`, utilization parquet sigs]. `data_epoch.txt` gets a
+  new random token on EVERY `_bump_generation` and `note_user_edit`, in any
+  process — so whatever drops the in-memory answers also orphans the saved
+  ones. A writer that changes what a cached answer reads MUST bump (the
+  existing contract, now also for saved answers).
+- `set_entity_map` with an unchanged mapping no longer writes or bumps:
+  `sync_entity_map` runs at every app creation and made every start a "user
+  edit" (in-memory caches dropped at boot; saved answers never reusable).
+- Measured on BCBS TN: Overview 173 ms first start -> 8 ms second start,
+  identical bytes. Pinned by `tests/mrfx/test_saved_answers.py` (4).
+
 ### 0.8.8 additions (Nov 14, 2026) — the slow screens are prepared at launch
 
 Field report: "Loading market overview — the first screen after a start reads

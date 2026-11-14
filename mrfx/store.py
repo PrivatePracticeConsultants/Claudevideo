@@ -1257,6 +1257,8 @@ class Store:
         # results that change only when the analytics tables do (see cached())
         self._gen_cache: dict = {}
         self._gen_cache_lock = threading.Lock()
+        # answers kept across restarts (answer_get / answer_put): serve only
+        self.persist_answers = bool(keep_warm)
         self._generation_lock = threading.Lock()  # leaf lock: bump sites hold
         # DIFFERENT outer locks (rollup_lock vs write_lock), so a bare += 1
         # read-modify-write could lose an increment and let the API's
@@ -6466,11 +6468,20 @@ class Store:
             # the first computation failed or the data moved on: our own
             return compute()
         try:
-            value = compute()
+            # saved by an earlier run on exactly this data (answer_get)
+            value = self.answer_get(name, key)
+            saved = value is not _MISSING
+            if not saved:
+                value = compute()
         finally:
             with self._gen_cache_lock:
                 inflight.pop((gen, k), None)
             ev.set()
+        if saved:
+            with self._gen_cache_lock:
+                if self._gen_cache.get("_gen") == gen:
+                    self._gen_cache[k] = value
+            return copy.deepcopy(value)
         if _run_cancelled():
             # computed under a Stop: a fault-isolated section may have caught
             # the stop and degraded ("stopped" per client, a missing
@@ -6481,6 +6492,10 @@ class Store:
                 if len(self._gen_cache) > 512:
                     self._gen_cache = {"_gen": gen}
                 self._gen_cache[k] = value
+        # kept for the next start — only if the data did not move while it
+        # was computed (a new generation would file it under the new data)
+        if (self.data_generation, self.user_edit_generation) == gen:
+            self.answer_put(name, key, value)
         return copy.deepcopy(value)
 
     def spine_cached(self, name: str, key, compute):
@@ -6517,6 +6532,108 @@ class Store:
             self.data_generation += 1
             if spine:
                 self.spine_generation += 1
+        self._new_data_epoch()
+
+    # ---- answers kept across restarts (0.8.8) -------------------------------
+    # Every change that drops the in-memory answers (a rollup, the name
+    # refresh, a user edit) also writes a new random token to DATA_EPOCH_FILE
+    # — from ANY process on the store (serve, a CLI ingest). A saved answer
+    # is read back only under the same token, the same spine (spine_key), the
+    # same practice-names stamp, the same Medicare files and the same app
+    # version; anything else is a new key, so a saved answer is never served
+    # for data it was not computed from. Only `serve` (persist_answers) reads
+    # and writes them.
+    DATA_EPOCH_FILE = "data_epoch.txt"
+    ANSWERS_DIR = "answers"
+    ANSWER_MAX_BYTES = 32 << 20
+
+    def _new_data_epoch(self) -> None:
+        log = logging.getLogger(__name__)
+        try:
+            f = self.dir / self.DATA_EPOCH_FILE
+            tmp = f.with_name(f"{f.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+            tmp.write_text(os.urandom(8).hex())
+            os.replace(tmp, f)
+        except OSError:      # never fails a write; the next bump retries
+            log.debug("data epoch not written", exc_info=True)
+
+    def _answers_sig(self) -> str | None:
+        """The identity of everything a cached answer is computed from, as
+        it stands on disk now (memoised per in-memory generation)."""
+        gen = (self.data_generation, self.user_edit_generation)
+        held = getattr(self, "_answers_sig_held", None)
+        if held and held[0] == gen:
+            return held[1]
+        log = logging.getLogger(__name__)
+        try:
+            from . import __version__
+            f = self.dir / self.DATA_EPOCH_FILE
+            if not f.exists():
+                self._new_data_epoch()
+            epoch = f.read_text().strip()
+            with self.connect() as con:
+                names = self._meta_get(con, "practice_names_stamp")
+            util = sorted((p.name, p.stat().st_size, p.stat().st_mtime_ns)
+                          for p in (self.dir / "utilization").glob("*.parquet")) \
+                if (self.dir / "utilization").exists() else []
+            sig = hashlib.sha1(json.dumps(
+                [__version__, epoch, self.spine_key(), names, util], default=str
+            ).encode()).hexdigest()[:20]
+        except Exception:  # noqa: BLE001 — no signature, no saved answers
+            log.debug("answers signature unavailable", exc_info=True)
+            sig = None
+        self._answers_sig_held = (gen, sig)
+        return sig
+
+    def _answer_file(self, sig: str, name: str, key) -> Path:
+        h = hashlib.sha1(json.dumps([name, key], default=str).encode()).hexdigest()[:24]
+        return self.dir / self.ANSWERS_DIR / sig / f"{h}.pkl"
+
+    def answer_get(self, name: str, key):
+        """A saved answer for (name, key) under today's data, else _MISSING."""
+        if not self.persist_answers:
+            return _MISSING
+        log = logging.getLogger(__name__)
+        try:
+            sig = self._answers_sig()
+            if sig is None:
+                return _MISSING
+            f = self._answer_file(sig, name, key)
+            if not f.exists():
+                return _MISSING
+            import pickle
+            with open(f, "rb") as fh:
+                saved_name, saved_key, value = pickle.load(fh)
+            return value if (saved_name, saved_key) == (name, key) else _MISSING
+        except Exception:  # noqa: BLE001 — a damaged file is recomputed
+            log.debug("saved answer unreadable", exc_info=True)
+            return _MISSING
+
+    def answer_put(self, name: str, key, value) -> None:
+        """Save an answer for the next start (atomic; stale signatures'
+        folders are removed). Never raises."""
+        if not self.persist_answers:
+            return
+        log = logging.getLogger(__name__)
+        try:
+            import pickle
+            import shutil
+            sig = self._answers_sig()
+            if sig is None:
+                return
+            blob = pickle.dumps((name, key, value), protocol=pickle.HIGHEST_PROTOCOL)
+            if len(blob) > self.ANSWER_MAX_BYTES:
+                return
+            f = self._answer_file(sig, name, key)
+            f.parent.mkdir(parents=True, exist_ok=True)
+            tmp = f.with_name(f"{f.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+            tmp.write_bytes(blob)
+            os.replace(tmp, f)
+            for old in (self.dir / self.ANSWERS_DIR).iterdir():
+                if old.is_dir() and old.name != sig:
+                    shutil.rmtree(old, ignore_errors=True)
+        except Exception:  # noqa: BLE001
+            log.debug("answer not saved", exc_info=True)
 
     def spine_materialised(self, name: str, select_sql: str, params=()) -> str:
         """`read_parquet(...)` of `select_sql`'s rows, built lazily ONCE per
@@ -6736,6 +6853,7 @@ class Store:
         set_entity_map (tests/mrfx/test_round7.py pins both)."""
         with self._generation_lock:
             self.user_edit_generation += 1
+        self._new_data_epoch()
 
     def _invalidate_scan_caches(self) -> None:
         """Drop the cached whole-store scans (header counts, states,
@@ -8110,7 +8228,16 @@ class Store:
         'Duplicate key' (measured: 86/480 concurrent entity edits 500'd during
         an ingest). OR REPLACE is verified safe against both live and
         tombstoned keys, and the single transaction removes the instant where
-        a concurrent reader saw an EMPTY map between the two statements."""
+        a concurrent reader saw an EMPTY map between the two statements.
+
+        Unchanged mapping (every start re-reads the YAML): no write and NOT a
+        user edit — it dropped every cached answer, and the answers kept
+        across restarts, on each launch (0.8.8)."""
+        try:
+            if dict(self.entity_map()) == {str(k): str(v) for k, v in mapping.items()}:
+                return
+        except Exception:  # noqa: BLE001 — unsure: write it as before
+            pass
         with self.write_lock, self.connect() as con:
             con.execute("BEGIN TRANSACTION")
             try:
@@ -8341,6 +8468,8 @@ class Store:
         self._inventory_cache = None
         self._bump_generation()
         self._invalidate_scan_caches()
+        import shutil
+        shutil.rmtree(self.dir / self.ANSWERS_DIR, ignore_errors=True)   # saved answers
 
 
 # Every Store method that writes url_queue signals the waiting worker threads
