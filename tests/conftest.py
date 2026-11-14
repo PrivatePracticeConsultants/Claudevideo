@@ -1,6 +1,11 @@
+import os
 from pathlib import Path
 
 import pytest
+
+# the app downloads CMS's ~1.1 GB NPPES file by itself (enrichment.auto_download);
+# the suite must never do that — tests that exercise it clear this variable
+os.environ.setdefault("MRFX_NO_AUTO_DOWNLOAD", "1")
 
 from src.config import Config
 from src.npi_resolver import TargetProvider, TargetSet
@@ -30,3 +35,33 @@ def cfg(tmp_path) -> Config:
             "paths": {"raw_dir": str(tmp_path / "raw"), "out_dir": str(tmp_path / "out")},
         }
     )
+
+
+# `pytest -m quick`: everything except the tests listed in slow_tests.txt
+# (measured >= 0.8 s each). The default `pytest tests/` still runs them all.
+_SLOW = {line.strip() for line in (Path(__file__).parent / "slow_tests.txt").read_text().splitlines()
+         if line.strip() and not line.startswith("#")}
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "quick: fast inner-loop subset (see tests/slow_tests.txt)")
+    # review 14 Group 4: the evidence checks itself — tests/mrfx/test_repros.py
+    # (the repro scripts of rounds 11-14 against their recorded "after" lines)
+    # and the race tests under a CPU hog are always in the slow tier
+    config.addinivalue_line("markers", "slow: always outside the quick tier")
+    config.addinivalue_line("markers", "stress: a race test run N times beside a CPU hog "
+                                       "(MRFX_STRESS_N, default 3)")
+    # review 12 item 4.1(j), decided: the app needs httpx only, so httpx2 stays
+    # out of requirements.txt (it installs on the user's PC too) and starlette
+    # stays pinned; its test client's "install httpx2" notice is silenced here,
+    # and test_review12's guard fails the suite the day starlette moves without
+    # httpx2 installed.
+    config.addinivalue_line(
+        "filterwarnings", "ignore:Using `httpx` with `starlette.testclient` is deprecated")
+
+
+def pytest_collection_modifyitems(config, items):
+    for item in items:
+        if item.nodeid not in _SLOW and not item.get_closest_marker("slow") \
+                and not item.get_closest_marker("stress"):
+            item.add_marker(pytest.mark.quick)

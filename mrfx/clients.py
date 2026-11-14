@@ -14,7 +14,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 
-from .benchmark import BenchmarkError, contract_gaps, resolve_subject_tins
+from .benchmark import BenchmarkError, resolve_subject_tins
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -38,92 +38,189 @@ def watchlist(store: Store) -> list[str]:
             return []
 
 
+def subject_label(subject: str | None) -> str:
+    """How a saved client is SHOWN (and named in a folder, a log line, the
+    address bar): its text with any SSN-pattern tax ID masked — a client
+    saved by one before 0.8.0 keeps working under its key but is never shown
+    raw (review 14 item 2.5)."""
+    from .store import looks_like_ssn_text, mask_ssn_text
+    s = str(subject or "")
+    if looks_like_ssn_text(s):
+        import hashlib
+        return "MASKED-SSN-" + hashlib.sha1(s.encode()).hexdigest()[:6]
+    return mask_ssn_text(s) or s
+
+
 def add_client(store: Store, subject: str) -> list[str]:
     subject = str(subject or "").strip()
     if not subject:
         raise BenchmarkError("type a practice (entity name, TIN, or NPI) to add")
+    from .store import looks_like_ssn_text
+    if looks_like_ssn_text(subject):
+        # it would travel to the address bar, folder names, titles and PDFs
+        # (review 14 item 2.5) — a sole proprietor's tax ID is never stored
+        raise BenchmarkError(
+            "that number has the shape of a Social Security number (a sole "
+            "proprietor's tax ID) — for privacy the app never saves or shows one. "
+            "Add this practice by its name or one of its NPIs instead")
     if len(subject) > 200:
         raise BenchmarkError("that doesn't look like a practice name/TIN/NPI")
+    # a name that matches no practice was saved and then reported as "no
+    # longer matches" — it never did (review 10 group 4). Refuse it now.
+    from .benchmark import resolve_subject_tins
+    tins = resolve_subject_tins(store, subject)   # falls back to the text itself
+    with store.connect() as con:
+        known = tins and con.execute(
+            "SELECT 1 FROM tin_directory WHERE tin_value IN (SELECT unnest(?::VARCHAR[])) "
+            "LIMIT 1", [tins]).fetchone()
+    if not known:
+        raise BenchmarkError(
+            f"no practice in the store matches {subject!r} — check the spelling, "
+            "or use its tax ID or an NPI")
+    _save_client(store, subject)
+    return watchlist(store)
+
+
+def _save_client(store: Store, subject: str) -> None:
+    """Write one watchlist row (no matching check — add_client's caller has
+    done it; tests use this to plant a client whose practice later stopped
+    matching, e.g. after a store reset)."""
     with store.write_lock, store.connect() as con:
         _ensure_table(con)
         con.execute("INSERT OR REPLACE INTO client_watchlist VALUES (?, ?)",
                     [subject, dt.datetime.now(dt.timezone.utc)])
-    return watchlist(store)
 
 
 def remove_client(store: Store, subject: str) -> list[str]:
+    # a client shown by its masked label (an SSN-pattern key saved before
+    # 0.8.0) is removed by that label
+    keys = [s for s in watchlist(store) if s == subject or subject_label(s) == subject] or [subject]
     with store.write_lock, store.connect() as con:
         _ensure_table(con)
-        con.execute("DELETE FROM client_watchlist WHERE subject = ?", [subject])
+        for k in keys:
+            con.execute("DELETE FROM client_watchlist WHERE subject = ?", [k])
     return watchlist(store)
 
 
-def client_digest(store: Store) -> dict:
+DIGEST_GAPS_MARKET = {"month": "latest", "therapy_only": True}
+
+
+def client_digest(store: Store, gaps_book: dict | None = None) -> dict:
     """One row per saved client. FAULT-ISOLATED per client and per section: a
     client whose name no longer resolves gets an error cell, never a dead
     digest; a store with only one month simply reports changes as unavailable
-    rather than fabricating a comparison."""
-    from .medicare import medicare_status, org_referrals, recent_losses
+    rather than fabricating a comparison.
+
+    Cached per (data generation, watchlist, Medicare layers): the Clients tab
+    rebuilt it on every visit (23 s for 5 clients on a 99M-rate store) though
+    nothing in it changes until data, the list or a Medicare import does.
+    `gaps_book` lets the packet build hand in the gaps it already computed."""
+    import json
+
+    from .medicare import medicare_status
 
     subjects = watchlist(store)
-    with store.connect() as con:
-        months = [r[0] for r in con.execute(
-            "SELECT DISTINCT file_month FROM rates_by_tin "
-            "WHERE file_month IS NOT NULL ORDER BY file_month DESC").fetchall()]
-    have_medicare = bool(medicare_status(store).get("referrals"))
-    new_month = months[0] if months else None
-    can_diff = len(months) >= 2
+    mstatus = medicare_status(store)
+    # user_edit_generation: an entity-map / peer-set edit changes which TINs
+    # a client is, so its gaps — a packet printed the stale digest beside
+    # fresh gaps (audit 8 P2-10)
+    key = (store.data_generation, getattr(store, "user_edit_generation", 0), tuple(subjects),
+           json.dumps(mstatus, sort_keys=True, default=str))
+    held = getattr(store, "_digest_cache", None)
+    if held is not None and held[0] == key:
+        return held[1]
+    result = _build_digest(store, subjects, mstatus, gaps_book)
+    from .store import _run_cancelled
+    if not _run_cancelled():
+        # a digest built under a Stop says "stopped" for every client it did
+        # not reach — the next digest and the monthly packets showed it until
+        # the data changed (review 14 item 2.9)
+        store._digest_cache = (key, result)
+    return result
+
+
+def _build_digest(store: Store, subjects: list[str], mstatus: dict,
+                  gaps_book: dict | None) -> dict:
+    from .benchmark import contract_gaps_book
+    from .medicare import org_referrals, recent_losses
+    from .monitor import LATEST_PER_PAYER, payer_months
+
+    # rate moves compare EACH PAYER's newest file with that payer's previous
+    # one: the store's newest month is a month only some payers published in
+    # (round 6: one payer's 76 rows dated a month ahead hid every other
+    # payer's moves from every client)
+    pm = payer_months(store)
+    have_medicare = bool(mstatus.get("referrals"))
+    can_diff = any(prev for _, _, prev in pm)
+    # contract gaps for the WHOLE book in one market pass (exact — see
+    # contract_gaps_book); was the national market aggregation per client
+    if gaps_book is None:
+        try:
+            gaps_book = contract_gaps_book(store, subjects, DIGEST_GAPS_MARKET)
+        except BenchmarkError as e:
+            gaps_book = {s: e for s in subjects}
 
     rows = []
     for subject in subjects:
-        row: dict = {"subject": subject, "error": None}
+        row: dict = {"subject": subject_label(subject), "label": subject_label(subject),
+                     "error": None,
+                     # what the jump buttons may put in a box and the address
+                     # bar: never an SSN-pattern key (review 14 item 2.5)
+                     "jump": None if subject_label(subject) != subject else subject}
         try:
             tins = resolve_subject_tins(store, subject)
             with store.connect() as con:
                 npis = [r[0] for r in con.execute(
-                    "SELECT DISTINCT npi FROM rates WHERE tin_value IN "
+                    f"SELECT DISTINCT npi FROM {store.pairs_relation()} WHERE tin_value IN "
                     "(SELECT unnest(?::VARCHAR[])) AND npi IS NOT NULL",
                     [tins]).fetchall()]
-                display = (con.execute(
-                    "SELECT any_value(display_name) FROM tin_directory WHERE "
-                    "tin_value IN (SELECT unnest(?::VARCHAR[]))",
-                    [tins]).fetchone() or [None])[0]
-            row["display_name"] = display or subject
+                from .benchmark import mapped_entity_name
+                display = subject_display_name(con, tins, mapped_entity_name(store, subject))
+                my_payers = {r[0] for r in con.execute(
+                    "SELECT DISTINCT payer FROM rates_by_tin WHERE is_latest AND tin_value IN "
+                    "(SELECT unnest(?::VARCHAR[]))", [tins]).fetchall()}
+            row["display_name"] = display or subject_label(subject)
             if not npis and not display:
                 row["error"] = "no longer matches any practice in the store"
                 rows.append(row)
                 continue
 
-            # rate changes, newest month vs the one before it — same function
-            # as the Changes tab, scoped to this client
+            # rate changes, each payer's newest file vs its previous one —
+            # the Changes tab's default ("latest"), scoped to this client
             row["changes"] = None
             if can_diff:
                 try:
                     from .monitor import compute_rate_changes
-                    ch = compute_rate_changes(store, {"month": new_month},
+                    ch = compute_rate_changes(store, {"month": "latest"},
                                               subject=subject)
                     moves = ch.get("changes") or []
                     biggest = max(moves, key=lambda c: abs(c.get("pct_change") or 0),
                                   default=None)
+                    compared = [c for c in ch.get("compared") or [] if c["payer"] in my_payers]
                     row["changes"] = {
                         "n": len(moves),
-                        "month": new_month, "prev": ch.get("prev_month"),
+                        "month": "latest", "prev": None,
+                        "compared": compared,
+                        "span": "; ".join(f"{c['payer']} {c['prev_month']} → {c['new_month']}"
+                                          for c in compared),
                         "biggest_pct": biggest.get("pct_change") if biggest else None,
                         "biggest_code": biggest.get("billing_code") if biggest else None,
                         "biggest_payer": biggest.get("payer") if biggest else None,
+                        "biggest_span": (f"{biggest['prev_month']} → {biggest['new_month']}"
+                                         if biggest else None),
                     }
                 except BenchmarkError as e:
                     row["changes"] = {"error": str(e)}
 
-            # contract gaps — same function as the Benchmark tab's button
-            try:
-                g = contract_gaps(store, subject, {"month": "latest",
-                                                   "therapy_only": True})
+            # contract gaps — the Benchmark tab button's numbers (contract_gaps
+            # is defined through the same book function)
+            g = gaps_book.get(subject)
+            if isinstance(g, BenchmarkError) or g is None:
+                row["gaps"] = {"error": str(g or "no contract-gap result")}
+            else:
                 gaps = g.get("gaps") or []
                 row["gaps"] = {"n": len(gaps),
                                "top": [x.get("billing_code") for x in gaps[:3]]}
-            except BenchmarkError as e:
-                row["gaps"] = {"error": str(e)}
 
             # referral sources that lost order/refer standing — the alert
             row["lost_referrers"] = None
@@ -139,5 +236,21 @@ def client_digest(store: Store) -> dict:
             log.warning("digest failed for %s: %s", subject, e)
             row["error"] = str(e)
         rows.append(row)
-    return {"clients": rows, "month": new_month,
+    return {"clients": rows, "month": "latest", "basis": LATEST_PER_PAYER,
+            "payer_months": [{"payer": p, "new_month": n, "prev_month": o} for p, n, o in pm],
             "can_diff": can_diff, "have_medicare": have_medicare}
+
+
+def subject_display_name(con, tins: list[str], mapped: str | None = None) -> str | None:
+    """One name for a (possibly multi-TIN) practice, the same on every call:
+    a mapped entity's own name (`mapped`, from benchmark.mapped_entity_name),
+    else the name of its TIN with the most NPIs, ties to the lowest tax ID.
+    `any_value` here gave a different member's name from call to call."""
+    if mapped:
+        return mapped
+    if not tins:
+        return None
+    return (con.execute(
+        "SELECT first(display_name ORDER BY npi_count DESC NULLS LAST, tin_value) "
+        "FROM tin_directory WHERE display_name IS NOT NULL AND tin_value IN "
+        "(SELECT unnest(?::VARCHAR[]))", [tins]).fetchone() or [None])[0]

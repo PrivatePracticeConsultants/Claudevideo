@@ -74,6 +74,15 @@ RANKED = [
     ("rate card", "/api/schedule/fee", {"subject": "431000000", "market": MS}),
     ("pitch report", "/api/report/pitch",
      {"subject": "431000000", "market": MS}),
+    # review 12: the Rate card's "Visit value in this market" (screen, printable, CSV)
+    ("visit value in this market", "/api/schedule/visit/market",
+     {"subject": "431000000", "market": {**MS, "discipline": "PT"},
+      "lines": "97110, 15\n97140, 15"}),
+    ("visit value printable", "/api/report/visitvalue",
+     {"subject": "431000000", "market": {**MS, "discipline": "PT"},
+      "lines": "97110, 15\n97140, 15"}),
+    ("visit value csv", "/api/schedule/visit/market.csv",
+     {"market": {**MS, "discipline": "PT"}, "lines": "97110, 15\n97140, 15"}),
 ]
 
 
@@ -86,6 +95,8 @@ def test_a_ranked_list_with_ties_comes_back_in_one_stable_order(
     for _ in range(REPEATS):
         r = c.post(route, json=body)
         assert r.status_code < 500, f"{label}: {r.text[:200]}"
+        if label.startswith("visit value"):     # a real answer, not a refusal
+            assert r.status_code == 200, f"{label}: {r.text[:200]}"
         # the methodology footer stamps a wall-clock minute; that is allowed to
         # move, the ORDER of the rows is not
         import re
@@ -228,3 +239,142 @@ def test_a_real_binder_error_still_raises_immediately(store, monkeypatch):
     with pytest.raises(_duckdb.BinderException, match="nope"):
         store.connect()
     assert calls["n"] == 1                   # no retries for a real error
+
+
+def _row(**kw):
+    base = dict(payer="Aetna", tin_value="431000000", tin_type="ein", npi="1417594896",
+                source_file="b.json", billing_code="97110", billing_code_type="CPT",
+                discipline="PT", is_timed=True, billing_class="professional",
+                negotiated_rate=40.0, negotiated_type="negotiated", is_dollar_rate=True,
+                billing_code_modifier=[], service_code=["11"], file_month="2026-06",
+                last_updated_on="2026-06-01", expiration_date=None, schema_version="2.0.0",
+                tin_is_really_npi=False)
+    return {**base, **kw}
+
+
+def test_npi_under_two_tins_exports_in_one_order(cfg, store):
+    """Round 3 P0.5: one NPI billing 97110 under two TINs at the same rate,
+    month, class and POS ties on every ORDER BY key except tin_value — the
+    export must come back in ONE order (…12 before …13), 20 times."""
+    with store.rates_part_writer("b.json") as w:
+        w.write_batch([_row(tin_value="431000013"), _row(tin_value="431000012")])
+    store.upsert_file("b.json", payer="Aetna", status="done", file_type="in_network",
+                      last_updated_on="2026-06-01")
+    store.rebuild_rollups()
+    c = TestClient(create_app(cfg, store))
+    outs = {c.get("/api/export.csv?grain=npi&q=1417594896").content for _ in range(20)}
+    assert len(outs) == 1
+    body = outs.pop().decode()
+    assert body.index("431000012") < body.index("431000013")
+    pages = [c.get(f"/api/rates?grain=npi&q=1417594896&page_size=1&page={p}").json()["rows"][0]["tin_value"]
+             for p in (1, 2)]
+    assert pages == ["431000012", "431000013"]
+
+
+def test_tied_practice_name_is_the_same_on_every_rebuild(cfg, store):
+    """Round 3 P0.5: a TIN whose two organization NPIs carry different names,
+    one each, used to get its display name from mode() — whichever thread
+    finished first. Ties now break alphabetically: always 'ALPHA SITE', on
+    every one of 20 rebuilds (Z is inserted first, so first-seen != rule)."""
+    rows, dirs = [], []
+    for i in range(40):          # 40 tied TINs so a parallel scan has work to split
+        tin = str(432000000 + i)
+        for j, name in enumerate(("ZETA PARENT", "ALPHA SITE")):
+            npi = str(1500000000 + i * 2 + j)
+            rows.append(_row(tin_value=tin, npi=npi,
+                             discipline=("PT", "OT")[j]))      # tied disciplines too
+            dirs.append(dict(npi=npi, org_name=name,
+                             entity_type="NPI-2", taxonomy_code="261QP2000X",
+                             taxonomy_codes="261QP2000X", city="X", state="MO",
+                             address="x", zip="63103", phone=None))
+    with store.rates_part_writer("c.json") as w:
+        w.write_batch(rows)
+    store.save_npis_bulk(dirs)
+    seen = set()
+    for _ in range(20):
+        store.rebuild_rollups(names_only=True)
+        with store.connect() as con:
+            seen.add(tuple(con.execute(
+                "SELECT tin_value, display_name, primary_discipline, tin_type "
+                "FROM tin_directory ORDER BY tin_value").fetchall()))
+    assert len(seen) == 1
+    got = seen.pop()
+    assert {r[1] for r in got} == {"ALPHA SITE"}
+    assert {r[2] for r in got} == {"OT"}
+
+
+# --- round 6: tie orders found in the every-output audit ---------------------
+
+def _r6row(tin, npi, code, rate, payer="Aetna"):
+    return dict(payer=payer, tin_value=tin, tin_type="ein", npi=npi, source_file="b.json",
+                billing_code=code, billing_code_type="CPT", discipline="PT", is_timed=True,
+                billing_class="professional", negotiated_rate=rate,
+                negotiated_type="negotiated", is_dollar_rate=True,
+                billing_code_modifier=[], service_code=["11"], file_month="2026-06",
+                last_updated_on="2026-06-01", expiration_date=None, schema_version="2.0.0",
+                tin_is_really_npi=False, state="MO")
+
+
+def test_validate_returns_one_order_for_an_npi_under_two_tins(tied_store):
+    """The same NPI billing 97110 at Aetna for $40 under two TINs: the rows
+    tie on payer, month and rate. Two identical requests came back in
+    different orders on the 99M store."""
+    cfg, store = tied_store
+    with store.rates_part_writer("b.json") as w:
+        w.write_batch([_r6row("439999999", "1417594896", "97110", 40.0)])
+    store.rebuild_rollups()
+    c = TestClient(create_app(cfg, store))
+    bodies = {c.post("/api/validate", json={"id": "1417594896", "code": "97110"}).content
+              for _ in range(REPEATS)}
+    assert len(bodies) == 1
+    rows = c.post("/api/validate", json={"id": "1417594896", "code": "97110"}).json()["rows"]
+    aetna = [r["tin_value"] for r in rows if r["payer"] == "Aetna"]
+    assert aetna == ["431000000", "439999999"]
+
+
+def test_outreach_code_columns_break_coverage_ties_by_code(tied_store, monkeypatch):
+    """97110 and 97140 are priced by the same five practices: with room for one
+    code column the lower code must win every time (the dict order behind the
+    old tie changed between calls)."""
+    import mrfx.outreach as outreach
+    cfg, store = tied_store
+    monkeypatch.setattr(outreach, "MAX_CODE_COLUMNS", 1)
+    c = TestClient(create_app(cfg, store))
+    heads = {c.get("/api/export/outreach.csv?grain=tin&latest=1").text.splitlines()[0]
+             for _ in range(REPEATS)}
+    assert len(heads) == 1
+    head = heads.pop()
+    assert "C97110_RATE" in head and "C97140_RATE" not in head
+
+
+def test_floors_use_the_newest_schedule_year_and_say_so(tied_store, tmp_path):
+    from mrfx.floors import floor_comparison, import_fee_schedule
+    cfg, store = tied_store
+    for year, rate in (("2026", 26.0), ("2025", 20.0)):          # newest loaded FIRST
+        p = tmp_path / f"mo_{year}.csv"
+        p.write_text(f"code,rate\n97110,{rate}\n97140,{rate}\n")
+        import_fee_schedule(store, p, kind="medicaid", state="MO", year=year,
+                            label=f"MO Medicaid {year}")
+    for _ in range(REPEATS):
+        d = floor_comparison(store, M, state="MO")
+        assert {r["billing_code"]: r["medicaid"] for r in d["rows"]} == {"97110": 26.0, "97140": 26.0}
+        assert d["schedule_years"] == {"medicaid": "2026"}
+        assert d["schedule_labels"] == {"medicaid": "MO Medicaid 2026"}
+
+
+def test_the_entity_drawer_lists_member_tins_in_one_order(tied_store):
+    cfg, store = tied_store
+    c = TestClient(create_app(cfg, store))          # (startup syncs the map from config)
+    store.set_entity_map({"431000003": "Two TIN Group", "431000001": "Two TIN Group"})
+    r = c.get("/api/entity/entity/Two TIN Group")
+    assert r.status_code == 200, r.text
+    seen = {tuple(t["tin_value"] for t in c.get("/api/entity/entity/Two TIN Group").json()["tins"])
+            for _ in range(REPEATS)}
+    assert seen == {("431000001", "431000003")}
+
+
+def test_a_tied_modal_tin_goes_to_the_lowest():
+    from mrfx.medicare import modal_tin
+    assert modal_tin(["b", "a", "b", "a"]) == "a"
+    assert modal_tin(["c", "b", "b"]) == "b"
+    assert modal_tin([]) is None

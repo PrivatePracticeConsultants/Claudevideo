@@ -1,0 +1,616 @@
+{
+ "killed_after": {
+  "t": 1794472655.5543766,
+  "pid": 17740,
+  "ev": "slice_done",
+  "idx": 23,
+  "n": 58,
+  "t_": "spine",
+  "payer": "Blue Cross Blue Shield of Wyoming",
+  "took": 0.3435361385345459
+ },
+ "slices_after_restart": 34,
+ "first_slice_s": -0.1,
+ "last_slice_s": 40.4,
+ "added": [
+  [
+   "trk2_00.json.gz",
+   0.13971424102783203
+  ],
+  [
+   "trk2_01.json.gz",
+   10.500221252441406
+  ],
+  [
+   "trk2_02.json.gz",
+   20.59136939048767
+  ],
+  [
+   "trk2_03.json.gz",
+   30.474834442138672
+  ],
+  [
+   "trk2_04.json.gz",
+   40.70391392707825
+  ],
+  [
+   "trk2_05.json.gz",
+   50.23865818977356
+  ],
+  [
+   "trk2_06.json.gz",
+   61.03390169143677
+  ],
+  [
+   "trk2_07.json.gz",
+   70.82406115531921
+  ],
+  [
+   "trk2_08.json.gz",
+   80.4967679977417
+  ],
+  [
+   "trk2_09.json.gz",
+   90.202383518219
+  ],
+  [
+   "trk2_10.json.gz",
+   101.07846808433533
+  ],
+  [
+   "trk2_11.json.gz",
+   110.7778742313385
+  ]
+ ],
+ "gaps": [
+  {
+   "file": "bcbsms_2026-10_320_33B0_in-network-rates_01_of_10.json.gz",
+   "finished": -1515.3,
+   "covered": 0.0,
+   "gap_s": 1515.3
+  },
+  {
+   "file": "bcbsms_2026-10_460_70J0_in-network-rates_03_of_13.json.gz",
+   "finished": -1513.3,
+   "covered": 14.2,
+   "gap_s": 1527.5
+  },
+  {
+   "file": "moda_ModaTXPriceTrans_20261101.json.gz",
+   "finished": -1512.3,
+   "covered": 14.2,
+   "gap_s": 1526.5
+  },
+  {
+   "file": "tufts_2026-11-01_TuftsHealthPublicPlans_DirectSubsidizedIndividual_in-network-rates.zip",
+   "finished": -1509.3,
+   "covered": 14.7,
+   "gap_s": 1524.0
+  },
+  {
+   "file": "wy_2026-10-27_000005300_in-network-rates_05_of_09.json.gz",
+   "finished": -1507.3,
+   "covered": 15.7,
+   "gap_s": 1523.0
+  },
+  {
+   "file": "wv_hmhs_2026-10-27_000000647_in-network-rates_01_of_02.json.gz",
+   "finished": -1505.3,
+   "covered": 21.3,
+   "gap_s": 1526.5
+  },
+  {
+   "file": "security_networx_PRG000049.zip",
+   "finished": -1496.3,
+   "covered": 38.9,
+   "gap_s": 1535.2
+  },
+  {
+   "file": "uhc_2026-11-01_HEALTHSCOPE-BENEFITS_Third-Party-Administrator_SHO_U1_3342_in-network-rates.json.gz",
+   "finished": -1495.3,
+   "covered": 40.4,
+   "gap_s": 1535.7
+  },
+  {
+   "file": "2058af88_trk2_00.json.gz",
+   "finished": 13.7,
+   "covered": 90.5,
+   "gap_s": 76.8
+  },
+  {
+   "file": "9c31a317_trk2_01.json.gz",
+   "finished": 26.7,
+   "covered": 90.5,
+   "gap_s": 63.8
+  },
+  {
+   "file": "d3d3f211_trk2_02.json.gz",
+   "finished": 40.7,
+   "covered": 90.5,
+   "gap_s": 49.8
+  },
+  {
+   "file": "2ca9c87f_trk2_03.json.gz",
+   "finished": 53.7,
+   "covered": 90.5,
+   "gap_s": 36.8
+  },
+  {
+   "file": "61b9bbf7_trk2_04.json.gz",
+   "finished": 67.7,
+   "covered": 90.5,
+   "gap_s": 22.8
+  },
+  {
+   "file": "d53a96ba_trk2_05.json.gz",
+   "finished": 80.7,
+   "covered": 90.5,
+   "gap_s": 9.8
+  },
+  {
+   "file": "ee73c504_trk2_06.json.gz",
+   "finished": 93.7,
+   "covered": 163.2,
+   "gap_s": 69.5
+  },
+  {
+   "file": "172c6c58_trk2_07.json.gz",
+   "finished": 107.7,
+   "covered": 163.2,
+   "gap_s": 55.5
+  },
+  {
+   "file": "396ce805_trk2_08.json.gz",
+   "finished": 120.7,
+   "covered": 163.2,
+   "gap_s": 42.5
+  },
+  {
+   "file": "88e18328_trk2_09.json.gz",
+   "finished": 134.7,
+   "covered": 163.2,
+   "gap_s": 28.5
+  },
+  {
+   "file": "09cc212e_trk2_10.json.gz",
+   "finished": 147.7,
+   "covered": 163.2,
+   "gap_s": 15.5
+  },
+  {
+   "file": "1fe53716_trk2_11.json.gz",
+   "finished": 161.7,
+   "covered": 163.2,
+   "gap_s": 1.5
+  }
+ ],
+ "header": [
+  [
+   0.0,
+   "building",
+   "Rolling up the rest \u2014 70 %, less than 2 min left (Blue Cross Blue Shield of Wyoming \u00b7 92611)",
+   "1/8"
+  ],
+  [
+   2.1,
+   "building",
+   "Rolling up the rest \u2014 70 %, less than 2 min left (Blue Cross Blue Shield of Wyoming \u00b7 92614)",
+   "1/8"
+  ],
+  [
+   3.1,
+   "building",
+   "Rolling up the rest \u2014 71 %, less than 2 min left (Blue Cross Blue Shield of Wyoming \u00b7 92616)",
+   "1/8"
+  ],
+  [
+   4.7,
+   "building",
+   "Rolling up the rest \u2014 72 %, less than 2 min left (Blue Cross Blue Shield of Wyoming \u00b7 92626)",
+   "1/8"
+  ],
+  [
+   6.2,
+   "building",
+   "Rolling up the rest \u2014 73 %, less than 2 min left (Blue Cross Blue Shield of Wyoming \u00b7 92627)",
+   "1/8"
+  ],
+  [
+   7.2,
+   "building",
+   "Rolling up the rest \u2014 74 %, less than 2 min left (Blue Cross Blue Shield of Wyoming \u00b7 96125\u201397014)",
+   "1/8"
+  ],
+  [
+   8.7,
+   "building",
+   "Rolling up the rest \u2014 75 %, less than 2 min left (Blue Cross Blue Shield of Wyoming \u00b7 97024\u201397033)",
+   "1/8"
+  ],
+  [
+   9.7,
+   "building",
+   "Rolling up the rest \u2014 76 %, less than 2 min left (Blue Cross Blue Shield of Wyoming \u00b7 97112\u201397124)",
+   "1/8"
+  ],
+  [
+   10.7,
+   "building",
+   "Rolling up the rest \u2014 77 %, less than 2 min left (Blue Cross Blue Shield of Wyoming \u00b7 97129\u201397162)",
+   "1/8"
+  ],
+  [
+   11.7,
+   "building",
+   "Rolling up the rest \u2014 78 %, less than 2 min left (Blue Cross Blue Shield of Wyoming \u00b7 97166\u201397168)",
+   "1/8"
+  ],
+  [
+   13.2,
+   "building",
+   "Rolling up the rest \u2014 79 %, less than 2 min left (Blue Cross Blue Shield of Wyoming \u00b7 97530\u201397535)",
+   "1/8"
+  ],
+  [
+   14.2,
+   "building",
+   "Rolling up the rest \u2014 80 %, less than 2 min left (Blue Cross Blue Shield of Wyoming \u00b7 97763)",
+   "3/8"
+  ],
+  [
+   14.7,
+   "building",
+   "Rolling up the rest \u2014 81 %, less than 2 min left (HEALTHSCOPE BENEFITS \u00b7 90912\u201397763)",
+   "4/9"
+  ],
+  [
+   15.7,
+   "building",
+   "Rolling up the rest \u2014 81 %, less than 2 min left (Highmark WV \u00b7 90912\u2013G0283)",
+   "5/9"
+  ],
+  [
+   17.7,
+   "building",
+   "Rolling up the rest \u2014 81 %, less than 2 min left (Moda \u00b7 90912\u201397018)",
+   "5/9"
+  ],
+  [
+   19.2,
+   "building",
+   "Rolling up the rest \u2014 82 %, less than 2 min left (Moda \u00b7 97022\u201397129)",
+   "5/9"
+  ],
+  [
+   21.3,
+   "building",
+   "Rolling up the rest \u2014 83 %, less than 2 min left (Moda \u00b7 97130\u2013G0283)",
+   "6/9"
+  ],
+  [
+   22.8,
+   "building",
+   "Rolling up the rest \u2014 84 %, less than 2 min left (Security Health Plan of Wisconsin, Inc, \u00b7 90912\u201392508)",
+   "6/9"
+  ],
+  [
+   23.8,
+   "building",
+   "Rolling up the rest \u2014 85 %, less than 2 min left (Security Health Plan of Wisconsin, Inc, \u00b7 92520\u201392526)",
+   "6/9"
+  ],
+  [
+   25.3,
+   "building",
+   "Rolling up the rest \u2014 86 %, less than 2 min left (Security Health Plan of Wisconsin, Inc, \u00b7 92597\u201392608)",
+   "6/9"
+  ],
+  [
+   26.3,
+   "building",
+   "Rolling up the rest \u2014 87 %, less than 2 min left (Security Health Plan of Wisconsin, Inc, \u00b7 92609\u201392613)",
+   "6/9"
+  ],
+  [
+   27.4,
+   "building",
+   "Rolling up the rest \u2014 88 %, less than 2 min left (Security Health Plan of Wisconsin, Inc, \u00b7 92614\u201392617)",
+   "6/9"
+  ],
+  [
+   27.9,
+   "building",
+   "Rolling up the rest \u2014 89 %, less than 2 min left (Security Health Plan of Wisconsin, Inc, \u00b7 92618\u201392627)",
+   "6/10"
+  ],
+  [
+   29.4,
+   "building",
+   "Rolling up the rest \u2014 90 %, less than 2 min left (Security Health Plan of Wisconsin, Inc, \u00b7 95992\u201397014)",
+   "6/10"
+  ],
+  [
+   30.4,
+   "building",
+   "Rolling up the rest \u2014 91 %, less than 2 min left (Security Health Plan of Wisconsin, Inc, \u00b7 97016\u201397032)",
+   "6/10"
+  ],
+  [
+   31.9,
+   "building",
+   "Rolling up the rest \u2014 92 %, less than 2 min left (Security Health Plan of Wisconsin, Inc, \u00b7 97033\u201397113)",
+   "6/10"
+  ],
+  [
+   32.9,
+   "building",
+   "Rolling up the rest \u2014 93 %, less than 2 min left (Security Health Plan of Wisconsin, Inc, \u00b7 97116\u201397150)",
+   "6/10"
+  ],
+  [
+   34.4,
+   "building",
+   "Rolling up the rest \u2014 94 %, less than 2 min left (Security Health Plan of Wisconsin, Inc, \u00b7 97161\u201397167)",
+   "6/10"
+  ],
+  [
+   35.4,
+   "building",
+   "Rolling up the rest \u2014 95 %, less than 2 min left (Security Health Plan of Wisconsin, Inc, \u00b7 97168\u201397542)",
+   "6/10"
+  ],
+  [
+   36.9,
+   "building",
+   "Rolling up the rest \u2014 96 %, less than 2 min left (Security Health Plan of Wisconsin, Inc, \u00b7 97550\u201397750)",
+   "6/10"
+  ],
+  [
+   37.9,
+   "building",
+   "Rolling up the rest \u2014 97 %, less than 2 min left (Security Health Plan of Wisconsin, Inc, \u00b7 97755\u2013G0541)",
+   "6/10"
+  ],
+  [
+   38.9,
+   "building",
+   "Rolling up the rest \u2014 98 %, less than 2 min left (Security Health Plan of Wisconsin, Inc, \u00b7 G0542\u2013G0543)",
+   "7/10"
+  ],
+  [
+   40.4,
+   "building",
+   "Rolling up the rest \u2014 99 %, less than 2 min left (Tufts Health Public Plans, Inc. \u00b7 92507\u2013G0283)",
+   "8/10"
+  ],
+  [
+   41.4,
+   "behind",
+   "3 newly loaded files not in the analytics yet \u2014 added when the queue is idle",
+   "8/11"
+  ],
+  [
+   54.5,
+   "behind",
+   "4 newly loaded files not in the analytics yet \u2014 added when the queue is idle",
+   "8/12"
+  ],
+  [
+   71.0,
+   "behind",
+   "5 newly loaded files not in the analytics yet \u2014 added when the queue is idle",
+   "8/13"
+  ],
+  [
+   84.0,
+   "behind",
+   "6 newly loaded files not in the analytics yet \u2014 added when the queue is idle",
+   "8/14"
+  ],
+  [
+   89.5,
+   "building",
+   "Adding the newly loaded files to the analytics",
+   "8/14"
+  ],
+  [
+   90.5,
+   "current",
+   "",
+   "14/14"
+  ],
+  [
+   97.0,
+   "behind",
+   "1 newly loaded file not in the analytics yet \u2014 added when the queue is idle",
+   "14/15"
+  ],
+  [
+   110.6,
+   "behind",
+   "2 newly loaded files not in the analytics yet \u2014 added when the queue is idle",
+   "14/16"
+  ],
+  [
+   123.6,
+   "behind",
+   "3 newly loaded files not in the analytics yet \u2014 added when the queue is idle",
+   "14/17"
+  ],
+  [
+   136.7,
+   "behind",
+   "4 newly loaded files not in the analytics yet \u2014 added when the queue is idle",
+   "14/18"
+  ],
+  [
+   149.2,
+   "behind",
+   "5 newly loaded files not in the analytics yet \u2014 added when the queue is idle",
+   "14/19"
+  ],
+  [
+   162.2,
+   "behind",
+   "6 newly loaded files not in the analytics yet \u2014 added when the queue is idle",
+   "14/20"
+  ],
+  [
+   162.7,
+   "building",
+   "Adding the newly loaded files to the analytics",
+   "14/20"
+  ],
+  [
+   163.2,
+   "current",
+   "",
+   "20/20"
+  ]
+ ],
+ "rebuilds": [
+  [
+   -1.2,
+   "incr_enter"
+  ],
+  [
+   -1.1,
+   "incr_raise"
+  ],
+  [
+   -1.1,
+   "full_enter"
+  ],
+  [
+   41.1,
+   "full_exit"
+  ],
+  [
+   89.4,
+   "incr_enter"
+  ],
+  [
+   89.5,
+   "delta_enter"
+  ],
+  [
+   90.2,
+   "delta_exit"
+  ],
+  [
+   90.3,
+   "incr_exit"
+  ],
+  [
+   162.4,
+   "incr_enter"
+  ],
+  [
+   162.5,
+   "delta_enter"
+  ],
+  [
+   163.2,
+   "delta_exit"
+  ],
+  [
+   163.2,
+   "incr_exit"
+  ]
+ ],
+ "done_all_s": 163.59762358665466,
+ "log": [
+  "08:37:37 INFO    mrfx.cli: opening the store at /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/F2/store \u2026",
+  "08:37:37 INFO    mrfx.store: analytics memory budget: 2 GB (1.9 GiB, as DuckDB reports it) \u2014 set by duckdb_memory_gb; raise duckdb_memory_gb in config/mrfx.yaml if rebuilds run out",
+  "08:37:38 INFO    mrfx.cli: analytics are behind the ingested files \u2014 catching up in the background. Reason: an analytics build is part-way (24 of 58 parts saved) \u2014 it continues where it stopped",
+  "08:37:38 INFO    mrfx.cli: watching /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/F2/inbox",
+  "08:37:38 INFO    mrfx.cli: incremental analytics catch-up unavailable (rollup tables were built by an older version (or never built)) \u2014 running a full rebuild",
+  "08:37:38 INFO    mrfx.store: analytics build: resuming at part 25 of 58 (Blue Cross Blue Shield of Wyoming \u00b7 92605)",
+  "  store: /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/F2/store  (8 file(s) ingested)",
+  "  inbox: /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/F2/inbox  (drop .json / .json.gz / .zip here)",
+  "  if the app ever freezes: open /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/F2/store/diagnostics/stacks_latest.txt",
+  "08:37:39 INFO    mrfx.store: analytics build: part 25 of 58 done (Blue Cross Blue Shield of Wyoming \u00b7 92605, 2s)",
+  "08:37:41 INFO    mrfx.store: analytics build: part 26 of 58 done (Blue Cross Blue Shield of Wyoming \u00b7 92611, 1s)",
+  "08:37:42 INFO    mrfx.store: analytics build: part 27 of 58 done (Blue Cross Blue Shield of Wyoming \u00b7 92614, 1s)",
+  "08:37:43 INFO    mrfx.store: analytics build: part 28 of 58 done (Blue Cross Blue Shield of Wyoming \u00b7 92616, 1s)",
+  "08:37:44 INFO    mrfx.store: analytics build: part 29 of 58 done (Blue Cross Blue Shield of Wyoming \u00b7 92626, 1s)",
+  "08:37:45 INFO    mrfx.store: analytics build: part 30 of 58 done (Blue Cross Blue Shield of Wyoming \u00b7 92627, 1s)",
+  "08:37:47 INFO    mrfx.store: analytics build: part 31 of 58 done (Blue Cross Blue Shield of Wyoming \u00b7 96125\u201397014, 1s)",
+  "08:37:48 INFO    mrfx.store: analytics build: part 32 of 58 done (Blue Cross Blue Shield of Wyoming \u00b7 97024\u201397033, 1s)",
+  "08:37:49 INFO    mrfx.store: analytics build: part 33 of 58 done (Blue Cross Blue Shield of Wyoming \u00b7 97112\u201397124, 1s)",
+  "08:37:50 INFO    mrfx.store: analytics build: part 34 of 58 done (Blue Cross Blue Shield of Wyoming \u00b7 97129\u201397162, 1s)",
+  "08:37:51 INFO    mrfx.store: analytics build: part 35 of 58 done (Blue Cross Blue Shield of Wyoming \u00b7 97166\u201397168, 1s)",
+  "08:37:52 INFO    mrfx.store: analytics build: part 36 of 58 done (Blue Cross Blue Shield of Wyoming \u00b7 97530\u201397535, 1s)",
+  "08:37:53 INFO    mrfx.store: analytics build: part 37 of 58 done (Blue Cross Blue Shield of Wyoming \u00b7 97763, 1s)",
+  "08:37:54 INFO    mrfx.store: analytics build: part 38 of 58 done (HEALTHSCOPE BENEFITS \u00b7 90912\u201397763, 1s)",
+  "08:37:55 INFO    mrfx.store: analytics build: part 39 of 58 done (Highmark WV \u00b7 90912\u2013G0283, 1s)",
+  "08:37:57 INFO    mrfx.store: analytics build: part 40 of 58 done (Moda \u00b7 90912\u201397018, 2s)",
+  "08:37:59 INFO    mrfx.store: analytics build: part 41 of 58 done (Moda \u00b7 97022\u201397129, 2s)",
+  "08:38:00 INFO    mrfx.store: analytics build: part 42 of 58 done (Moda \u00b7 97130\u2013G0283, 2s)",
+  "08:38:02 INFO    mrfx.store: analytics build: part 43 of 58 done (Security Health Plan of Wisconsin, Inc, \u00b7 90912\u201392508, 1s)",
+  "08:38:03 INFO    mrfx.store: analytics build: part 44 of 58 done (Security Health Plan of Wisconsin, Inc, \u00b7 92520\u201392526, 1s)",
+  "08:38:04 INFO    mrfx.store: analytics build: part 45 of 58 done (Security Health Plan of Wisconsin, Inc, \u00b7 92597\u201392608, 1s)",
+  "08:38:05 INFO    mrfx.store: analytics build: part 46 of 58 done (Security Health Plan of Wisconsin, Inc, \u00b7 92609\u201392613, 1s)",
+  "08:38:06 INFO    mrfx.store: analytics build: part 47 of 58 done (Security Health Plan of Wisconsin, Inc, \u00b7 92614\u201392617, 1s)",
+  "08:38:07 INFO    mrfx.store: analytics build: part 48 of 58 done (Security Health Plan of Wisconsin, Inc, \u00b7 92618\u201392627, 1s)",
+  "08:38:09 INFO    mrfx.store: analytics build: part 49 of 58 done (Security Health Plan of Wisconsin, Inc, \u00b7 95992\u201397014, 1s)",
+  "08:38:10 INFO    mrfx.store: analytics build: part 50 of 58 done (Security Health Plan of Wisconsin, Inc, \u00b7 97016\u201397032, 1s)",
+  "08:38:11 INFO    mrfx.store: analytics build: part 51 of 58 done (Security Health Plan of Wisconsin, Inc, \u00b7 97033\u201397113, 1s)",
+  "08:38:12 INFO    mrfx.store: analytics build: part 52 of 58 done (Security Health Plan of Wisconsin, Inc, \u00b7 97116\u201397150, 1s)",
+  "08:38:14 INFO    mrfx.store: analytics build: part 53 of 58 done (Security Health Plan of Wisconsin, Inc, \u00b7 97161\u201397167, 1s)",
+  "08:38:15 INFO    mrfx.store: analytics build: part 54 of 58 done (Security Health Plan of Wisconsin, Inc, \u00b7 97168\u201397542, 1s)",
+  "08:38:16 INFO    mrfx.store: analytics build: part 55 of 58 done (Security Health Plan of Wisconsin, Inc, \u00b7 97550\u201397750, 1s)",
+  "08:38:17 INFO    mrfx.store: analytics build: part 56 of 58 done (Security Health Plan of Wisconsin, Inc, \u00b7 97755\u2013G0541, 1s)",
+  "08:38:18 INFO    mrfx.store: analytics build: part 57 of 58 done (Security Health Plan of Wisconsin, Inc, \u00b7 G0542\u2013G0543, 1s)",
+  "08:38:20 INFO    mrfx.store: analytics build: part 58 of 58 done (Tufts Health Public Plans, Inc. \u00b7 92507\u2013G0283, 2s)",
+  "08:38:20 INFO    mrfx.store: analytics build finished in 42s",
+  "08:39:08 INFO    mrfx.fetch: updating analytics rollups (6 newly ingested file(s))...",
+  "08:39:08 INFO    mrfx.store: analytics update: 6 new file(s), 0 queued slice(s) \u2014 recomputing 4 payer slice(s) instead of the whole store",
+  "08:39:09 INFO    mrfx.store: analytics update finished in 1s (payer slice, not a full rebuild)",
+  "08:40:21 INFO    mrfx.fetch: updating analytics rollups (6 newly ingested file(s))...",
+  "08:40:21 INFO    mrfx.store: analytics update: 6 new file(s), 0 queued slice(s) \u2014 recomputing 4 payer slice(s) instead of the whole store",
+  "08:40:22 INFO    mrfx.store: analytics update finished in 1s (payer slice, not a full rebuild)"
+ ],
+ "truth": {
+  "done_files": 20,
+  "raw_rows": 6771484,
+  "spine_rows": 447872,
+  "expected_rows": 447872,
+  "missing": 0,
+  "extra": 0,
+  "files_fully_in_spine": 20,
+  "files_rowcount_mismatch": [],
+  "spine_payers": [
+   "Blue Cross Blue Shield of North Dakota",
+   "Blue Cross Blue Shield of Wyoming",
+   "HEALTHSCOPE BENEFITS",
+   "Highmark WV",
+   "Moda",
+   "Security Health Plan of Wisconsin, Inc,",
+   "Trickle New 00",
+   "Trickle New 03",
+   "Trickle New 06",
+   "Trickle New 09",
+   "Trickle Repeat A",
+   "Trickle Repeat B",
+   "Tufts Health Public Plans, Inc."
+  ],
+  "raw_payers": [
+   "Blue Cross Blue Shield of North Dakota",
+   "Blue Cross Blue Shield of Wyoming",
+   "HEALTHSCOPE BENEFITS",
+   "Highmark WV",
+   "Moda",
+   "Security Health Plan of Wisconsin, Inc,",
+   "Trickle New 00",
+   "Trickle New 03",
+   "Trickle New 06",
+   "Trickle New 09",
+   "Trickle Repeat A",
+   "Trickle Repeat B",
+   "Tufts Health Public Plans, Inc."
+  ],
+  "hash_spine": null,
+  "hash_dir": null
+ }
+}

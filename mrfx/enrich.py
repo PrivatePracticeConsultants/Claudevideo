@@ -30,6 +30,9 @@ class _EnrichFailure(Exception):
     """A transient NPPES failure for one NPI — leave it un-enriched to retry."""
 
 
+from .nppes_auto import bulk_source, ensure_current  # noqa: E402
+
+
 def _apply_nppes_result(store: Store, npi: str, data: dict) -> None:
     """Persist one NPPES response. Raises _EnrichFailure for a transient/error
     body so the NPI is left un-enriched (never poisoned as permanently dead)."""
@@ -163,7 +166,10 @@ def _maybe_refresh_directory(store: Store, force: bool = False) -> bool:
     global _last_dir_refresh, _names_dirty, _dir_refresh_interval
     with _refresh_lock:
         now = time.monotonic()
-        if not force and now - _last_dir_refresh < _dir_refresh_interval:
+        # 0.0 = never refreshed in this process: run. (time.monotonic()
+        # counts from boot, so "now - 0.0 < 240 s" skipped the first refresh
+        # on a computer started less than four minutes before the app)
+        if not force and _last_dir_refresh and now - _last_dir_refresh < _dir_refresh_interval:
             return False
         dirty = _names_dirty
     ready = getattr(store, "directory_ready", None)
@@ -242,7 +248,8 @@ def _maybe_refresh_directory(store: Store, force: bool = False) -> bool:
         return False
 
 
-def enrich_via_api(cfg: MrfxConfig, store: Store, stop: threading.Event | None = None) -> int:
+def enrich_via_api(cfg: MrfxConfig, store: Store, stop: threading.Event | None = None,
+                   on_progress=None) -> int:
     """Polite CONCURRENT NPPES lookups for every un-enriched NPI in the store,
     so names/states fill in quickly on a large book instead of one-every-0.15s.
     Poisoning guards are preserved: a transient/error response leaves the NPI
@@ -304,6 +311,8 @@ def enrich_via_api(cfg: MrfxConfig, store: Store, stop: threading.Event | None =
                         with lock:
                             recent_failures = 0
                             done += 1
+                        if on_progress is not None:
+                            on_progress(done)   # cosmetic: never fails real work
                     if aborted or (stop is not None and stop.is_set()):
                         # don't grind through the rest of a 200-NPI batch of
                         # 30s timeouts against a dead NPPES (or a stop request)
@@ -482,8 +491,24 @@ def apply_weekly_update(cfg: MrfxConfig, store: Store, path) -> dict:
 
     log.info("NPPES weekly: %s rows applied (%s new NPIs); cache %s -> %s",
              f"{n_week:,}", f"{fresh:,}", f"{before:,}", f"{after:,}")
+    # ...and into the practice directory. The merge only rewrote the cache:
+    # an already-identified provider renamed or moved by the weekly kept its
+    # old name and ZIP in npi_directory (the refresh runs only when a new
+    # MONTHLY file arrives), so the practice stayed at the old address while
+    # the new-clinics feed, which reads the cache, showed the new one — two
+    # tabs disagreeing (round 7 P1.10). Same set-based refresh as a monthly.
+    refreshed = 0
+    try:
+        refreshed = _refresh_changed_from_parquet(store, cache)
+        if refreshed:
+            _maybe_refresh_directory(store, force=True)
+    except Exception as e:  # noqa: BLE001 — the cache merge itself succeeded
+        log.warning("NPPES weekly: the cache is updated, but refreshing already-"
+                    "identified providers failed (%s) — they refresh with the next "
+                    "monthly file", e)
     return {
         "file": src.name, "rows_in_weekly": n_week,
+        "directory_refreshed": refreshed,
         "n_npis_in_weekly": wk_npis,
         "new_npis": fresh, "updated_npis": wk_npis - fresh,
         "deactivations_in_file": deact,
@@ -580,24 +605,130 @@ def _ensure_nppes_cache(cfg: MrfxConfig, store: Store, sig: tuple,
         return None
 
 
+# pyarrow's CSV reader, streamed from the zip in 4 MB blocks, single thread:
+# measured on the real November 2026 file (9,891,116 providers) 61 s at 0.39 GB
+# peak RSS vs 164 s / 0.26 GB for the Python reader below, byte-identical
+# output (hash of every column). 64 MB blocks were 54-72 s but 1.0-2.9 GB —
+# too much next to 2 GB parse workers. Any surprise (invalid UTF-8, a short
+# row, a renamed column) falls back to the Python reader, which tolerates them.
+_ARROW_BLOCK = 4 << 20
+
+
+def _write_nppes_parquet_arrow(path: Path, tmp: Path, schema, stop) -> int:
+    import pyarrow as pa
+    import pyarrow.compute as pc
+    import pyarrow.csv as pacsv
+    import pyarrow.parquet as pq
+
+    p = Path(path)
+    zf = None
+    if p.suffix.lower() == ".zip":
+        zf = zipfile.ZipFile(p)
+        csvs = [m for m in zf.infolist() if m.filename.lower().endswith(".csv")]
+        main = [m for m in csvs if "npidata_pfile" in m.filename.lower()
+                and "fileheader" not in m.filename.lower()]
+        pick = max(main or csvs, key=lambda m: m.file_size, default=None)
+        if pick is None:
+            raise ValueError(f"no CSV found inside {p.name}")
+        opener = lambda: zf.open(pick)   # noqa: E731
+    else:
+        opener = lambda: open(p, "rb")   # noqa: E731, SIM115 — used as `with opener()`
+    try:
+        with opener() as raw:
+            header = next(csv.reader([raw.readline().decode("utf-8-sig")]))
+        want = list(dict.fromkeys([v for v in _BULK_COLS.values() if v in header]
+                                  + [c for c in _BULK_TAX_SLOTS if c in header]))
+        if _BULK_COLS["npi"] not in header:
+            raise ValueError("NPPES file has no 'NPI' column — wrong file inside the zip?")
+        tax_cols = [c for c in _BULK_TAX_SLOTS if c in header]
+        total = 0
+        with opener() as raw, pq.ParquetWriter(str(tmp), schema, compression="zstd") as w:
+            reader = pacsv.open_csv(
+                raw, read_options=pacsv.ReadOptions(block_size=_ARROW_BLOCK, use_threads=False),
+                convert_options=pacsv.ConvertOptions(
+                    include_columns=want, column_types={c: pa.string() for c in want},
+                    strings_can_be_null=True, null_values=[""]))
+            null = pa.scalar(None, pa.string())
+            for b in reader:
+                if stop is not None and stop.is_set():
+                    break
+                t = pa.Table.from_batches([b])
+                t = t.filter(pc.is_valid(t.column(_BULK_COLS["npi"])))   # no NPI: skipped
+                n = t.num_rows
+                if not n:
+                    continue
+
+                def g(k, t=t, n=n):
+                    c = _BULK_COLS[k]
+                    return t.column(c) if c in t.column_names else pa.nulls(n, pa.string())
+                # name: organization, else "first last" (whichever exist) —
+                # exactly the Python reader's rule, no trimming
+                first, last = g("first"), g("last")
+                person = pc.coalesce(pc.binary_join_element_wise(first, last, " "), first, last)
+                name = pc.coalesce(g("org"), person)
+                ent = pc.utf8_trim_whitespace(pc.fill_null(g("entity"), ""))
+                entity = pc.if_else(pc.equal(ent, "1"), pa.scalar("NPI-1"),
+                                    pc.if_else(pc.equal(ent, "2"), pa.scalar("NPI-2"), null))
+                joined = None
+                for c in tax_cols:
+                    v = pc.utf8_trim_whitespace(pc.fill_null(t.column(c), ""))
+                    joined = v if joined is None else pc.if_else(
+                        pc.equal(v, ""), joined,
+                        pc.if_else(pc.equal(joined, ""), v,
+                                   pc.binary_join_element_wise(joined, v, "|")))
+                taxes = (pc.if_else(pc.equal(joined, ""), null, joined)
+                         if joined is not None else pa.nulls(n, pa.string()))
+                out = pa.table({
+                    "npi": g("npi"), "org_name": name, "entity_type": entity,
+                    "taxonomy_code": g("tax1"), "taxonomy_codes": taxes,
+                    "city": g("city"), "state": g("state"), "address": g("address"),
+                    "zip": g("zip"), "phone": g("phone"),
+                    "enumeration_date": g("enumerated"), "deactivation_date": g("deactivated"),
+                    "reactivation_date": g("reactivated")}).select(list(_NPPES_CACHE_COLS)).cast(schema)
+                w.write_table(out)
+                total += n
+        return total
+    finally:
+        if zf is not None:
+            zf.close()
+
+
 def _write_nppes_parquet(cfg: MrfxConfig, store: Store, pqp: Path,
                          stop: threading.Event | None,
                          src: Path | None = None) -> int:
     """One streaming pass over an NPPES file -> compact parquet (the ~9 kept
-    columns). Positional reader, batched writes; interruptible via `stop`.
+    columns). Batched writes; interruptible via `stop`.
 
     `src` overrides the configured bulk file — the weekly incremental path
     reuses this exact projection so a weekly row and a monthly row can never be
     parsed by two slightly different readers."""
     import pyarrow as pa
-    import pyarrow.parquet as pq
 
     schema = pa.schema([(c, pa.string()) for c in _NPPES_CACHE_COLS])
     tmp = pqp.with_suffix(".parquet.tmp")
+    path = src or bulk_source(cfg)
+    try:
+        total = _write_nppes_parquet_arrow(path, tmp, schema, stop)
+        replace_with_retry(tmp, pqp)
+        return total
+    except Exception as e:  # noqa: BLE001 — the tolerant reader below handles it
+        log.info("NPPES: fast reader declined %s (%s) — using the tolerant reader",
+                 Path(path).name, e)
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return _write_nppes_parquet_python(path, tmp, pqp, schema, stop)
+
+
+def _write_nppes_parquet_python(path, tmp: Path, pqp: Path, schema, stop) -> int:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
     total = 0
     writer = pq.ParquetWriter(str(tmp), schema, compression="zstd")
     try:
-        with _open_bulk_text(src or cfg.enrichment.bulk_csv_path) as f:
+        with _open_bulk_text(path) as f:
             reader = csv.reader(f)
             header = next(reader, [])
             col = {k: header.index(v) for k, v in _BULK_COLS.items() if v in header}
@@ -705,6 +836,55 @@ def _enrich_from_parquet(store: Store, pqp: Path, wanted: set[str]) -> int:
     return len(matched)
 
 
+def _read_cache_stamp(store) -> str | None:
+    """Which NPPES file the lookup cache was built from (None if unknown) —
+    cosmetic: any problem reading it just means "no refresh this time"."""
+    try:
+        return _nppes_sig_path(store).read_text(encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _refresh_changed_from_parquet(store: Store, pqp: Path) -> int:
+    """After a NEW monthly NPPES file: re-save every already-identified NPI
+    whose details differ in the new file (name, entity type, taxonomies, city,
+    state, address, ZIP, phone) — one set-based join, not a re-lookup of the
+    whole book. Rows recorded as absent from the old file (no name) that the
+    new file now has are picked up the same way."""
+    pth = str(pqp).replace("'", "''")
+    changed = 0
+    with store.connect() as con:
+        cur = con.execute(
+            f"""
+            SELECT c.npi, c.org_name, c.entity_type, c.taxonomy_code, c.city, c.state,
+                   c.address, c.zip, c.phone, c.taxonomy_codes
+            FROM read_parquet('{pth}') c JOIN npi_directory d ON d.npi = c.npi
+            WHERE d.org_name IS DISTINCT FROM c.org_name
+               OR d.entity_type IS DISTINCT FROM c.entity_type
+               OR d.taxonomy_code IS DISTINCT FROM c.taxonomy_code
+               OR d.taxonomy_codes IS DISTINCT FROM c.taxonomy_codes
+               OR d.city IS DISTINCT FROM c.city
+               OR d.state IS DISTINCT FROM c.state
+               OR d.address IS DISTINCT FROM c.address
+               OR d.zip IS DISTINCT FROM nullif(left(coalesce(c.zip, ''), 5), '')
+               OR d.phone IS DISTINCT FROM c.phone
+            """)
+        while True:
+            rows = cur.fetchmany(5000)
+            if not rows:
+                break
+            store.save_npis_bulk([{
+                "npi": r[0], "org_name": r[1], "entity_type": r[2], "taxonomy_code": r[3],
+                "city": r[4], "state": r[5], "address": r[6], "zip": r[7], "phone": r[8],
+                "taxonomy_codes": r[9]} for r in rows])
+            changed += len(rows)
+    if changed:
+        _mark_dirty()
+        log.info("NPPES: new monthly file — refreshed %d already-identified providers "
+                 "whose name, specialty or address changed", changed)
+    return changed
+
+
 def enrich_via_bulk(cfg: MrfxConfig, store: Store,
                     stop: threading.Event | None = None) -> int:
     """Fill every un-enriched NPI the NPPES bulk file covers. On first use it
@@ -716,7 +896,7 @@ def enrich_via_bulk(cfg: MrfxConfig, store: Store,
     entirely when the only remaining un-enriched NPIs are ones already proven
     absent from this (unchanged) file."""
     global _bulk_sig, _bulk_read_failures
-    path = cfg.enrichment.bulk_csv_path
+    path = bulk_source(cfg)
     if not path or not Path(path).exists():
         # don't claim mode=bulk — this also runs for an auto-promoted api-mode
         # config whose file vanished between the presence check and here (TOCTOU)
@@ -736,7 +916,18 @@ def enrich_via_bulk(cfg: MrfxConfig, store: Store,
 
     # FAST PATH: resolve against a one-time compact parquet of the whole file.
     # Built on the first call (one pass), then every lookup is sub-second.
+    prev_stamp = _read_cache_stamp(store)
     cache = _ensure_nppes_cache(cfg, store, sig, stop)
+    if cache is not None and prev_stamp is not None:
+        now_stamp = _read_cache_stamp(store) or prev_stamp
+        if now_stamp != prev_stamp and (stop is None or not stop.is_set()):
+            # a NEW NPPES file (next month): providers already identified may
+            # have changed name, specialty or address — refresh those too
+            try:
+                _refresh_changed_from_parquet(store, cache)
+            except Exception as e:  # noqa: BLE001 — cosmetic tier
+                log.warning("NPPES: refreshing changed provider details failed (%s) — "
+                            "new providers still resolve normally", e)
 
     def _paged(cursor: str):
         """Yield keyset-paged batches of un-enriched NPIs, yielding to any
@@ -888,7 +1079,7 @@ _WARNED_BULK_PATH_MISSING = False
 
 def _bulk_file_ready(cfg: MrfxConfig) -> bool:
     """True when a usable local NPPES bulk file is configured and on disk."""
-    p = cfg.enrichment.bulk_csv_path
+    p = bulk_source(cfg)
     try:
         return bool(p) and Path(p).exists()
     except OSError:
@@ -915,16 +1106,22 @@ def use_bulk_enrichment(cfg: MrfxConfig) -> bool:
 
 
 def run_enrichment(cfg: MrfxConfig, store: Store, stop: threading.Event | None = None,
-                   final_refresh: bool = True) -> int:
+                   final_refresh: bool = True, on_progress=None) -> int:
+    """`on_progress(n_done)` is called after each NPPES API lookup (the CLI's
+    progress line); the bulk path is one local pass and does not report."""
     global _WARNED_BULK_PATH_MISSING
     mode = cfg.enrichment.mode
     if mode == "off":
         return 0
+    # keep this month's NPPES file on hand (auto_download; at most one check a
+    # day, a download only when CMS has published a newer month). Never raises.
+    ensure_current(cfg, stop)
     use_bulk = use_bulk_enrichment(cfg)
     if mode == "api" and use_bulk:
         log.info("enrichment: a local NPPES bulk file is configured — using it "
                  "(one fast local pass) instead of the rate-limited API")
-    elif mode == "api" and cfg.enrichment.bulk_csv_path and not _WARNED_BULK_PATH_MISSING:
+    elif mode == "api" and cfg.enrichment.bulk_csv_path and not _WARNED_BULK_PATH_MISSING \
+            and not Path(cfg.enrichment.bulk_csv_path).is_dir():
         # they configured a bulk file but it isn't on disk — they meant to use
         # it; the API path (slow, rate-limited) is running only as a fallback.
         _WARNED_BULK_PATH_MISSING = True
@@ -932,7 +1129,11 @@ def run_enrichment(cfg: MrfxConfig, store: Store, stop: threading.Event | None =
                     "found — falling back to the slow NPPES API. Fix the path to "
                     "identify the whole book in one local pass.",
                     cfg.enrichment.bulk_csv_path)
-    done = enrich_via_bulk(cfg, store, stop) if use_bulk else enrich_via_api(cfg, store, stop)
+    # on_progress only when asked for: keeps the plain 3-argument call shape
+    # (serve's loop, and anything substituting enrich_via_api) unchanged
+    api_kw = {"on_progress": on_progress} if on_progress is not None else {}
+    done = (enrich_via_bulk(cfg, store, stop) if use_bulk
+            else enrich_via_api(cfg, store, stop, **api_kw))
     # AUTO-PROMOTED bulk (mode is api; we chose bulk only because a file is
     # present): if that bulk pass couldn't finish the book — a corrupt/truncated
     # file whose read-failure circuit breaker tripped, or a partial/weekly file
@@ -948,7 +1149,7 @@ def run_enrichment(cfg: MrfxConfig, store: Store, stop: threading.Event | None =
             and store.unenriched_npis(limit=1)):
         log.info("bulk enrichment left NPIs unresolved (missing/partial NPPES "
                  "file) — finishing the rest via the NPPES API")
-        done += enrich_via_api(cfg, store, stop)
+        done += enrich_via_api(cfg, store, stop, **api_kw)
     # tin_directory materializes NPPES names/states/cities — without a rebuild,
     # geographic benchmarks (state/city joins) silently run against NULLs. The
     # dirty flag (set by the save paths) means this rebuilds iff there are names

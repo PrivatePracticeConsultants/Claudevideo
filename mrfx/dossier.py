@@ -27,8 +27,11 @@ import datetime as dt
 import html
 import logging
 
-from . import __version__
+from . import __version__, progress
 from .config import MrfxConfig
+from .sqlfn import modal_zip_of
+from .rounding import signed_pct
+from .benchmark import PRACTICE_RATE_RULE
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -42,6 +45,17 @@ DOSSIER_NOTE = (
     "are a proxy for referral rather than a record of one."
 )
 
+
+# the progress bar's words for each section (mrfx/progress_plans.py)
+_DOSSIER_STAGE = {"Identity": "Who they are", "Medicare volume": "How big they are vs the market",
+                  "Rate position": "Where their rates sit", "Weakest payer": "Their weakest payer",
+                  "Negotiating leverage": "Who else the payers contract nearby",
+                  "Medicaid floor": "Against the Medicaid floor",
+                  "Hospital parity": "What the payers pay hospitals",
+                  "Referral sources": "Who refers to them", "Market size": "The market around them"}
+_MARKET_STAGE = {"City rate map": "Rates by city", "Payer concentration": "Who holds the contracts",
+                 "Payer posture": "Which payers negotiate",
+                 "Openings and closures": "Openings and closures", "Local demand": "Local demand"}
 
 def _doc(cfg: MrfxConfig, title: str, body: str, footer: str = "") -> str:
     from .benchmark import _brand_header
@@ -75,7 +89,8 @@ def _doc(cfg: MrfxConfig, title: str, body: str, footer: str = "") -> str:
 {SPARK_CSS}
  footer {{ margin-top: 34px; border-top: 1px solid #d0d5dd; padding-top: 12px;
           color: #475467; font-size: 11px; white-space: pre-wrap; }}
- @media print {{ body {{ margin: 0; }} }}
+ @page {{ size: landscape; margin: 10mm; }}
+ @media print {{ body {{ margin: 0; max-width: none; }} table {{ font-size: 10.5px; }} th, td {{ padding: 3px 5px; }} * {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }} }}
 </style></head><body>
 {_brand_header(cfg)}
 <h1>{e(title)}</h1>
@@ -99,10 +114,13 @@ def build_prospect_dossier(cfg: MrfxConfig, store: Store, subject: str,
                            market: dict | None = None, *,
                            radius_miles: float = 25.0) -> dict:
     """One page about a practice you have never spoken to."""
-    from .benchmark import BenchmarkError, resolve_subject_tins
+    from .benchmark import BenchmarkError, mapped_entity_name, subject_tins_for_market
     e = html.escape
     market = dict(market or {})
-    tins = resolve_subject_tins(store, subject)
+    # the same TINs every section uses: the header said "(KS, MO)" above a
+    # rate table of the MO practice only (review 9 item 4.4)
+    tins = subject_tins_for_market(store, subject, market)
+    mapped = mapped_entity_name(store, subject)
     if not tins:
         raise BenchmarkError(f"no practice matches {subject!r}")
     # resolve_subject_tins falls through to the RAW STRING for an unknown
@@ -119,13 +137,40 @@ def build_prospect_dossier(cfg: MrfxConfig, store: Store, subject: str,
             "practice name, tax ID or NPI. A dossier is a document you send, "
             "so it is refused rather than rendered empty.")
 
+    # GEOGRAPHY (round 6 P3). Every other client document is scoped to one
+    # state (require_geographic_scope); the dossier pooled every loaded state
+    # into one "market", so a Missouri practice was ranked against Florida
+    # rates. With no state chosen it is now scoped to the practice's OWN main
+    # state and says so. A deliberate national comparison (allow_national)
+    # still works, under the same banner the other reports print; a practice
+    # with no known state gets its rate sections omitted with the reason.
+    from .benchmark import anchor_state, require_geographic_scope
+    # leverage keeps the caller's market: its geography is the RADIUS, and a
+    # payer's alternatives across a state line (Kansas City) are real ones
+    radius_market = dict(market)
+    scope_note = ""
+    if not market.get("state"):
+        try:
+            scope_note = require_geographic_scope(market, "prospect dossier")
+        except BenchmarkError:
+            home_state = anchor_state(store, {}, tins)
+            if home_state:
+                market["state"] = home_state
+                scope_note = (
+                    f"Rates are compared within {home_state}, this practice's main "
+                    "state (no state was chosen, and reimbursement varies by state).")
+
     parts: list[str] = []
     skipped: list[str] = []
-    facts: dict = {"subject": subject}
+    facts: dict = {"subject": subject, "state": market.get("state")}
 
     def section(name: str, fn):
+        # one progress stage per section, the nested features inside its slot
+        prog = progress.current()
+        prog.stage(_DOSSIER_STAGE.get(name, name))
         try:
-            out = fn()
+            with prog.group():
+                out = fn()
             if out:
                 parts.append(out)
         except BenchmarkError as e_:
@@ -137,11 +182,17 @@ def build_prospect_dossier(cfg: MrfxConfig, store: Store, subject: str,
     # 1. who they are
     def _identity():
         with store.connect() as con:
+            # one name, the same on every call (the member TIN with the most
+            # NPIs, ties to the lowest tax ID) and the practice's member-TIN
+            # NPI total — any_value() mixed one TIN's name with another's count
             row = con.execute(
-                "SELECT any_value(display_name), any_value(npi_count), "
-                "any_value(cities), any_value(states) FROM tin_directory "
+                "SELECT first(display_name ORDER BY npi_count DESC NULLS LAST, tin_value) "
+                "       FILTER (display_name IS NOT NULL), sum(npi_count), "
+                "list_sort(list_distinct(flatten(list(cities)))), "
+                "list_sort(list_distinct(flatten(list(states)))) FROM tin_directory "
                 "WHERE tin_value IN (SELECT unnest(?::VARCHAR[]))", [tins]).fetchone()
         name, npis, cities, states = row or (None, None, None, None)
+        name = mapped or name
         facts["display_name"] = name or subject
         facts["npi_count"] = npis
         where = ", ".join(list(cities or [])[:3]) + \
@@ -175,46 +226,79 @@ def build_prospect_dossier(cfg: MrfxConfig, store: Store, subject: str,
     # 3. where their rates sit
     def _rates():
         from .benchmark import compute_benchmark
+        require_geographic_scope(market, "prospect dossier")
         b = compute_benchmark(store, subject, market)
         rows = [r for r in b.get("rows", [])
                 if r.get("subject_percentile") is not None]
         if not rows:
             raise BenchmarkError("no comparable published rates under this scope")
-        low = sorted(rows, key=lambda r: r["subject_percentile"])[:8]
-        facts["median_percentile"] = round(
-            sum(r["subject_percentile"] for r in rows) / len(rows), 1)
+        low = sorted(rows, key=lambda r: (r["subject_percentile"], r["billing_code"]))[:8]
+        # the MEDIAN of the per-code positions — the one headline rule the
+        # Leads list and the per-payer view use. This was a mean stored under
+        # this name, so one outlier code swung the dossier but not the list.
+        from .benchmark import overall_position
+        pos = overall_position(rows)
+        # a float like every other surface's median_percentile (Leads 51.0;
+        # 0.7.3 sent 51 here — review 10 group 4)
+        facts["median_percentile"] = None if pos is None else float(pos)
+        # the count the position rests on: the codes it ranks (an all-tied
+        # code is compared but ranks no one — review 10 item 3.11)
+        n_pos = sum(1 for r in rows if r.get("subject_percentile") is not None
+                    and r.get("in_position", True))
         body = "".join(
             f"<tr><td>{e(r['billing_code'])}</td>"
             f"<td class='num'>${(r['subject_rate'] or 0):,.2f}</td>"
             f"<td class='num'>${(r['p50'] or 0):,.2f}</td>"
-            f"<td class='num'>p{r['subject_percentile']:.0f}</td></tr>"
+            f"<td class='num'>p{r['subject_percentile']:.0f}</td>"
+            # the peer count travels with every position (the rate card's rule):
+            # p10 of two practices is not p10 of a market
+            f"<td class='num'>{int(r.get('n_peers') or 0):,}</td></tr>"
             for r in low)
         return ("<h2>Where their rates sit</h2>"
-                f"<p>Across {len(rows)} comparable code(s) they average "
-                f"<b>p{facts['median_percentile']:g}</b> against their market. "
+                f"<p>Across {n_pos} code(s) whose rates differ in their market, their median position "
+                f"is <b>p{facts['median_percentile']:g}</b> against their market. "
                 "Weakest lines:</p>"
-                "<table><thead><tr><th>Code</th><th class='num'>Their rate</th>"
+                + (f"<p class='note'>{e(scope_note)}</p>" if scope_note else "")
+                + "<table><thead><tr><th>Code</th><th class='num'>Their rate</th>"
                 "<th class='num'>Market median</th><th class='num'>Position</th>"
-                "</tr></thead>"
+                "<th class='num'>Peers</th></tr></thead>"
                 f"<tbody>{body}</tbody></table>"
                 f"<p class='note'>{e(b.get('basis_note') or '')}</p>")
 
     # 4. which payer is weakest for them
+    neg_rates: dict = {}
+
     def _weakest():
         from .benchmark import compute_payer_negotiation
+        require_geographic_scope(market, "prospect dossier")
         neg = compute_payer_negotiation(store, subject, market)
         secs = neg.get("sections") or []
         if not secs:
             raise BenchmarkError("no payer sections could be built")
+        # Position and the below-median count come from the section itself and
+        # its rows. They were read from a `summary` block that only the
+        # one-payer comparison builds — never this one — so every dossier
+        # printed "–" in both columns (tests/mrfx/test_known_answer_leads.py).
+        def _below(s):
+            rows = [r for r in s["benchmark"]["rows"]
+                    if r.get("subject_rate") is not None and r.get("p50") is not None]
+            return f"{sum(r['subject_rate'] < r['p50'] for r in rows)} of {len(rows)}"
         rows = "".join(
             f"<tr><td>{e(s['payer'])}</td>"
-            f"<td class='num'>{('p%.0f' % s['benchmark']['summary']['headline_percentile']) if (s.get('benchmark') or {}).get('summary', {}).get('headline_percentile') is not None else '–'}</td>"
-            f"<td class='num'>{(s.get('benchmark') or {}).get('summary', {}).get('n_below_median', '–')}</td></tr>"
+            f"<td class='num'>{'–' if s.get('headline_percentile') is None else 'p%d' % s['headline_percentile']}</td>"
+            f"<td class='num'>{_below(s)}</td></tr>"
             for s in secs[:6])
         facts["weakest_payer"] = secs[0]["payer"]
+        # the rates this section ranked, for the Medicaid / hospital lines
+        neg_rates.update({(s["payer"], r["billing_code"]): r["subject_rate"]
+                          for s in secs for r in s["benchmark"]["rows"]
+                          if r.get("subject_rate") is not None})
         return ("<h2>Which payer is weakest for them</h2>"
-                "<p>Ordered weakest first — the contract with the most room:</p>"
-                "<table><thead><tr><th>Payer</th><th class='num'>Their position</th>"
+                "<p>Ordered by their position among each payer's practices, lowest "
+                "first — the contract with the most room. (The Leads list's "
+                "\u201cunderpaid most by\u201d is a different measure: the most "
+                "dollars under the market on the codes all their payers price.)</p>"
+                "<table><thead><tr><th>Payer</th><th class='num'>Their position among this payer's practices</th>"
                 "<th class='num'>Codes below median</th></tr></thead>"
                 f"<tbody>{rows}</tbody></table>")
 
@@ -223,7 +307,7 @@ def build_prospect_dossier(cfg: MrfxConfig, store: Store, subject: str,
         from .leverage import network_leverage
         if not facts.get("weakest_payer"):
             raise BenchmarkError("no payer identified to measure leverage against")
-        lv = network_leverage(store, subject, facts["weakest_payer"], market,
+        lv = network_leverage(store, subject, facts["weakest_payer"], radius_market,
                               radius_miles=radius_miles)
         return ("<h2>Their leverage with that payer</h2>"
                 f"<p>{e(lv['headline'])}</p>"
@@ -234,7 +318,7 @@ def build_prospect_dossier(cfg: MrfxConfig, store: Store, subject: str,
         from .medicare import org_referrals
         with store.connect() as con:
             npis = [n for (n,) in con.execute(
-                "SELECT DISTINCT npi FROM rates WHERE tin_value IN "
+                f"SELECT DISTINCT npi FROM {store.pairs_relation()} WHERE tin_value IN "
                 "(SELECT unnest(?::VARCHAR[])) AND npi IS NOT NULL",
                 [tins]).fetchall()]
         if not npis:
@@ -256,12 +340,10 @@ def build_prospect_dossier(cfg: MrfxConfig, store: Store, subject: str,
     # 7. is their market growing
     def _market():
         from .demographics import market_sizing
+        place = store.placement_relation()
         with store.connect() as con:
-            z = con.execute("""
-                SELECT mode(lpad(substr(trim(n.zip), 1, 5), 5, '0'))
-                FROM rates r JOIN npi_directory n ON n.npi = r.npi
-                WHERE r.tin_value IN (SELECT unnest(?::VARCHAR[]))
-                  AND n.zip IS NOT NULL AND trim(n.zip) <> ''
+            z = con.execute(f"""
+                SELECT * FROM ({modal_zip_of("SELECT unnest(?::VARCHAR[])", place)})
             """, [tins]).fetchone()
         home = z[0] if z else None
         if not home:
@@ -281,13 +363,32 @@ def build_prospect_dossier(cfg: MrfxConfig, store: Store, subject: str,
     section("Rate position", _rates)
     section("Weakest payer", _weakest)
     section("Negotiating leverage", _leverage)
+
+    # 4b. the floor under each payer's rate and what the same payer pays
+    # hospitals (review 13 6.2) — omitted with the reason when nothing loaded
+    def _anchor(kind):
+        from .anchors import hospital_html, hospital_lines, medicaid_html, medicaid_lines
+        if not neg_rates:
+            raise BenchmarkError("no per-payer rates to set beside it (see Weakest payer)")
+        a = (medicaid_lines if kind == "medicaid" else hospital_lines)(store, market, neg_rates)
+        if not a["lines"]:
+            raise BenchmarkError(a["reason"] or "nothing to show")
+        return medicaid_html(a) if kind == "medicaid" else hospital_html(a)
+    section("Medicaid floor", lambda: _anchor("medicaid"))
+    section("Hospital parity", lambda: _anchor("hospital"))
     section("Referral sources", _referrals)
     section("Market size", _market)
 
     parts.append(_omitted_html(skipped))
+    # WHEN and WHERE the numbers are from, in words (review 10 item 3.11: the
+    # dossier stated neither month nor market)
+    from .benchmark import market_in_words
     footer = (
         f"Generated {dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} "
-        f"by MRF Explorer v{__version__}.\n{DOSSIER_NOTE}")
+        f"by MRF Explorer v{__version__}. Market: "
+        f"{market_in_words({'month': 'latest', **market})}.\n"
+        + "".join(f"{x}\n" for x in store.analytics_note()) + PRACTICE_RATE_RULE + "\n"
+        + DOSSIER_NOTE)
     title = f"Practice profile — {facts.get('display_name') or subject}"
     return {"subject": subject, "html": _doc(cfg, title, "\n".join(parts), footer),
             "facts": facts, "skipped": skipped, "note": DOSSIER_NOTE}
@@ -315,8 +416,11 @@ def build_market_report(cfg: MrfxConfig, store: Store, *, state: str,
     parts, skipped = [], []
 
     def section(name, fn):
+        prog = progress.current()
+        prog.stage(_MARKET_STAGE.get(name, name))
         try:
-            out = fn()
+            with prog.group():
+                out = fn()
             if out:
                 parts.append(out)
         except BenchmarkError as e_:
@@ -333,7 +437,7 @@ def build_market_report(cfg: MrfxConfig, store: Store, *, state: str,
         rows = "".join(
             f"<tr><td>{e(c['city'].title())}</td>"
             f"<td class='num'>${c['median_rate']:,.2f}</td>"
-            f"<td class='num'>{'' if c['vs_state_pct'] is None else ('%+.1f%%' % c['vs_state_pct'])}</td>"
+            f"<td class='num'>{'' if c['vs_state_pct'] is None else signed_pct(c['vs_state_pct'])}</td>"
             f"<td class='num'>{c['n_practices']:,}</td></tr>" for c in r["cities"][:15])
         return (f"<h2>What {e(code)} pays across {e(st)}</h2>"
                 f"<p>{e(r['headline'])}</p>"
@@ -345,18 +449,19 @@ def build_market_report(cfg: MrfxConfig, store: Store, *, state: str,
 
     def _concentration():
         from .territory import payer_concentration
-        r = payer_concentration(store, m)
+        r = payer_concentration(store, m, code=code)
         if not r["payers"]:
             raise BenchmarkError("no payers in this scope")
         rows = "".join(
             f"<tr><td>{e(p['payer'])}</td><td class='num'>{p['share_pct']}%</td>"
             f"<td class='num'>{p['n_practices']:,}</td>"
-            f"<td class='num'>${(p['median_rate'] or 0):,.2f}</td></tr>"
+            # a payer with no rate for this code has no median — never "$0.00"
+            f"<td class='num'>{'–' if p['median_rate'] is None else '$%s' % format(p['median_rate'], ',.2f')}</td></tr>"
             for p in r["payers"][:12])
         return ("<h2>Who holds the contracts</h2>"
                 f"<p>{e(r['headline'])}</p>"
                 "<table><thead><tr><th>Payer</th><th class='num'>Share</th>"
-                "<th class='num'>Practices</th><th class='num'>Median rate</th>"
+                f"<th class='num'>Practices</th><th class='num'>Median {e(code)} rate</th>"
                 "</tr></thead>"
                 f"<tbody>{rows}</tbody></table>"
                 f"<p class='note'>{e(r['note'])}</p>")
@@ -418,9 +523,30 @@ def build_market_report(cfg: MrfxConfig, store: Store, *, state: str,
             "no section of a market report could be built for "
             f"{st} — ingest payer files covering that state first")
     parts.append(_omitted_html(skipped))
+    # a document sold to a client states WHEN its numbers are from, on what
+    # basis and from which files — it printed none of that (audit 8 P2-12)
+    from .benchmark import BASIS_NOTE, month_label
+    with store.connect() as con:
+        files = con.execute(
+            "SELECT filename, payer, last_updated_on FROM files WHERE status = 'done' "
+            "AND file_type = 'in_network' ORDER BY filename").fetchall()
+        newest = con.execute(
+            "SELECT max(file_month) FROM files WHERE status = 'done' "
+            "AND file_type = 'in_network'").fetchone()[0]
+    asof = month_label(m.get("month") or "latest")
+    if newest and str(m.get("month") or "latest").lower() == "latest":
+        asof += f" (each payer's newest file; newest month loaded {newest})"
+    parts.append(
+        "<h2>Basis and sources</h2>"
+        f"<p class='note'>As of: {e(asof)}. {e(BASIS_NOTE)}</p>"
+        "<p class='note'>Rate files in the store: "
+        + e("; ".join(f"{f[0]} ({f[1]}, {f[2]})" for f in files) or "none") + ".</p>")
+    from .benchmark import market_in_words
     footer = (
         f"Generated {dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} "
-        f"by MRF Explorer v{__version__}.\n{DOSSIER_NOTE}")
+        f"by MRF Explorer v{__version__}. As of {asof}. Market: {market_in_words(m)}.\n"
+        + "".join(f"{x}\n" for x in store.analytics_note()) + PRACTICE_RATE_RULE + "\n"
+        + DOSSIER_NOTE.replace("this dossier", "this report"))
     return {"state": st, "code": code,
             "html": _doc(cfg, f"Therapy market report — {st}",
                          "\n".join(parts), footer),

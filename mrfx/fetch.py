@@ -34,7 +34,8 @@ import ijson
 from .config import MrfxConfig
 from .ingest import ingest_file
 from .sniff import open_stream, preflight
-from .store import Store
+from .identity import ContentHasher
+from .store import Store, replace_with_retry, unlink_with_retry
 
 log = logging.getLogger(__name__)
 
@@ -56,7 +57,51 @@ _VOLATILE_IF_SIGNED = re.compile(
     re.I,
 )
 _SIGNATURE_MARKERS = re.compile(
-    r"^(sig|signature|x-amz-signature|x-amz-credential|awsaccesskeyid|key-pair-id)$", re.I)
+    r"^(sig|signature|x-amz-signature|x-amz-credential|awsaccesskeyid|key-pair-id"
+    r"|x-goog-signature|x-goog-credential|__token__)$", re.I)
+# the S3 SigV4 query params themselves; any OTHER x-amz-* (x-amz-meta-file=2)
+# can name the file (review 11 item 2.10)
+_AMZ_SIGNING = re.compile(
+    r"^x-amz-(algorithm|credential|date|expires|signature|security-token|signedheaders"
+    r"|content-sha256|user-agent)$", re.I)
+# names the signing schemes use that payers ALSO use for the file's identity
+# (?token=<file-id>, ?st=NY, ?policy=A): stripped only when the VALUE looks
+# like a signature part — long, a JWT, or a timestamp (review 11 item 2.10)
+_AMBIGUOUS = re.compile(r"^(token|st|policy)$", re.I)
+# Google Cloud Storage V4 signed URLs and Akamai token auth (review 13 item
+# 5.2 P2: never stripped — every re-paste or monthly re-expansion of such an
+# index made a new row per child and downloaded it again)
+_GCS_SIGNING = re.compile(
+    r"^x-goog-(algorithm|credential|date|expires|signedheaders|signature)$", re.I)
+_JWT = re.compile(r"^eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*$")
+
+
+def _looks_signed_value(v: str) -> bool:
+    """A value that is a signature PART, not a file's own id: a JWT, a
+    date, an epoch, a base64/percent-encoded blob, or a long hex digest. A
+    plain id of 20+ letters/digits (`?token=<file-id>`) is NOT — two files
+    listed as ?token=<their ids>&sig=… were collapsed to one key and the
+    second reported "already known" (review 13 item 5.2 P2)."""
+    v = unquote(v)
+    return (bool(_JWT.match(v)) or v.count(".") >= 2
+            or bool(re.match(r"^\d{4}-\d{2}-\d{2}", v)) or bool(re.match(r"^\d{9,}$", v))
+            or bool(re.search(r"[%=+/]", v)) or bool(re.fullmatch(r"[0-9a-fA-F]{40,}", v)))
+
+
+def _volatile(k: str, v: str, signed: bool) -> bool:
+    if _GCS_SIGNING.match(k) or k.lower() == "__token__":
+        return True
+    if _AMBIGUOUS.match(k):
+        if k.lower() == "token" and _JWT.match(unquote(v)):
+            return True            # a lone JWT token is a credential, never an id
+        if k.lower() == "policy" or signed:
+            return _looks_signed_value(v)
+        return False
+    if k.lower().startswith("x-amz-"):
+        return bool(_AMZ_SIGNING.match(k))
+    if _VOLATILE_ALWAYS.match(k):
+        return True
+    return signed and bool(_VOLATILE_IF_SIGNED.match(k))
 
 
 def dedup_key(url: str) -> str:
@@ -67,12 +112,7 @@ def dedup_key(url: str) -> str:
     parts = urlsplit(url)
     pairs = [p.partition("=") for p in parts.query.split("&") if p]
     signed = any(_SIGNATURE_MARKERS.match(k) for k, _, _ in pairs if k)
-    kept = sorted(
-        f"{k}={v}"
-        for k, _, v in pairs
-        if k and not _VOLATILE_ALWAYS.match(k)
-        and not (signed and _VOLATILE_IF_SIGNED.match(k))
-    )
+    kept = sorted(f"{k}={v}" for k, _, v in pairs if k and not _volatile(k, v, signed))
     query = ("?" + "&".join(kept)) if kept else ""
     return f"{parts.scheme.lower()}://{parts.netloc.lower()}{parts.path}{query}"
 
@@ -289,8 +329,18 @@ def _client(cfg: MrfxConfig, verify=None, ua: str | None = None) -> httpx.Client
 class DownloadError(Exception):
     def __init__(self, msg: str, status: int | None = None, retryable: bool = False,
                  oversize: bool = False, canceled: bool = False,
-                 set_aside: bool = False):
+                 set_aside: bool = False, parked: bool = False,
+                 progressed: bool = False, duplicate_of: str | None = None,
+                 handoff: bool = False):
         super().__init__(msg)
+        # a small-file download slot found a big file: hand it to a big-file
+        # slot (the row goes straight back in the queue, its size recorded)
+        self.handoff = handoff
+        self.total = None
+        self.verdict = None      # early duplicate check: ("skip", …) / ("wait", …)
+        # proven a copy of an already-ingested file part-way through
+        # (early_duplicate_check): the rest was never downloaded
+        self.duplicate_of = duplicate_of
         self.status = status
         self.retryable = retryable
         self.oversize = oversize  # tripped confirm_over_gb — not a real failure
@@ -298,6 +348,12 @@ class DownloadError(Exception):
         # hit the wall-clock cap while STILL MAKING PROGRESS: it yielded its
         # slot on purpose and should resume by itself, not sit awaiting a human
         self.set_aside = set_aside
+        # no data for download_park_seconds: step aside for the next file and
+        # rejoin the line soon (fetch_url_record parks the row). `progressed`
+        # says whether THIS turn moved the file forward first (>= 1 MB): a park
+        # after progress starts the no-progress count again
+        self.parked = parked
+        self.progressed = progressed
 
 
 # Concurrent downloads must never COLLECTIVELY overcommit the disk. The single
@@ -396,7 +452,7 @@ def _probe_ranges(cfg: MrfxConfig, url: str, ua: str | None) -> tuple[int, str] 
 
 def _segmented_download(cfg: MrfxConfig, url: str, dest: Path, part: Path, val_p: Path,
                         total: int, my_key: int, progress_cb, cancel_check,
-                        n_segments: int, max_budget: float, dl_start: float,
+                        n_segments: int, stall_budget: float, dl_start: float,
                         ua: str | None) -> tuple[str, str]:
     """Download `total` bytes as `n_segments` contiguous ranges in parallel,
     each on its own connection writing to its own offset of the preallocated
@@ -405,7 +461,16 @@ def _segmented_download(cfg: MrfxConfig, url: str, dest: Path, part: Path, val_p
     .part deleted); on the user's stop raise a canceled DownloadError. A
     segmented .part is NEVER kept (its size == total but content is holey, so a
     later sequential resume would finish it CORRUPT) — hence delete-on-any-exit
-    except success."""
+    except success.
+
+    NOT bound by the wall-clock cap (download_max_seconds). The cap exists to
+    free a slot a trickling single connection holds for hours; segments are
+    the remedy for exactly that, and capping them meant a file needing longer
+    than the cap could NEVER finish: the holey .part was deleted, the
+    sequential fallback saw a clock hours old and parked with "nothing
+    received yet", and the next turn started again from byte 0 (round 7
+    P1.4). What bounds a segmented download instead is NO PROGRESS: no byte
+    on any segment for stall_budget seconds ends it."""
     with open(part, "wb") as f:            # preallocate so each thread can seek
         f.truncate(total)
     seg = total // n_segments
@@ -416,8 +481,6 @@ def _segmented_download(cfg: MrfxConfig, url: str, dest: Path, part: Path, val_p
     state = {"canceled": False, "err": None}
 
     def _halt() -> str | None:
-        if max_budget and time.monotonic() - dl_start > max_budget:
-            return "cap"
         try:
             if cancel_check and cancel_check():
                 return "cancel"
@@ -433,9 +496,6 @@ def _segmented_download(cfg: MrfxConfig, url: str, dest: Path, part: Path, val_p
             if h == "cancel":
                 state["canceled"] = True
                 return
-            if h == "cap":
-                state["err"] = "download time cap"
-                return
             try:
                 headers = {"Range": f"bytes={start + got}-{end}"}
                 with _client(cfg, ua=ua) as client, \
@@ -443,22 +503,34 @@ def _segmented_download(cfg: MrfxConfig, url: str, dest: Path, part: Path, val_p
                     if resp.status_code != 206:
                         raise DownloadError(f"segment HTTP {resp.status_code}",
                                             retryable=resp.status_code in RETRYABLE_STATUS)
+                    enc = (resp.headers.get("Content-Encoding") or "").strip().lower()
+                    if enc not in ("", "identity"):
+                        # a server that compresses each byte RANGE can't be
+                        # stitched (raw: several gzip streams; decoded:
+                        # offsets no longer line up) — give up on segments;
+                        # the single-connection path handles encoded bodies
+                        state["err"] = f"server compresses byte ranges ({enc})"
+                        return
                     with open(part, "r+b") as f:
                         f.seek(start + got)
-                        for chunk in resp.iter_bytes(chunk_size=1 << 20):
+                        for chunk in _body_chunks(resp):
                             if state["err"] or state["canceled"]:
                                 return
                             h = _halt()
                             if h == "cancel":
                                 state["canceled"] = True
                                 return
-                            if h == "cap":
-                                state["err"] = "download time cap"
-                                return
+                            # never past this segment's end: a server honouring
+                            # only the START of bytes=a-b sent to EOF and every
+                            # segment overwrote its neighbours (twice the bytes,
+                            # review 11 item 3.6)
+                            chunk = chunk[: seg_len - got]
                             f.write(chunk)
                             got += len(chunk)
                             with lock:
                                 prog["done"] += len(chunk)
+                            if got >= seg_len:
+                                break
                 tries = 0  # a clean pass (even a short one) resets the retry budget
             except (httpx.TransportError, httpx.TimeoutException, DownloadError) as e:
                 tries += 1
@@ -474,12 +546,17 @@ def _segmented_download(cfg: MrfxConfig, url: str, dest: Path, part: Path, val_p
     for t in threads:
         t.start()
     last_report_t = 0.0
+    seen_done, seen_t = 0, time.monotonic()
     while any(t.is_alive() for t in threads):
         time.sleep(0.4)
         with lock:
             done = prog["done"]
         _set_reservation(my_key, total - done)
         now = time.monotonic()
+        if done != seen_done:
+            seen_done, seen_t = done, now
+        elif stall_budget and now - seen_t > stall_budget:
+            state["err"] = f"no data on any segment for {int(stall_budget)} s"
         if progress_cb and now - last_report_t >= 1.5:
             progress_cb(done, total)
             last_report_t = now
@@ -498,12 +575,13 @@ def _segmented_download(cfg: MrfxConfig, url: str, dest: Path, part: Path, val_p
         raise _SegmentationFailed(state["err"] or "segments did not assemble a complete file")
     if progress_cb:
         progress_cb(total, total)
-    sha = hashlib.sha256()
+    sha = ContentHasher()
     with open(part, "rb") as f:            # hash the assembled file in one pass
         for blk in iter(lambda: f.read(1 << 20), b""):
             sha.update(blk)
-    part.replace(dest)
-    val_p.unlink(missing_ok=True)
+    replace_with_retry(part, dest)
+    unlink_with_retry(val_p)
+    _remember_identity(dest, sha)
     return sha.hexdigest(), url
 
 
@@ -540,8 +618,167 @@ def _reserve_disk_or_raise(my_key: int, parent: Path, total: int, resume_from: i
         _disk_reservations[my_key] = max(0, total - resume_from)
 
 
+# 64 KB, not 1 MB: httpx yields a chunk only once `size` bytes have ARRIVED,
+# so with a payer server trickling 5 KB/s the loop body (stall check, cancel
+# check, progress) did not run for 200 s per chunk — a dribbling download held
+# its slot until the 3-hour cap. Per-chunk bookkeeping at 64 KB is still cheap
+# (a lock acquire and a hash update; ~1,600/s on a 100 MB/s link).
+BODY_CHUNK_BYTES = 64 << 10
+
+
+def _body_chunks(resp, size: int = BODY_CHUNK_BYTES):
+    """The response body as SENT. We ask for `Accept-Encoding: identity`, but
+    some origins (S3 objects stored with Content-Encoding: gzip metadata) gzip
+    anyway; iter_bytes() would silently decode that — writing ~20x the bytes
+    (a 20 GB file landing as 200 GB), giving the file a different content
+    hash than other copies, and, worst, making a Range resume (whose offsets
+    count ENCODED bytes) splice decoded and encoded data into a corrupt file.
+    gzip-encoded bodies are kept raw (open_stream reads gzip by its magic
+    bytes, whatever the name); other encodings are still decoded."""
+    enc = (resp.headers.get("Content-Encoding") or "").strip().lower()
+    if enc in ("", "identity", "gzip", "x-gzip"):
+        return resp.iter_raw(chunk_size=size)
+    return resp.iter_bytes(chunk_size=size)
+
+
+def _read_val(val_p: Path) -> dict:
+    """What the FIRST response of a download said about the file, kept beside
+    the .part: {"validator": ETag or Last-Modified, "total": its size}. A
+    0.7.4 .val held the validator alone."""
+    try:
+        txt = val_p.read_text().strip()
+    except OSError:
+        return {}
+    if not txt:
+        return {}
+    if txt.startswith("{"):
+        try:
+            d = json.loads(txt)
+        except ValueError:
+            return {}
+        return d if isinstance(d, dict) else {}
+    return {"validator": txt}
+
+
+def _write_val(val_p: Path, validator: str, total: int | None, kind: str = "") -> None:
+    if not validator and not total:
+        unlink_with_retry(val_p)
+        return
+    tmp = Path(str(val_p) + ".tmp")
+    tmp.write_text(json.dumps({"validator": validator or "", "kind": kind if validator else "",
+                               "total": total}))
+    replace_with_retry(tmp, val_p)
+
+
+def _val_kind(started: dict) -> str:
+    """WHICH header the stored validator came from: "etag" or "last_modified".
+    Recorded in .val since 0.7.6; an older .val is classified by its shape — a
+    quoted / W/ value is an ETag, an HTTP date is a Last-Modified, anything
+    else is an ETag sent without quotes (IIS-style `5d8c72a5edda8d6a:0`;
+    review 12 item 1.2: comparing that with the 206's Last-Modified rejected
+    every resume and restarted the file from byte 0 on each reconnect)."""
+    k = started.get("kind")
+    if k in ("etag", "last_modified"):
+        return k
+    v = (started.get("validator") or "").strip()
+    if not v:
+        return ""
+    if v.startswith('"') or v[:2].upper() == "W/":
+        return "etag"
+    try:
+        from email.utils import parsedate_to_datetime
+        if parsedate_to_datetime(v) is not None:
+            return "last_modified"
+    except (TypeError, ValueError, IndexError):
+        pass
+    return "etag"
+
+
+def _resp_validator(resp, kind: str) -> str:
+    """The response's own header of the stored validator's KIND ('' if absent)."""
+    if kind == "etag":
+        return (resp.headers.get("ETag") or "").strip()
+    if kind == "last_modified":
+        return (resp.headers.get("Last-Modified") or "").strip()
+    return ""
+
+
+def _same_validator(started: dict, resp) -> bool:
+    """Does a response's own ETag / Last-Modified agree with the validator the
+    download started with? Like is compared with like (an ETag with the
+    response's ETag, a date with its Last-Modified); a response carrying no
+    header of the stored kind proves nothing either way (True)."""
+    stored = (started.get("validator") or "").strip()
+    if not stored:
+        return True
+    kind = _val_kind(started)
+    got = _resp_validator(resp, kind)
+    if not got:
+        return True
+    if kind == "etag":
+        def opaque(t: str) -> str:
+            return t[2:] if t[:2].upper() == "W/" else t
+        return opaque(got) == opaque(stored)
+    return got == stored
+
+
+_SPLICE_SAMPLE = 64 << 10
+
+
+def _splice_agrees(cfg: MrfxConfig, url: str, part: Path, total: int,
+                   boundaries: list[int], ua: str | None, verify) -> bool | None:
+    """A resume no validator vouched for joins bytes from two connections.
+    They are one file when what we kept BEFORE each join (and the file's
+    first 64 KB, where an MRF's header and its last_updated_on live) is what
+    the server serves there now — then the whole file is the server's current
+    one (the bytes after each join came from it). False: the server's file
+    changed between the connections (review 11 item 1.2 — a republished file
+    spliced into the kept .part, rows of two vintages under one 'done' row).
+    None: it could not be asked (the download is accepted)."""
+    spans = {(0, min(total, _SPLICE_SAMPLE))}
+    for b in sorted(set(boundaries))[:4]:
+        lo = max(0, b - _SPLICE_SAMPLE)
+        if b > lo:
+            spans.add((lo, b - lo))
+    try:
+        with _client(cfg, verify=verify, ua=ua) as client, open(part, "rb") as f:
+            for start, n in sorted(spans):
+                theirs = _range_bytes(client, url, start, n, total)
+                if theirs is None:
+                    return None
+                f.seek(start)
+                if f.read(n) != theirs:
+                    return False
+        return True
+    except (httpx.HTTPError, OSError, ValueError):
+        return None
+
+
+_CONTENT_RANGE = re.compile(r"\s*bytes\s+(\d+)-(\d+)/(\d+|\*)\s*$", re.I)
+
+
+def _retry_after_seconds(resp) -> float | None:
+    """A 429/503's Retry-After in seconds (delta or HTTP date), capped at 10
+    minutes; None when absent or unreadable."""
+    v = (resp.headers.get("Retry-After") or "").strip()
+    if not v:
+        return None
+    try:
+        secs = float(v)
+    except ValueError:
+        try:
+            from email.utils import parsedate_to_datetime
+            import datetime as _dt
+            when = parsedate_to_datetime(v)
+            secs = (when - _dt.datetime.now(_dt.timezone.utc)).total_seconds()
+        except (TypeError, ValueError, OverflowError):
+            return None
+    return max(0.0, min(secs, 600.0))
+
+
 def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
-             max_bytes: int | None = None, cancel_check=None) -> tuple[str, str]:
+             max_bytes: int | None = None, cancel_check=None, early_check=None,
+             lane_max: int = 0) -> tuple[str, str]:
     """Stream a URL to `dest` (atomic via .part). Returns (sha256_hex,
     final_url) — the hash detects the same file arriving under a different
     domain, and final_url (post-redirect) is the correct base for resolving
@@ -558,14 +795,15 @@ def download(cfg: MrfxConfig, url: str, dest: Path, progress_cb=None,
     _token = object()
     try:
         return _download_reserved(cfg, url, dest, progress_cb, max_bytes,
-                                  id(_token), cancel_check)
+                                  id(_token), cancel_check, early_check, lane_max)
     finally:
         _clear_reservation(id(_token))
 
 
 def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                        max_bytes: int | None, my_key: int,
-                       cancel_check=None) -> tuple[str, str]:
+                       cancel_check=None, early_check=None,
+                       lane_max: int = 0) -> tuple[str, str]:
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_suffix(dest.suffix + ".part")
     val_p = Path(str(part) + ".val")  # ETag/Last-Modified guarding resumes
@@ -577,17 +815,30 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
         except Exception:  # noqa: BLE001 — a check failure must not crash the download
             return False
 
-    def too_big(n: int) -> DownloadError:
-        return DownloadError(
-            f"file is {n / 1e9:.1f} GB — larger than the confirm_over_gb "
+    def too_big(n: int, known: bool = True) -> DownloadError:
+        what = (f"file is {n / 1e9:.1f} GB" if known else
+                f"the server did not say how big this file is, and it passed "
+                f"{n / 1e9:.1f} GB")
+        e_big = DownloadError(
+            f"{what} — larger than the confirm_over_gb "
             f"safety limit ({(max_bytes or 0) / 1e9:.1f} GB). Press "
             "\"download anyway\" on this row to ingest it, or raise "
             "confirm_over_gb in config/mrfx.yaml for all files.",
             retryable=False, oversize=True,
         )
+        # the row records the size so raising confirm_over_gb re-queues it
+        # (review 11 item 2.2); an unknown size stays 0 — "fits" would
+        # re-download up to the limit on every start
+        e_big.total = n if known else None
+        return e_big
 
     verify_override = None
     tried_chain_repair = False
+    # early duplicate check: ONE look per download, once enough has arrived
+    # the hook may answer "look again at N bytes" (an older fingerprint was
+    # taken over a longer head than today's setting): next_early moves on
+    early_head = (cfg.early_dedup_mb << 20) if early_check else 0
+    next_early = early_head if early_check else 0
     ua_override: str | None = None
     attempt = 0            # CONSECUTIVE no-progress attempts, counted vs the budget
     connections = 0        # total connections, runaway backstop
@@ -600,6 +851,21 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
     stall_budget = cfg.download_stall_seconds
     last_progress_t = time.monotonic()
     highwater = part.stat().st_size if part.exists() else 0
+    # PARK: a shorter silence than the stall window hands the slot to the next
+    # file (see config.download_park_seconds). Only when it IS shorter: a
+    # park that could never fire before the stall would be dead config.
+    park_budget = cfg.download_park_seconds
+    if not park_budget or (stall_budget and park_budget >= stall_budget):
+        park_budget = 0.0
+    start_hw = highwater
+
+    def _park(at_bytes: int) -> DownloadError:
+        got = f"{at_bytes / 1e6:.0f} MB kept" if at_bytes else "nothing received yet"
+        return DownloadError(
+            f"the payer's server stopped sending data (under 1 MB in "
+            f"{int(park_budget)} s; {got})",
+            retryable=True, parked=True,
+            progressed=at_bytes - start_hw >= _STALL_MIN_PROGRESS_BYTES)
     # bytes at the last stall-clock reset — the clock only resets once the file
     # has advanced _STALL_MIN_PROGRESS_BYTES past this, so KB-sized dribbles from
     # a connection-closing CDN can't keep a dead download alive to the wall cap
@@ -625,21 +891,45 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
             total_sz, final_url = probe
             if max_bytes and total_sz > max_bytes:
                 raise too_big(total_sz)   # honor confirm_over_gb BEFORE fetching
-            if total_sz >= _SEGMENT_MIN_BYTES:
+            if lane_max and total_sz > lane_max:
+                raise _handoff(total_sz, lane_max)
+            twin_possible = bool(early_check is not None and getattr(
+                early_check, "has_twin", lambda _t: False)(total_sz))
+            if twin_possible:
+                log.info("%s: a loaded or downloading file has exactly this size — one "
+                         "connection, so the early duplicate check can run", url)
+            if total_sz >= _SEGMENT_MIN_BYTES and not twin_possible:
                 segs = min(n_seg, max(1, total_sz // _SEGMENT_MIN_PIECE))
                 if segs > 1:
                     _reserve_disk_or_raise(my_key, dest.parent, total_sz, 0)
                     try:
                         return _segmented_download(
                             cfg, final_url, dest, part, val_p, total_sz, my_key,
-                            progress_cb, cancel_check, segs, max_budget, dl_start,
+                            progress_cb, cancel_check, segs, stall_budget, dl_start,
                             ua_override)
                     except _SegmentationFailed as e:
                         log.info("%s: %s — falling back to a single connection", url, e)
+                        # the single connection gets its OWN clocks: judged
+                        # against the segmented attempt's start it parked at
+                        # once with "nothing received yet" (P1.4)
+                        dl_start = last_progress_t = time.monotonic()
 
+    # the running hash of the .part's bytes, carried across reconnects so a
+    # resume does NOT re-read everything downloaded so far (that re-hash grew
+    # with the square of the number of resumes — ~3 s per GB each time, and
+    # the connection sat idle meanwhile, inviting the next reset). Re-hashed
+    # from disk only when the .part isn't exactly what we hashed.
+    sha_carry: tuple | None = None   # (hasher, bytes hashed)
+    early_probe: int | None = None   # a chunked body's size, from one probe
+    # byte offsets where this download joined a resume the server did NOT
+    # vouch for with a validator (see _splice_agrees)
+    splices: list[int] = []
+    restarts = 0     # times this call threw the .part away and began again
     while attempt <= cfg.download_retries and connections < _MAX_DOWNLOAD_CONNECTIONS:
         if _canceled():
             raise DownloadError("download canceled", retryable=False, canceled=True)
+        if park_budget and time.monotonic() - last_progress_t > park_budget:
+            raise _park(max(highwater, part.stat().st_size if part.exists() else 0))
         if stall_budget and time.monotonic() - last_progress_t > stall_budget:
             # bounded by the stall deadline, not the (progress-resetting) retry
             # count — this is the terminator for a dribbling/stuck server
@@ -665,12 +955,30 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
             # attempts would otherwise get spliced into the old .part by the
             # range resume — with If-Range the server sends a full 200 for
             # changed content, and the 200 path below restarts cleanly
-            if resume_from and val_p.exists():
-                validator = val_p.read_text().strip()
-                if validator:
-                    req_headers["If-Range"] = validator
+            started = _read_val(val_p) if resume_from else {}
+            if started.get("validator"):
+                req_headers["If-Range"] = started["validator"]
             with _client(cfg, verify=verify_override, ua=ua_override) as client,                     client.stream("GET", url, headers=req_headers) as resp:
                 if resume_from and resp.status_code == 416:
+                    # the .part already holds the whole file: its final rename
+                    # failed last time (a Windows lock — review 11 item 1.9).
+                    # Finish it instead of downloading gigabytes again — when
+                    # the size the download started with says so and the
+                    # server's own answer does not contradict it
+                    m416 = re.match(r"\s*bytes\s+\*/(\d+)", resp.headers.get("Content-Range", ""))
+                    if (started.get("total") and resume_from == int(started["total"])
+                            and (not m416 or int(m416.group(1)) == resume_from)
+                            and _same_validator(started, resp)):
+                        sha = ContentHasher()
+                        with open(part, "rb") as f:
+                            for blk in iter(lambda: f.read(1 << 20), b""):
+                                sha.update(blk)
+                        replace_with_retry(part, dest)
+                        unlink_with_retry(val_p)
+                        _remember_identity(dest, sha, started)
+                        log.info("%s: the kept download was already complete — finished "
+                                 "without downloading it again", url)
+                        return sha.hexdigest(), str(resp.url)
                     # range not satisfiable — stale/oversized part; start over.
                     # Reset the WHOLE progress ledger with it: leaving the stall
                     # anchor at the old multi-GB part size made the reset
@@ -683,11 +991,15 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                     highwater = 0  # the .part is gone — don't claim bytes kept
                     stall_anchor_hw = 0
                     last_progress_t = time.monotonic()
+                    splices = []
+                    restarts += 1
                     raise DownloadError("stale partial download discarded", retryable=True)
                 if resp.status_code in RETRYABLE_STATUS:
-                    raise DownloadError(
+                    e_rs = DownloadError(
                         f"HTTP {resp.status_code}", resp.status_code, retryable=True
                     )
+                    e_rs.retry_after = _retry_after_seconds(resp)
+                    raise e_rs
                 if resp.status_code == 403:
                     if ua_override is None:
                         # CDN refuses non-browser user agents — retry
@@ -712,9 +1024,48 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
 
                 resuming = resume_from > 0 and resp.status_code == 206
                 if resuming:
-                    # Content-Range: bytes <from>-<to>/<total>
-                    cr = resp.headers.get("Content-Range", "")
-                    total = int(cr.rsplit("/", 1)[-1]) if "/" in cr and cr.rsplit("/", 1)[-1].isdigit() else None
+                    # a 206 is checked against what was ASKED (review 11 items
+                    # 1.2, 1.4, 1.5): it must start at our byte, describe the
+                    # same file size the download started with, and carry no
+                    # validator other than the one we sent. A CDN that ignores
+                    # If-Range, answers from byte 0 under a plausible header,
+                    # or sends a short body with no Content-Range spliced
+                    # another version's bytes into the .part and the row ended
+                    # 'done' with mixed rates.
+                    known_total = int(started.get("total") or 0) or None
+                    m_cr = _CONTENT_RANGE.match(resp.headers.get("Content-Range", ""))
+                    bad = None
+                    if m_cr:
+                        cr_total = None if m_cr.group(3) == "*" else int(m_cr.group(3))
+                        if int(m_cr.group(1)) != resume_from:
+                            bad = (f"the server resumed from byte {int(m_cr.group(1)):,} "
+                                   f"instead of {resume_from:,}")
+                        elif known_total and cr_total and cr_total != known_total:
+                            bad = (f"the file's size changed since the download started "
+                                   f"({known_total:,} -> {cr_total:,} bytes)")
+                        total = cr_total or known_total
+                    elif known_total:
+                        total = known_total     # never None once known: done == total decides
+                    else:
+                        total = None
+                        bad = "the server's resume answer did not say which bytes it sent"
+                    if not bad and not _same_validator(started, resp):
+                        bad = "the server's file changed since the download started"
+                    vouched = bool(started.get("validator")) and bool(
+                        _resp_validator(resp, _val_kind(started)))
+                    if bad:
+                        part.unlink(missing_ok=True)
+                        val_p.unlink(missing_ok=True)
+                        highwater = 0
+                        stall_anchor_hw = 0
+                        last_progress_t = time.monotonic()
+                        sha_carry = None
+                        splices = []     # they belonged to the discarded bytes
+                        restarts += 1
+                        raise DownloadError(f"{bad} — starting this file again from the "
+                                            "beginning", retryable=True)
+                    if not vouched:
+                        splices.append(resume_from)
                     kept_200_refusals = 0  # resume works — reset the refuse budget
                 else:
                     if (resume_from >= _KEEP_PART_ON_200_BYTES
@@ -735,9 +1086,11 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                             "request; keeping the %.0f MB already downloaded and "
                             "retrying for a resume (%d/%d)", url, resume_from / 1e6,
                             kept_200_refusals, _KEEP_200_MAX_REFUSALS)
-                        raise DownloadError(
+                        e_ref = DownloadError(
                             "server ignored resume; kept partial download",
                             retryable=True)
+                        e_ref.refused_200 = True
+                        raise e_ref
                     if resume_from >= _KEEP_PART_ON_200_BYTES:
                         # exhausted the refuse budget: this server won't resume,
                         # so accept the full 200 and restart from 0 (the only way
@@ -755,9 +1108,15 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                         # restarting from 0 forever.
                         val_p.unlink(missing_ok=True)
                     resume_from = 0  # server sent the whole file (or fresh start)
+                    splices = []     # a fresh body: no join from an earlier attempt
                     total = int(resp.headers.get("Content-Length") or 0) or None
                 if max_bytes and total and total > max_bytes:
                     raise too_big(total)
+                if lane_max and (not total or total > lane_max):
+                    # too big — or no size given: a big slot downloads it
+                    # (it could be gigabytes; a small slot would hold it, and
+                    # a resume on a server without Range restarts at 0)
+                    raise _handoff(total or 0, lane_max)
 
                 # disk guard: a payer file must never run the machine out of
                 # space mid-download — fail up front with the friendly fix.
@@ -772,11 +1131,16 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                     # up-front guard instead of overcommitting the disk.
                     _set_reservation(my_key, _UNKNOWN_LEN_RESERVATION)
 
-                sha = hashlib.sha256()
-                if resuming:
-                    with open(part, "rb") as f:  # hash what we already have
+                if resuming and sha_carry is not None and sha_carry[1] == resume_from:
+                    sha = sha_carry[0]               # continue the running hash
+                else:
+                    sha = ContentHasher()
+                    sha_carry = None
+                if resuming and sha_carry is None:
+                    with open(part, "rb") as f:  # cold resume: hash what we already have
                         for blk in iter(lambda: f.read(1 << 20), b""):
                             sha.update(blk)
+                if resuming:
                     log.info("resuming download at %.1f GB / %s", resume_from / 1e9,
                              f"{total / 1e9:.1f} GB" if total else "?")
                 else:
@@ -793,19 +1157,50 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                     etag = (resp.headers.get("ETag") or "").strip()
                     strong = etag if etag and not etag.upper().startswith("W/") else ""
                     validator = strong or (resp.headers.get("Last-Modified") or "").strip()
-                    if validator:
-                        val_p.write_text(validator)
-                    else:
-                        val_p.unlink(missing_ok=True)
+                    # ...and the SIZE it announced: a resume is held to both
+                    # (review 11 items 1.2 / 1.5) — and WHICH header the
+                    # validator came from, so a resume compares like with like
+                    # (review 12 item 1.2)
+                    _write_val(val_p, validator, total,
+                               "etag" if strong else ("last_modified" if validator else ""))
+                raw_body = (resp.headers.get("Content-Encoding") or "").strip().lower() in (
+                    "", "identity", "gzip", "x-gzip")
                 done = resume_from
+                stream_anchor = done   # mid-stream stall clock (see the chunk loop)
                 last_report = done
                 last_report_t = 0.0
                 last_free_check = done  # for the unknown-length mid-stream guard
                 with open(part, "ab" if resuming else "wb") as f:
-                    for chunk in resp.iter_bytes(chunk_size=1 << 20):
+                    for chunk in _body_chunks(resp):
                         f.write(chunk)
                         sha.update(chunk)
                         done += len(chunk)
+                        sha_carry = (sha, done)
+                        early_total = total
+                        if next_early and not total and done >= next_early \
+                                and early_probe is None:
+                            # no Content-Length (chunked): a copy of a loaded
+                            # file downloaded in full before the full sha said
+                            # so (review 11 item 3.7). One 1-byte range request
+                            # names the size, and the early check runs
+                            pr = _probe_ranges(cfg, str(resp.url), ua_override)
+                            early_probe = pr[0] if pr else 0
+                        if not early_total and early_probe:
+                            early_total = early_probe
+                        if next_early and early_total and early_total > next_early \
+                                and done >= next_early:
+                            f.flush()
+                            v = early_check(part, early_total, str(resp.url), ua_override,
+                                            verify_override)
+                            next_early = 0
+                            if isinstance(v, int) and not isinstance(v, bool):
+                                next_early, v = v, None
+                            if v:
+                                e_v = DownloadError(
+                                    "early duplicate check", retryable=False,
+                                    parked=v[0] == "wait")
+                                e_v.verdict, e_v.dup_bytes = v, done
+                                raise e_v
                         if total:
                             # written bytes now show in disk_usage; shrink the
                             # reservation so they're never counted twice
@@ -825,7 +1220,7 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                                     "drive). Free up space and press retry — it resumes "
                                     "where it stopped.", retryable=False)
                         if max_bytes and done > max_bytes:
-                            raise too_big(done)  # no Content-Length header case
+                            raise too_big(done, known=False)  # no Content-Length
                         # enforce the wall-clock cap MID-STREAM too: a single slow
                         # attempt that trickles bytes stays inside this loop for
                         # hours and would never reach the loop-top check. Raise
@@ -835,8 +1230,24 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                             raise DownloadError(
                                 "exceeded the download time cap mid-stream",
                                 retryable=True)
+                        # the STALL deadline mid-stream too: a server that keeps
+                        # the connection alive but dribbles a few KB never hits
+                        # the read timeout, so the loop-top check never ran and
+                        # it held the slot until the 3-hour cap
+                        # (measured on THIS connection's own bytes: a server
+                        # that made us restart from byte 0 is re-downloading
+                        # for real, not stalled)
+                        now = time.monotonic()
+                        if done - stream_anchor >= _STALL_MIN_PROGRESS_BYTES:
+                            stream_anchor = done
+                            last_progress_t = now
+                        elif park_budget and now - last_progress_t > park_budget:
+                            raise _park(max(done, highwater))
+                        elif stall_budget and now - last_progress_t > stall_budget:
+                            raise DownloadError(
+                                "no meaningful progress mid-stream", retryable=True)
                         # user pressed "stop downloads" — abort NOW to free the
-                        # slot (checked per streamed chunk, throttled by the 1 MB
+                        # slot (checked per streamed chunk, throttled by the 64 KB
                         # chunk size so it's cheap)
                         if _canceled():
                             raise DownloadError("download canceled", retryable=False,
@@ -844,8 +1255,11 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                         # dashboard polls every ~4s; don't hammer the store
                         # with a write-locked UPDATE for every 8 MB of a fast
                         # link — report on bytes AND wall-clock
-                        now = time.monotonic()
-                        if progress_cb and done - last_report >= 8 << 20 and now - last_report_t >= 1.5:
+                        # ...and at least every 10 s when ANY bytes arrived,
+                        # so a slow file never reads "no data" on the dashboard
+                        if progress_cb and done > last_report and (
+                                (done - last_report >= 8 << 20 and now - last_report_t >= 1.5)
+                                or now - last_report_t >= 10):
                             progress_cb(done, total)
                             last_report = done
                             last_report_t = now
@@ -859,12 +1273,47 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                     raise DownloadError(
                         f"connection closed early ({done / 1e6:.0f} of {total / 1e6:.0f} MB) "
                         "— retrying from where it stopped", retryable=True)
+                if total is not None and done > total and raw_body:
+                    # more bytes than the file holds: the server sent bytes we
+                    # did not ask for (review 11 item 1.4: the whole file under
+                    # a resume header — the prefix landed twice)
+                    part.unlink(missing_ok=True)
+                    val_p.unlink(missing_ok=True)
+                    highwater = stall_anchor_hw = 0
+                    sha_carry = None
+                    splices = []
+                    restarts += 1
+                    raise DownloadError(
+                        f"the server sent {done:,} bytes for a {total:,}-byte file — "
+                        "starting this file again from the beginning", retryable=True)
                 final_url = str(resp.url)
-            part.replace(dest)
-            val_p.unlink(missing_ok=True)
+            if splices and total:
+                agrees = _splice_agrees(cfg, final_url, part, total, splices,
+                                        ua_override, verify_override)
+                if agrees is False:
+                    part.unlink(missing_ok=True)
+                    val_p.unlink(missing_ok=True)
+                    highwater = stall_anchor_hw = 0
+                    sha_carry = None
+                    splices = []
+                    restarts += 1
+                    log.warning("%s: the server's file changed while it was being "
+                                "downloaded — starting it again from the beginning", url)
+                    raise DownloadError(
+                        "the payer's file changed while it was being downloaded (the "
+                        "resumed part did not match) — starting it again", retryable=True)
+            # Windows: antivirus / the indexer opening the just-closed .part
+            # made a plain rename raise, the row failed and the complete file
+            # was downloaded again (review 11 item 1.9)
+            server = _read_val(val_p)
+            replace_with_retry(part, dest)
+            unlink_with_retry(val_p)
+            _remember_identity(dest, sha, server)
             return sha.hexdigest(), final_url
         except DownloadError as e:
             last_exc = e
+            if e.parked or e.handoff:
+                raise          # straight out: the slot goes to the next file NOW
             if not e.retryable:
                 # keep the .part when a retry could finish it: the disk-space
                 # and confirm_over_gb guards tell the user to fix the setting
@@ -880,7 +1329,19 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                     val_p.unlink(missing_ok=True)
                 raise
             log.warning("download %s: %s (attempt %d/%d)", url, e, attempt + 1, cfg.download_retries + 1)
-        except (httpx.TransportError, httpx.TimeoutException) as e:
+        except (httpx.TooManyRedirects, httpx.DecodingError) as e:
+            # not a network wobble: retrying gives the same answer. Plain words
+            # instead of "unexpected download error" + a traceback (review 11
+            # item 2.4)
+            part.unlink(missing_ok=True)
+            val_p.unlink(missing_ok=True)
+            raise DownloadError(
+                "this link redirects in a loop — the address may need a login or has "
+                "moved; open it in your browser to check" if isinstance(e, httpx.TooManyRedirects)
+                else "the server sent a compressed body that cannot be read — press retry "
+                     "later; if it keeps happening, download the file in your browser and "
+                     "drop it into data/inbox/", retryable=False) from e
+        except (httpx.TransportError, httpx.TimeoutException, httpx.HTTPError) as e:
             last_exc = e
             # server sent an incomplete cert chain? repair it like a browser
             # and retry immediately — a free retry (attempt not advanced),
@@ -916,6 +1377,13 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                      url, bytes_after / 1e6, connections)
             attempt = 0
             time.sleep(1.0)
+        elif getattr(last_exc, "refused_200", False):
+            # OUR choice to refuse a range-ignoring 200 (to keep a big .part),
+            # not the server failing: with download_retries <= 2 counting it
+            # made the accept-and-restart branch unreachable and the file could
+            # never finish (review 11 item 2.14). Bounded by
+            # _KEEP_200_MAX_REFUSALS and _MAX_DOWNLOAD_CONNECTIONS.
+            time.sleep(1.0)
         else:
             attempt += 1
             # Deterministic CDN early-close (e.g. mrf.bcbs.com sending ~15 KB
@@ -937,7 +1405,24 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
                 #    parallel downloads that started together fail in lockstep,
                 #    so a deterministic offset would re-slam the host in sync
                 import random
-                time.sleep(min(90.0, 2.0 * (2 ** (attempt - 1))) + random.uniform(0, 3))
+                pause = min(90.0, 2.0 * (2 ** (attempt - 1))) + random.uniform(0, 3)
+                ra = getattr(last_exc, "retry_after", None)
+                if ra is not None:
+                    # the server said when to come back (429 / 503): one wait
+                    # of that length instead of the generic back-off (review
+                    # 11 item 2.13; capped at 10 min in _retry_after_seconds)
+                    pause = ra
+                if park_budget:
+                    left = park_budget - (time.monotonic() - last_progress_t)
+                    pause = max(0.0, min(pause, left + 0.05))
+                # in <= 1 s slices: "stop downloads" pressed during a 90 s
+                # back-off held the slot the whole time (review 11 item 2.12)
+                until = time.monotonic() + pause
+                while True:
+                    left_s = until - time.monotonic()
+                    if left_s <= 0 or _canceled():
+                        break
+                    time.sleep(min(1.0, left_s))
     # keep the .part: every failure that lands here was transient (terminal
     # ones raised above), so a later "retry" on the queue resumes the download
     # instead of restarting a multi-GB file from byte zero
@@ -949,9 +1434,12 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
         # free for the other files (the whole point of failing fast here).
         got = f"{highwater / 1e6:.0f} MB" if highwater else "no data"
         msg = (f"gave up after {int(stall_budget)}s with no download progress "
-               f"({got} received over {connections} tries) — this server keeps "
-               "closing the connection early and won't resume. The bytes so far "
-               "are kept, so pressing retry later (or on a better connection) "
+               f"({got} received over {connections} tries) — "
+               + (f"its last answer was HTTP {last_exc.status}. "
+                  if getattr(last_exc, "status", None) else
+                  "this server keeps closing the connection early and won't resume. ")
+               + ("The bytes so far " if part.exists() else "Whatever arrives next ")
+               + "are kept, so pressing retry later (or on a better connection) "
                "picks up where it stopped; or open the link in your browser and "
                "drop the downloaded file into data/inbox/. Other files keep "
                "downloading in the meantime.")
@@ -960,12 +1448,24 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
         # yielded its slot on purpose so other files get a turn — that is the
         # cap doing its job, not a failure, and it must resume BY ITSELF.
         # (set_aside below requeues it; see fetch_url_record.)
-        got = f"{highwater / 1e6:.0f} MB" if highwater else "no data"
+        # what is KEPT is read from disk now, after any path that threw the
+        # .part away: "nothing is re-downloaded" over a deleted .part was false
+        # twice (review 12 item 1.2 — 5.9 MB served, all of it re-downloaded)
+        kept = part.stat().st_size if part.exists() else 0
         span = f"{max_budget / 60:.0f} min" if max_budget >= 60 else f"{int(max_budget)} s"
-        msg = (f"paused after {span} and {got} downloaded so other files get a "
-               "turn — it goes back in the queue and resumes from here "
-               "automatically, nothing is re-downloaded. If one huge file is all "
-               "you need, raise download_max_seconds in config/mrfx.yaml so it "
+        if restarts:
+            how = (f"the server's answers made it start over {restarts} time"
+                   f"{'s' if restarts != 1 else ''}, "
+                   + (f"{kept / 1e6:.0f} MB of it is kept" if kept >= 1e6 else
+                      f"{kept:,} bytes of it are kept" if kept else "nothing of it is kept yet")
+                   + " — it goes back in the queue and continues automatically.")
+        elif kept:
+            how = (f"{kept / 1e6:.0f} MB downloaded — it goes back in the queue and resumes "
+                   "from here automatically, nothing is re-downloaded.")
+        else:
+            how = "before any of it could be kept — it goes back in the queue and starts again automatically."
+        msg = (f"paused after {span} so other files get a turn; {how} If one huge file "
+               "is all you need, raise download_max_seconds in config/mrfx.yaml so it "
                "gets a longer run at a time.")
         raise DownloadError(msg, retryable=True, set_aside=True)
     else:
@@ -1039,7 +1539,9 @@ def expand_toc_with_plans(path: Path, max_files: int, base_url: str = "",
         cur_plans, cur_locs = [], []
 
     with open_stream(path) as stream:
-        for prefix, event, value in ijson.parse(stream):
+        # multiple_values: some payers (UCare, 1199SEIU, Network Health)
+        # publish an index as SEVERAL JSON objects back to back
+        for prefix, event, value in ijson.parse(stream, multiple_values=True):
             if prefix == "reporting_structure.item" and event == "start_map":
                 flush_item()          # previous item ended
             elif prefix.endswith("reporting_plans.item") and event == "start_map":
@@ -1111,13 +1613,15 @@ def expand_toc(path: Path, max_files: int, base_url: str = "") -> tuple[list[str
 
     with open_stream(path) as stream:
         # reporting_structure[].in_network_files[].location  (CMS TiC index)
-        for loc in ijson.items(stream, "reporting_structure.item.in_network_files.item.location"):
+        for loc in ijson.items(stream, "reporting_structure.item.in_network_files.item.location",
+                               multiple_values=True):
             if take(loc):
                 break
     if not urls:
         # some payers put in_network_files at the top level instead
         with open_stream(path) as stream:
-            for loc in ijson.items(stream, "in_network_files.item.location"):
+            for loc in ijson.items(stream, "in_network_files.item.location",
+                                   multiple_values=True):
                 if take(loc):
                     break
     return urls, truncated
@@ -1126,10 +1630,19 @@ def expand_toc(path: Path, max_files: int, base_url: str = "") -> tuple[list[str
 # drug-pricing rate files, named unambiguously in UHC/Optum listings
 # ("...PPO-NDC_in-network-rates...", "..._prescription-drugs.json.gz").
 # Bounded-token match so an employer literally named "NDC Corp" isn't caught.
-_DRUG_FILE_RE = re.compile(r"(^|[-_])ndc([-_.]|$)|prescription-drug", re.I)
+# Names that say "no medical rates in here", matched as whole tokens (review
+# 13 item 5.2 P2: `"allowed" in name` dropped "Hallowed-Health" and
+# "Allowed-Benefits-TPA", and the NDC token dropped "NDC-Corp"): an
+# allowed-amounts file names itself so; a drug-pricing in-network file carries
+# NDC right next to its in-network / file-type part, or "prescription-drug".
+_ALLOWED_FILE_RE = re.compile(r"(^|[-_ .])allowed[-_ ]?amounts?([-_ .]|$)", re.I)
+_DRUG_FILE_RE = re.compile(
+    r"(^|[-_])ndc[-_]in-network|in-network[-_a-z]*[-_]ndc([-_.]|$)|(^|[-_])ndc\.json"
+    r"|prescription-drug", re.I)
 
 
-def expand_blobs_listing(path: Path, max_files: int, base_url: str = "") -> tuple[list[str], bool]:
+def expand_blobs_listing(path: Path, max_files: int, base_url: str = "",
+                         excluded_out: dict | None = None) -> tuple[list[str], bool]:
     """Expand a transparency-portal blobs listing ({"blobs": [{"name",
     "downloadUrl"}, ...]} — UHC / Optum style). Rate files first: the UHC
     listing carries ~7k in-network files, ~67k per-employer index files that
@@ -1144,7 +1657,7 @@ def expand_blobs_listing(path: Path, max_files: int, base_url: str = "") -> tupl
     excluded: dict[str, int] = {"allowed-amounts": 0, "drug-pricing": 0}
 
     with open_stream(path) as stream:
-        for item in ijson.items(stream, "blobs.item"):
+        for item in ijson.items(stream, "blobs.item", multiple_values=True):
             if not isinstance(item, dict):
                 continue
             name = str(item.get("name") or "")
@@ -1156,7 +1669,7 @@ def expand_blobs_listing(path: Path, max_files: int, base_url: str = "") -> tupl
             if not loc.lower().startswith(("http://", "https://")):
                 continue
             low = name.lower()
-            if "allowed" in low:
+            if _ALLOWED_FILE_RE.search(low):
                 excluded["allowed-amounts"] += 1
                 continue  # out-of-network billed averages — no negotiated rates
             is_rate_file = "in-network" in low
@@ -1180,6 +1693,8 @@ def expand_blobs_listing(path: Path, max_files: int, base_url: str = "") -> tupl
     if any(excluded.values()):
         log.info("listing: excluded %d allowed-amounts and %d drug-pricing entries (no medical rates)",
                  excluded["allowed-amounts"], excluded["drug-pricing"])
+    if excluded_out is not None:
+        excluded_out.update(excluded)
     return out, truncated
 
 
@@ -1271,12 +1786,19 @@ _FRAMEWORK_ASSET_RE = re.compile(
 
 
 def extract_links_from_text(text: str, base_url: str, max_files: int,
-                            seen: set[str] | None = None) -> list[str]:
+                            seen: set[str] | None = None,
+                            trunc: dict | None = None) -> list[str]:
     """Pull .json / .json.gz / .zip MRF links out of markup or JS/JSON text.
     Returns absolute, deduped URLs; pass `seen` (dedup keys) to accumulate
-    across multiple sources (rendered DOM + captured API responses)."""
+    across multiple sources (rendered DOM + captured API responses). Pass
+    `trunc` (a dict) to learn whether links were left out at the cap:
+    trunc["truncated"] is set True (round 7 P1.6 — a cut list said nothing)."""
     seen = seen if seen is not None else set()
     out: list[str] = []
+    # gather well past the cap (bounded), then keep the most useful first: a
+    # page listing 32,397 group indexes (Allied) or 4,173 mixed files
+    # (Meritain) used to keep whichever 2,000 came first on the page
+    ceiling = max_files * 20
     for pattern in (_ATTR_LINK_RE, _ABS_LINK_RE, _REL_JSON_RE):
         for m in pattern.finditer(text):
             # payer filenames legitimately contain spaces ("carefirst ppo_
@@ -1291,12 +1813,29 @@ def extract_links_from_text(text: str, base_url: str, max_files: int,
                 continue
             seen.add(k)
             out.append(u)
-            if len(out) >= max_files:
-                return out
-    return out
+            if len(out) >= ceiling:
+                break
+    out.sort(key=_link_priority)          # stable: page order within a rank
+    if trunc is not None and len(out) > max_files:
+        trunc["truncated"] = True
+    return out[:max_files]
 
 
-def extract_links_from_page(path: Path, base_url: str, max_files: int) -> list[str]:
+_USEFUL_LINK_RE = re.compile(r"in[-_ ]?network|table[-_ ]?of[-_ ]?contents|index|toc", re.I)
+_SKIPPED_LINK_RE = re.compile(r"allowed[-_ ]?amount|prescription|drug|formular|\brx\b", re.I)
+
+
+def _link_priority(u: str) -> int:
+    """0: in-network rate files and indexes; 1: anything else; 2: files the
+    app skips anyway (allowed amounts, drug pricing)."""
+    name = u.rsplit("/", 1)[-1].split("?", 1)[0]
+    if _SKIPPED_LINK_RE.search(name):
+        return 2
+    return 0 if _USEFUL_LINK_RE.search(name) else 1
+
+
+def extract_links_from_page(path: Path, base_url: str, max_files: int,
+                            trunc: dict | None = None) -> list[str]:
     """Best effort: pull .json / .json.gz links out of an HTML page (payer
     directory listings like mrfdata.hmhs.com are plain pages full of file
     links). Returns absolute, deduped URLs. Empty for JS-only portals."""
@@ -1305,7 +1844,17 @@ def extract_links_from_page(path: Path, base_url: str, max_files: int) -> list[s
             text = f.read(64 << 20).decode(errors="replace")  # match the 64 MB link-container admit limit
     except OSError:
         return []
-    return extract_links_from_text(text, base_url, max_files)
+    return extract_links_from_text(text, base_url, max_files, trunc=trunc)
+
+
+def cap_note(max_files: int) -> str:
+    """The amber note on a done index/page row that listed more files than
+    max_toc_files (round 7 P1.6: Meritain 4,173, Allied 32,397 and Aetna
+    ALICUNDER100 30,884 files read "found 2,000 files inside" and nothing
+    about the rest)."""
+    return (f"this list has MORE than {max_files:,} files — only {max_files:,} were taken "
+            f"(in-network rate files and indexes first). To take more, raise "
+            f"max_toc_files in config/mrfx.yaml and press retry on this row.")
 
 
 PAGE_HELP = (
@@ -1330,7 +1879,8 @@ def _page_help() -> str:
     return PAGE_HELP if render_available() else PAGE_HELP_NO_RENDERER
 
 
-def crawl_gatsby_hub(cfg: MrfxConfig, page_url: str, max_files: int) -> list[str]:
+def crawl_gatsby_hub(cfg: MrfxConfig, page_url: str, max_files: int,
+                     trunc: dict | None = None) -> list[str]:
     """Some payer MRF hubs (the Sapphire/HealthSparq platform — Blue KC is
     one) are Gatsby apps: the page is empty HTML, but the file list ships as
     static JSON the site itself fetches. Do what the browser would:
@@ -1341,11 +1891,12 @@ def crawl_gatsby_hub(cfg: MrfxConfig, page_url: str, max_files: int) -> list[str
     origin = f"{parts.scheme}://{parts.netloc}"
     seen: set[str] = set()
     out: list[str] = []
+    cut = {"t": False}
 
     def walk(node):
         """Collect node['url'] JSON links, skipping entries the payer marked
         suppressed (files pulled from publication — honesty over volume)."""
-        if len(out) >= max_files:
+        if cut["t"]:
             return
         if isinstance(node, dict):
             u = node.get("url")
@@ -1354,6 +1905,9 @@ def crawl_gatsby_hub(cfg: MrfxConfig, page_url: str, max_files: int) -> list[str
                 full = urljoin(origin + "/", u.strip())
                 k = dedup_key(full)
                 if k not in seen and full.lower().startswith(("http://", "https://")):
+                    if len(out) >= max_files:
+                        cut["t"] = True      # one more real link than we keep
+                        return
                     seen.add(k)
                     out.append(full)
             for v in node.values():
@@ -1375,11 +1929,13 @@ def crawl_gatsby_hub(cfg: MrfxConfig, page_url: str, max_files: int) -> list[str
                 sq = client.get(f"{origin}/page-data/sq/d/{h}.json")
                 if sq.status_code == 200:
                     walk(sq.json())
-                if len(out) >= max_files:
+                if cut["t"]:
                     break
     except (httpx.HTTPError, ValueError) as e:  # network or non-JSON — not a hub
         log.debug("gatsby probe %s: %s", origin, e)
         return []
+    if cut["t"] and trunc is not None:
+        trunc["truncated"] = True
     return out[:max_files]
 
 
@@ -1412,6 +1968,103 @@ def _maybe_queue_prev_month(store: Store, rec: dict, err: str) -> None:
         store.update_url(rec["id"],
                          error=err + " — this month's file isn't posted yet; "
                                "queued last month's version instead")
+    else:
+        # last month's version is already queued or loaded (after a month of
+        # use it always is) — say so instead of leaving a bare 404
+        store.update_url(rec["id"],
+                         error=err + " — this month's file isn't posted yet; last "
+                               "month's version is already in your data. The monthly "
+                               "refresh (if on) retries this link daily until the 10th; "
+                               "otherwise press retry later in the month.")
+
+
+NOT_POSTED_GRACE_DAYS = 10   # payers post monthly files during the first ~week
+
+
+def monthly_refresh_tick(cfg: MrfxConfig, store: Store, today=None,
+                         dated_sources: bool = True, recheck: bool = True) -> dict:
+    """One pass of the monthly re-check (on by default) and the OPT-IN
+    monthly refresh (cli._monthly_refresh_loop
+    calls it hourly). Returns what it did; idempotent within a month.
+
+    Scope: only the catalog sources the user has actually LOADED (a 'done'
+    row for that source, any month) — with 104 queueable sources, refreshing
+    the whole catalog queued hundreds of thousands of files the user never
+    chose.
+    - a {FIRST_OF_MONTH} source: this month's URL is queued; if the payer
+      hasn't posted it yet (failed, e.g. 404), it is retried once a day until
+      day NOT_POSTED_GRACE_DAYS — the month is marked done only when every
+      such URL succeeded or the grace period is over (it used to be marked at
+      the first tick after midnight on the 1st, leaving every dated source
+      failed all month);
+    - a static index URL that payers update in place: re-queued ONCE per
+      month (re-adding a 'done' row was a no-op, so it was never refreshed).
+    """
+    import datetime as dt
+    import re as _re
+
+    from .known_sources import load_known_sources
+
+    today = today or dt.date.today()
+    month = today.strftime("%Y-%m")
+    if store.meta_get("monthly_refresh_last") == month:
+        return {"month": month, "done": True}
+    sources = [s for s in load_known_sources(cfg.known_sources_path, today) if s.get("queueable")]
+    with store.connect() as con:
+        top = con.execute("SELECT id, url, dedup_key, status, finished_at FROM url_queue "
+                          "WHERE parent_id IS NULL").fetchall()
+    done_urls = [r[1] for r in top if r[3] == "done"]
+    dated, static = [], []
+    for s in sources:
+        tpl = s.get("url_template") or s["url"]
+        if "{FIRST_OF_MONTH}" in tpl:
+            pat = _re.compile(_re.escape(tpl).replace(_re.escape("{FIRST_OF_MONTH}"),
+                                                      r"\d{4}-\d{2}-01"))
+            if any(pat.fullmatch(u or "") for u in done_urls):
+                dated.append(s["url"])
+        elif s["url"] in done_urls:
+            static.append(s["url"])
+    # every OTHER index / page the user pasted and loaded is asked about once a
+    # month too (review 13 item 5.2.5: only catalog sources were, so a
+    # user-pasted static index was never re-checked). Re-fetching an index
+    # costs its own bytes plus ONE 1-byte probe per loaded child.
+    catalog = {s.get("url") for s in sources}
+    with store.connect() as con:
+        pasted = [r[0] for r in con.execute(
+            "SELECT url FROM url_queue WHERE parent_id IS NULL AND status = 'done' "
+            "AND kind IN ('toc', 'page') ORDER BY id").fetchall()]
+    for u in pasted:
+        if u not in catalog and u not in static and not any(
+                _re.fullmatch(_re.escape(s.get("url_template") or "").replace(
+                    _re.escape("{FIRST_OF_MONTH}"), r"\d{4}-\d{2}-01"), u or "")
+                for s in sources if "{FIRST_OF_MONTH}" in (s.get("url_template") or "")):
+            static.append(u)
+    if not dated_sources:
+        dated = []                 # new dated months: opt-in (monthly_refresh)
+    if not recheck:
+        static = []                # re-checking loaded indexes (monthly_recheck)
+    out = {"month": month, "dated": len(dated), "static": len(static),
+           "queued": 0, "retried": 0, "requeued_static": 0}
+    by_url = {r[1]: r for r in top}
+    new = [u for u in dated if u not in by_url]
+    if new:
+        # only URLs not in the queue yet: add_urls REVIVES a failed row, which
+        # would retry a not-yet-posted file every hourly tick instead of daily
+        out["queued"] = add_urls(store, new)["added"]
+    if static and store.meta_get("monthly_refresh_static") != month:
+        out["requeued_static"] = store.requeue_urls(static)
+        store.meta_set("monthly_refresh_static", month)
+    # a dated URL the payer hasn't posted yet: retry once a day in the grace window
+    now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+    stale = [u for u in dated if u in by_url and by_url[u][3] == "failed"
+             and (by_url[u][4] is None or now - by_url[u][4] >= dt.timedelta(hours=20))]
+    if stale and today.day <= NOT_POSTED_GRACE_DAYS:
+        out["retried"] = store.requeue_urls(stale)
+    finished = all(by_url.get(u) is not None and by_url[u][3] == "done" for u in dated)
+    if finished or today.day > NOT_POSTED_GRACE_DAYS:
+        store.meta_set("monthly_refresh_last", month)
+        out["done"] = True
+    return out
 
 
 _META_SUFFIX = ".fetchmeta"  # sidecar handing a prefetched download to the processor
@@ -1421,16 +2074,58 @@ def _meta_path(dest: Path) -> Path:
     return Path(str(dest) + _META_SUFFIX)
 
 
+# RAM budget for the AUTO worker count. A parser worker peaks ~1-2 GB on a
+# reference-heavy payer (measured: 1.92 GB on the full 20 GB Aetna file), the
+# main process holds DuckDB's analytics pool, and Windows + a browser need the
+# rest. Cores alone put 7 workers on a 16 GB 8-core laptop: 7 x 2 GB + a 6 GB
+# pool > 16 GB — swap or a native OOM death mid-grind. Throughput plateaus at
+# ~cores/1.4 workers anyway (measured), so the RAM cap costs little.
+from .store import OS_RESERVE_GB, PARSER_WORKER_RAM_GB as WORKER_RAM_GB  # noqa: E402 — one rule
+
+
+def _ram_worker_cap(cfg: MrfxConfig) -> int | None:
+    """How many parser workers fit in RAM next to the analytics pool, or None
+    when the machine's RAM can't be read (then cores decide, as before)."""
+    from .store import _total_ram_bytes, auto_pool_gb
+
+    total_gb = _total_ram_bytes() / 1e9
+    if total_gb <= 0:
+        return None
+    pool_gb = getattr(cfg, "duckdb_memory_gb", None) or auto_pool_gb(int(total_gb * 1e9))
+    return max(1, int((total_gb - pool_gb - OS_RESERVE_GB) // WORKER_RAM_GB))
+
+
+def _failure_message(store: Store, rec: dict, e: "DownloadError") -> str:
+    """The row's error text. A 403 on a file that came from an index is almost
+    always an expired signed link (captured when the index was expanded, dead
+    after a long pause) — name the exact index to re-paste, instead of a
+    generic "re-add the TOC it came from" on one of thousands of rows."""
+    msg = str(e)
+    if e.status == 403 and rec.get("parent_id") is not None:
+        try:
+            parent = store.url_of(rec["parent_id"])
+        except Exception:  # noqa: BLE001 — a hint must never fail the row update
+            parent = None
+        if parent:
+            msg += (f" This link came from the index {parent} — if that was added "
+                    "a while ago its signed links have likely expired: paste that "
+                    "index again to get fresh ones.")
+    return msg
+
+
 def resolve_worker_count(cfg: MrfxConfig) -> int:
     """Effective parser-process count. 0 (or unset) = auto: (CPU cores - 1)
-    capped at 8; a positive value is honored but still clamped to cores-1
-    (extra processes past the core count only add contention). Never less
+    capped at 8 AND at what fits in RAM (_ram_worker_cap); a positive value is
+    honored but still clamped to cores-1 (extra processes past the core count
+    only add contention — RAM is the user's call once they set it). Never less
     than 1. Central so run_queue, the prefetch sizing, and the CLI banner
     all agree."""
     cores_cap = max(1, (os.cpu_count() or 2) - 1)
     configured = int(getattr(cfg, "parallel_ingests", 0) or 0)
     if configured <= 0:
-        return min(cores_cap, 8)
+        n = min(cores_cap, 8)
+        ram_cap = _ram_worker_cap(cfg)
+        return n if ram_cap is None else max(1, min(n, ram_cap))
     return max(1, min(configured, cores_cap))
 
 
@@ -1473,21 +2168,614 @@ def _size_limit_for(cfg: MrfxConfig, rec: dict) -> int:
 
 def _write_meta(dest: Path, content_sha: str, final_url: str) -> None:
     """Atomic sidecar write: a crash mid-write must leave either the old
-    sidecar or the new one, never a half-JSON that fails parsing later."""
+    sidecar or the new one, never a half-JSON that fails parsing later.
+    Carries the download's identity (sha, trailer_proves) to the ingest
+    that records it (ingest._finish_ok), across a restart too."""
     meta_p = _meta_path(dest)
     tmp = Path(str(meta_p) + ".tmp")
-    tmp.write_text(json.dumps({"sha": content_sha, "final_url": final_url}))
-    tmp.replace(meta_p)
+    ident = DOWNLOAD_IDENTITY.get(str(dest)) or {}
+    if ident.get("sha") != content_sha:
+        ident = {}
+    try:
+        st = dest.stat()
+        size, mtime_ns = st.st_size, st.st_mtime_ns
+    except OSError:
+        size = mtime_ns = None
+    tmp.write_text(json.dumps({"sha": content_sha, "final_url": final_url,
+                               "trailer_proves": ident.get("trailer_proves"),
+                               "size": size, "mtime_ns": mtime_ns,
+                               "validator": ident.get("validator"),
+                               "server_size": ident.get("server_size")}))
+    replace_with_retry(tmp, meta_p)
 
 
-def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict) -> bool:
+# the identity of each finished download, by local path, until its ingest
+# records it (ingest._finish_ok pops it; the .fetchmeta sidecar carries it
+# across a restart)
+DOWNLOAD_IDENTITY: dict[str, dict] = {}
+
+
+def trailer_proves_for(path: Path, gz_members: int | None) -> int | None:
+    """Do the last EARLY_DEDUP_TAIL bytes of this local file vouch for its
+    whole content? gzip: only with exactly one member. zip: only when the
+    whole central directory (a CRC per member) lies inside that tail."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4)
+            size = path.stat().st_size
+            if head[:2] == b"\x1f\x8b":
+                return None if gz_members is None else int(gz_members == 1)
+            if head[:4] == b"PK\x03\x04":
+                tail_n = min(size, EARLY_DEDUP_TAIL)
+                f.seek(size - tail_n)
+                return int(_zip_cd_in_tail(f.read(tail_n), size))
+    except OSError:
+        return None
+    return None
+
+
+def _zip_cd_in_tail(tail: bytes, size: int) -> bool:
+    """True when the zip's end-of-central-directory record and the whole
+    central directory it points at lie inside `tail` (the last bytes of a
+    file of `size` bytes). Zip64 or anything unparsable: False."""
+    import struct
+    i = tail.rfind(b"PK\x05\x06")
+    if i < 0 or len(tail) - i < 22:
+        return False
+    cd_size, cd_off = struct.unpack("<II", tail[i + 12:i + 20])
+    if cd_off == 0xFFFFFFFF or cd_size == 0xFFFFFFFF:
+        return False                       # zip64: not handled -> not provable
+    tail_start = size - len(tail)
+    return cd_off >= tail_start and cd_off + cd_size <= size
+
+
+def _remember_identity(dest: Path, hasher, server: dict | None = None) -> None:
+    try:
+        gz = hasher.gz_members(dest)
+        csha, csize = (hasher.content_identity(dest)
+                       if hasattr(hasher, "content_identity") else (None, None))
+        DOWNLOAD_IDENTITY[str(dest)] = {"sha": hasher.hexdigest(),
+                                        "csha": csha, "csize": csize,
+                                        "trailer_proves": trailer_proves_for(dest, gz),
+                                        "validator": (server or {}).get("validator") or None,
+                                        "server_size": (server or {}).get("total") or None}
+    except Exception:  # noqa: BLE001 — identity is a proof aid, never a failure
+        log.debug("identity not recorded for %s", dest, exc_info=True)
+
+
+
+def _handoff(size: int, lane_max: int) -> "DownloadError":
+    what = f"{size / 1e6:,.0f} MB" if size else "size not given by the server"
+    e = DownloadError(
+        f"{what} — not for the {lane_max / 1e6:,.0f} MB small-file lane; "
+        "handed to a big-file download slot", retryable=True, handoff=True)
+    e.total = size
+    return e
+
+
+# ---------------------------------------------------------------------------
+# early duplicate detection
+# ---------------------------------------------------------------------------
+
+EARLY_DEDUP_TAIL = 1 << 20     # the last 1 MB: for .gz it holds the CRC-32 and
+                               # length of the WHOLE uncompressed content
+_WINDOWS, _WIN = 8, 64 << 10   # 8 x 64 KB samples spread through the file
+# Only a compressed file can be PROVEN a copy before it is complete: its end
+# carries a CRC of its whole content (gzip trailer; zip central directory).
+# A plain .json with the same size, beginning, end and samples can still
+# differ in one rate in the middle (audit 8 F3) — it downloads in full and
+# the full-content check decides.
+_PROVABLE = ("gz", "zip")
+
+
+def _sha_range(path: Path, start: int, n: int) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        f.seek(start)
+        left = n
+        while left > 0:
+            blk = f.read(min(left, 4 << 20))
+            if not blk:
+                break
+            h.update(blk)
+            left -= len(blk)
+    return h.hexdigest()
+
+
+def _win_offsets(size: int) -> list[int]:
+    if size <= _WIN:
+        return []
+    return [min(max(0, size * (i + 1) // (_WINDOWS + 1) - _WIN // 2), size - _WIN)
+            for i in range(_WINDOWS)]
+
+
+def _magic(first: bytes) -> str:
+    if first[:2] == b"\x1f\x8b":
+        return "gz"
+    if first[:4] == b"PK\x03\x04":
+        return "zip"
+    return "other"
+
+
+def file_fingerprint(path: Path, head_mb: int) -> dict | None:
+    """size, the first `head_mb` MB, the last 1 MB, 8 samples between, and
+    the container type of a file on disk — or None when the check is off."""
+    if not head_mb:
+        return None
+    size = path.stat().st_size
+    head = min(size, head_mb << 20)
+    tail = min(size, EARLY_DEDUP_TAIL)
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        first = f.read(4)
+        for off in _win_offsets(size):
+            f.seek(off)
+            h.update(f.read(_WIN))
+    return {"size": size, "head_bytes": head, "head_sha": _sha_range(path, 0, head),
+            "tail_bytes": tail, "tail_sha": _sha_range(path, size - tail, tail),
+            "win_sha": h.hexdigest(), "magic": _magic(first)}
+
+
+def file_identity(path: Path, head_mb: int, progress=None) -> dict:
+    """Everything the store remembers about a local file's content, from ONE
+    sequential read (review 11 item 3.2 — the inbox ingest read a file 2.5
+    times: the parse, then `file_fingerprint` and `hash_file` again):
+    {"sha", "gz_members", "fp"} where fp is exactly file_fingerprint(path,
+    head_mb) (None when head_mb is 0). Raises OSError. `progress(done,
+    total)` is called about once a second (cosmetic; never fails the read)."""
+    from .identity import ContentHasher
+    size = path.stat().st_size
+    next_note = time.monotonic() + 1.0
+    full = ContentHasher()
+    fp = None
+    if head_mb:
+        head_n = min(size, head_mb << 20)
+        tail_n = min(size, EARLY_DEDUP_TAIL)
+        tail_at = size - tail_n
+        wins = _win_offsets(size)
+        head_h, tail_h = hashlib.sha256(), hashlib.sha256()
+        win_buf = [bytearray() for _ in wins]
+        first = b""
+    pos = 0
+    with open(path, "rb") as f:
+        while True:
+            blk = f.read(1 << 20)
+            if not blk:
+                break
+            full.update(blk)
+            if head_mb:
+                end = pos + len(blk)
+                if pos < 4 and len(first) < 4:
+                    first += blk[: 4 - len(first)]
+                if pos < head_n:
+                    head_h.update(blk[: head_n - pos])
+                if end > tail_at:
+                    tail_h.update(blk[max(0, tail_at - pos):])
+                for i, off in enumerate(wins):
+                    lo, hi = max(off, pos), min(off + _WIN, end)
+                    if lo < hi:
+                        win_buf[i] += blk[lo - pos:hi - pos]
+            pos += len(blk)
+            if progress is not None and time.monotonic() >= next_note:
+                next_note = time.monotonic() + 1.0
+                try:
+                    progress(pos, size)
+                except Exception:  # noqa: BLE001 — a progress note never fails the read
+                    pass
+    if pos != size:
+        raise OSError(f"{path.name} changed size while it was read")
+    if head_mb:
+        wh = hashlib.sha256()
+        for b in win_buf:
+            wh.update(bytes(b))
+        fp = {"size": size, "head_bytes": head_n, "head_sha": head_h.hexdigest(),
+              "tail_bytes": tail_n, "tail_sha": tail_h.hexdigest(),
+              "win_sha": wh.hexdigest(), "magic": _magic(first)}
+    csha, csize = full.content_identity(path)
+    return {"sha": full.hexdigest(), "gz_members": full.gz_members(path), "fp": fp,
+            "csha": csha, "csize": csize}
+
+
+def _range_bytes(client, url: str, start: int, n: int, total: int) -> bytes | None:
+    """Exactly bytes [start, start+n) of a file of exactly `total` bytes, or
+    None when the server will not serve exactly that."""
+    with client.stream("GET", url, headers={"Range": f"bytes={start}-{start + n - 1}",
+                                             "Accept-Encoding": "identity"}) as resp:
+        if resp.status_code != 206:
+            return None
+        if resp.headers.get("Content-Range", "").strip() != \
+                f"bytes {start}-{start + n - 1}/{total}":
+            return None
+        buf = bytearray()
+        for chunk in resp.iter_raw():
+            buf += chunk
+            if len(buf) > n:
+                return None
+        return bytes(buf) if len(buf) == n else None
+
+
+def _remote_tail_and_windows(cfg: MrfxConfig, url: str, total: int, tail_n: int,
+                             ua: str | None = None, verify=None) -> tuple | None:
+    """(tail_sha, win_sha) of the REMOTE file, fetched by range requests with
+    the same identity and TLS context the download itself needed (a server
+    that only answers a browser refused a plain request — audit 8 F5)."""
+    try:
+        with _client(cfg, verify=verify, ua=ua) as client:
+            tail = _range_bytes(client, url, total - tail_n, tail_n, total)
+            if tail is None:
+                return None
+            h = hashlib.sha256()
+            for off in _win_offsets(total):
+                blk = _range_bytes(client, url, off, _WIN, total)
+                if blk is None:
+                    return None
+                h.update(blk)
+        return hashlib.sha256(tail).hexdigest(), h.hexdigest()
+    except (httpx.HTTPError, ValueError, OSError):
+        return None
+
+
+def _proves(mine: dict, c: dict, need_trailer: bool = True) -> bool:
+    """A complete match of a COMPRESSED file: same tail (its CRC of the whole
+    content) and the same 8 samples, the heads having already matched — and
+    only when the LOADED twin's tail was verified to vouch for its whole
+    content when it was ingested (trailer_proves = 1: a single-member gzip,
+    or a zip whose central directory lies in the tail). A multi-member gzip
+    carries a CRC per member, so its last member's trailer says nothing
+    about the middle (review 9 item 1.5: a file differing by one rate in
+    the middle was skipped as "identical")."""
+    return bool((c.get("trailer_proves") == 1 or not need_trailer)
+                and mine.get("magic") in _PROVABLE and c.get("magic") in _PROVABLE
+                and mine.get("tail_sha") and c.get("tail_sha") and c.get("win_sha")
+                and int(c.get("tail_bytes") or 0) == int(mine.get("tail_bytes") or -1)
+                and c["tail_sha"] == mine["tail_sha"] and c["win_sha"] == mine.get("win_sha"))
+
+
+def _verdict(mine: dict, hits: list[dict]):
+    """("skip", filename) / ("wait", url_id, filename) / None."""
+    if mine.get("magic") not in _PROVABLE or not mine.get("tail_sha"):
+        return None
+    for c in hits:
+        if c["kind"] == "loaded" and _proves(mine, c):
+            return ("skip", c["filename"])
+    for c in hits:
+        # an earlier copy still downloading may not know its tail yet: a
+        # matching beginning is enough to WAIT (never to skip)
+        # (waiting is never a skip: the copy is checked again against the
+        # LOADED twin, whose tail proof is then required)
+        if c["kind"] == "inflight" and (not c.get("tail_sha")
+                                        or _proves(mine, c, need_trailer=False)):
+            return ("wait", int(c["url_id"]), c["filename"])
+    return None
+
+
+def early_duplicate_check(cfg: MrfxConfig, store: Store, own_filename: str,
+                          own_url_id: int | None = None):
+    """The hook download() calls once `early_dedup_mb` MB have arrived.
+
+    Answers ("skip", filename) — a LOADED file is proven identical (same
+    size, beginning, end and 8 samples, and compressed, so the end carries a
+    CRC of the whole content); ("wait", url_id, filename) — an EARLIER queue
+    row with the same beginning is still in flight: step aside until it is
+    loaded instead of downloading the same bytes twice; an int N — an older
+    fingerprint was taken over a longer head, look again at N bytes; None —
+    download as usual. This download's own fingerprint is kept (in flight)
+    so later copies can see it; the remote end and samples are fetched only
+    when a same-size candidate's beginning matches."""
+    def check(part: Path, total: int, url: str, ua: str | None = None, verify=None):
+        try:
+            got = part.stat().st_size
+            hb = min(cfg.early_dedup_mb << 20, got)
+            if not hb:
+                return None
+            with open(part, "rb") as f:
+                mine = {"size": total, "head_bytes": hb, "magic": _magic(f.read(4))}
+            mine["head_sha"] = _sha_range(part, 0, hb)
+            prev = store.inflight_fingerprint(own_url_id) if own_url_id is not None else None
+            if (prev and prev["size"] == total and prev["head_bytes"] == hb
+                    and prev["head_sha"] == mine["head_sha"] and prev["tail_sha"]):
+                mine.update(tail_bytes=prev["tail_bytes"], tail_sha=prev["tail_sha"],
+                            win_sha=prev["win_sha"])
+            heads = {hb: mine["head_sha"]}
+            hits, later = [], []
+            for c in store.fingerprint_candidates(total, own_url_id, own_filename):
+                chb = int(c["head_bytes"] or 0)
+                if not chb:
+                    continue
+                if chb > got:
+                    later.append(chb)      # taken over a longer head: look again then
+                    continue
+                if chb not in heads:
+                    heads[chb] = _sha_range(part, 0, chb)
+                if heads[chb] == c["head_sha"] and _same_name_month(own_filename, c.get("filename")):
+                    hits.append(c)
+            if hits and mine["magic"] in _PROVABLE and not mine.get("tail_sha"):
+                tb = min(total, EARLY_DEDUP_TAIL)
+                rem = _remote_tail_and_windows(cfg, url, total, tb, ua, verify)
+                if rem:
+                    mine.update(tail_bytes=tb, tail_sha=rem[0], win_sha=rem[1])
+            if own_url_id is not None:
+                store.record_inflight(own_url_id, own_filename, mine, wait=1.0)
+            v = _verdict(mine, hits)
+            if v:
+                return v
+            if later:
+                return min(later)
+        except Exception:  # noqa: BLE001 — an optimisation: never fails a download
+            log.debug("early duplicate check skipped", exc_info=True)
+        return None
+    def has_twin(total: int) -> bool:
+        """Could a file of exactly `total` bytes be a copy of one loaded or
+        in flight? (Cheap: one indexed lookup.) A segmented download asks
+        first and, if so, downloads on one connection so the early check
+        runs — it skipped it entirely (review 9 item 1.5)."""
+        try:
+            return bool(store.fingerprint_candidates(total, own_url_id, own_filename))
+        except Exception:  # noqa: BLE001 — a cosmetic probe; segment as usual
+            return False
+
+    check.has_twin = has_twin
+    return check
+
+
+def _same_name_month(a: str | None, b: str | None) -> bool:
+    """Could these two names be copies? Not when both carry a date and the
+    months differ: the bytes may be equal, but the month a file name gives is
+    the month its rows are filed under when the header has none (review 14
+    Group 3) — the download goes on and the content claim decides by month."""
+    from .parser import month_in
+    ma, mb = month_in(a or ""), month_in(b or "")
+    return not (ma and mb and ma != mb)
+
+
+def _local_duplicate_verdict(cfg: MrfxConfig, store: Store, url_id: int, dest: Path):
+    """Before reconnecting a row whose .part already holds its beginning and
+    whose fingerprint (end + samples) was fetched earlier: decide from local
+    data alone — no request to the payer, no expired-link 403 (audit 8 F1,
+    F6)."""
+    if not cfg.early_dedup_mb:
+        return None
+    try:
+        part = dest.with_suffix(dest.suffix + ".part")
+        own = store.inflight_fingerprint(url_id)
+        if not (own and own["tail_sha"] and part.exists()
+                and part.stat().st_size >= int(own["head_bytes"] or 0) > 0
+                and _sha_range(part, 0, int(own["head_bytes"])) == own["head_sha"]):
+            return None
+        hits = [c for c in store.fingerprint_candidates(own["size"], url_id, dest.name)
+                if int(c["head_bytes"] or 0) == int(own["head_bytes"])
+                and c["head_sha"] == own["head_sha"]
+                and _same_name_month(dest.name, c.get("filename"))]
+        return _verdict(own, hits)
+    except Exception:  # noqa: BLE001
+        log.debug("local duplicate check skipped", exc_info=True)
+        return None
+
+
+def _twin_label(store: Store, filename: str, url_id: int | None = None) -> str:
+    u = store.url_of(url_id) if url_id is not None else store.url_for_filename(filename)
+    return (u or filename).split("?", 1)[0]
+
+
+def _apply_verdict(cfg: MrfxConfig, store: Store, url_id: int, url: str, dest: Path,
+                   verdict: tuple, got: int | None = None) -> bool:
+    """Act on a ("skip", …) or ("wait", …) verdict. Always returns False."""
+    part = dest.with_suffix(dest.suffix + ".part")
+    if verdict[0] == "skip":
+        twin = verdict[1]
+        if got is None:
+            got = part.stat().st_size if part.exists() else 0
+        part.unlink(missing_ok=True)
+        Path(str(part) + ".val").unlink(missing_ok=True)
+        store.update_url(url_id, status="skipped", kind="duplicate", duplicate_of=twin, error=(
+            f"checksum-equal to {_twin_label(store, twin)}, already loaded — same size, same "
+            f"first {cfg.early_dedup_mb} MB, same last 1 MB and 8 samples between, and "
+            "compressed (its end carries a checksum of the whole file) — skipped after "
+            f"{got / 1e6:,.1f} MB instead of downloading the whole file (payers host "
+            "copies of each other's files)"))
+        log.info("%s — copy of %s (early check); skipped after %.0f MB", url, twin, got / 1e6)
+        return False
+    _kind, twin_id, twin_file = verdict
+    mins = cfg.download_park_minutes or 10.0
+    store.park_waiting(url_id, twin_id, mins, (
+        f"waiting: an identical-looking copy is already downloading "
+        f"({_twin_label(store, twin_file, twin_id)}). This one waits instead of downloading "
+        "the same bytes twice — it is skipped if they match, or carries on by itself "
+        "if they don't (no data is lost either way)"))
+    log.info("%s — waits for queue row %s (same beginning, in flight)", url, twin_id)
+    return False
+
+
+def _kept_meta(dest: Path, url: str) -> dict | None:
+    """The sidecar of a kept download, TRUSTED only when it describes the
+    file now on disk (its size and mtime; a 0.7.4 sidecar, which recorded
+    neither, is re-checked). A stale one recorded a wrong sha and a true copy of the
+    file then loaded twice (review 11 item 1.6). A complete download with no
+    trustworthy sidecar (a kill between the rename and the sidecar write,
+    item 3.9) is named from its own bytes — one local read, no request, so
+    an expired signed link never matters. None when there is no download."""
+    meta_p = _meta_path(dest)
+    try:
+        st = dest.stat()
+    except OSError:
+        return None
+    meta = None
+    try:
+        meta = json.loads(meta_p.read_text())
+    except (OSError, ValueError):
+        meta = None
+    if isinstance(meta, dict) and meta.get("sha") and meta.get("final_url") \
+            and meta.get("size") is not None and meta["size"] == st.st_size \
+            and meta.get("mtime_ns") in (None, st.st_mtime_ns):
+        return meta
+    log.info("%s: its kept download has no trustworthy record — naming it from its own "
+             "bytes (no new download)", dest.name)
+    h = ContentHasher()
+    with open(dest, "rb") as f:
+        for blk in iter(lambda: f.read(1 << 20), b""):
+            h.update(blk)
+    old = meta if isinstance(meta, dict) else {}
+    _remember_identity(dest, h, {"validator": old.get("validator"),
+                                 "total": old.get("server_size")})
+    final_url = old.get("final_url") or url
+    _write_meta(dest, h.hexdigest(), final_url)
+    return {"sha": h.hexdigest(), "final_url": final_url,
+            "validator": old.get("validator"), "server_size": old.get("server_size")}
+
+
+def _server_now_once(cfg: MrfxConfig, url: str, ua: str | None, verify,
+                     timeout: float | None) -> dict | int | None:
+    """One ranged GET of byte 0: the dict, an HTTP status the caller may act
+    on (403), or None."""
+    with _client(cfg, verify=verify, ua=ua) as client:
+        if timeout:
+            client.timeout = httpx.Timeout(timeout, connect=min(30.0, timeout))
+        with client.stream("GET", url, headers={"Range": "bytes=0-0"}) as resp:
+            if resp.status_code == 403:
+                return 403
+            if resp.status_code not in (200, 206):
+                return None
+            etag = (resp.headers.get("ETag") or "").strip()
+            strong = etag if etag and not etag.upper().startswith("W/") else ""
+            validator = strong or (resp.headers.get("Last-Modified") or "").strip()
+            total = None
+            if resp.status_code == 206:
+                tail = resp.headers.get("Content-Range", "").rsplit("/", 1)[-1].strip()
+                total = int(tail) if tail.isdigit() else None
+            elif (resp.headers.get("Content-Encoding") or "").strip().lower() in (
+                    "", "identity", "gzip", "x-gzip"):
+                total = int(resp.headers.get("Content-Length") or 0) or None
+            return {"validator": validator or None, "total": total}
+
+
+def _server_now(cfg: MrfxConfig, url: str) -> dict | None:
+    """What the server says about the file NOW, from ONE tiny request (a
+    ranged GET of byte 0 — presigned links often refuse HEAD): {"validator",
+    "total"}; None when it can't be asked (refused, expired, offline).
+    With the two levers a download has (review 12 item 1.4): a 403 is asked
+    again as a browser, an incomplete certificate chain is repaired like a
+    browser does (never weakened). A short timeout (RECHECK_TIMEOUT_S): one
+    byte is asked for, so a host that does not answer in that time is "can't
+    be told", not a slot held for minutes."""
+    ua = verify = None
+    timeout = RECHECK_TIMEOUT_S
+    for _ in range(3):
+        try:
+            got = _server_now_once(cfg, url, ua, verify, timeout)
+        except (httpx.TransportError, httpx.TimeoutException) as e:
+            if "CERTIFICATE_VERIFY_FAILED" in str(e) and verify is None:
+                verify = _repair_incomplete_chain(url)
+                if verify is not None:
+                    continue
+            return None
+        except (httpx.HTTPError, ValueError, OSError):
+            return None
+        if got == 403 and ua is None:
+            ua = BROWSER_UA
+            continue
+        return got if isinstance(got, dict) else None
+    return None
+
+
+def _utcnow_date() -> str:
+    import datetime as _dt
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
+
+
+def _republished(then: dict, now: dict | None) -> bool | None:
+    """True: the server now serves a different file; False: the same one;
+    None: it can't be told. EVERY signal the probe gives is compared and any
+    disagreement is a republication (review 13 item 5.2.2: new bytes AND a new
+    size behind an UNCHANGED ETag were "unchanged" — the validator answered
+    first and the size was never looked at)."""
+    if not now:
+        return None
+    tv, nv = then.get("validator"), now.get("validator")
+    ts, ns = then.get("server_size") or then.get("total"), now.get("total")
+    compared = False
+    if tv and nv:
+        if tv != nv:
+            return True
+        compared = True
+    if ts and ns:
+        if int(ts) != int(ns):
+            return True
+        compared = True
+    return False if compared else None
+
+
+def _unchanged_by(then: dict, now: dict | None) -> str:
+    """Which evidence said "unchanged", in words (the row says it)."""
+    now = now or {}
+    v = bool(then.get("validator") and now.get("validator"))
+    s = bool((then.get("server_size") or then.get("total")) and now.get("total"))
+    if v and s:
+        return "the same version tag and the same size"
+    if v:
+        return "the same version tag (the server did not state a size)"
+    return ("the same size only — the server sends no version tag, so a change "
+            "inside the file at the same size cannot be seen this way; paste the "
+            "link again to force a fresh copy")
+
+
+def _record_download_fingerprint(cfg: MrfxConfig, store: Store, dest: Path,
+                                 url_id: int) -> None:
+    """The finished download's full fingerprint, still IN FLIGHT (it is not
+    loaded yet): a later copy waits for it; copies already waiting on it that
+    turn out different are let go now. Cosmetic tier."""
+    if not cfg.early_dedup_mb:
+        return
+    try:
+        fp = file_fingerprint(dest, cfg.early_dedup_mb)
+        if fp is not None:
+            store.record_inflight(url_id, dest.name, fp)
+            store.release_mismatched_waiters(url_id)
+            # the ingest records this same fingerprint when the file is loaded:
+            # carry it instead of reading the head again (review 11 item 3.2)
+            ident = DOWNLOAD_IDENTITY.get(str(dest))
+            if ident is not None:
+                ident["fp"] = fp
+    except Exception:  # noqa: BLE001
+        log.debug("download fingerprint not recorded", exc_info=True)
+
+
+def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict, lane_max: int = 0) -> bool:
     """Download stage only (used by the prefetch thread): stream the file to
     disk, record its hash, and mark the row 'fetched' for the processor.
     Returns False on failure (row marked failed, worker keeps going)."""
     url_id, url = rec["id"], rec["url"]
     dest = cfg.downloads_dir / filename_for(url)
     keep_p = _meta_path(dest)
-    if dest.exists() and keep_p.exists():
+    reval = int(rec.get("revalidate") or 0)
+    if reval and rec.get("kind") not in ("toc", "page"):
+        # (an index is always fetched again and re-expanded — its loaded
+        # children are asked about there, _refresh_loaded_children)
+        # a LOADED link put back in the queue (the monthly refresh, its
+        # provider list arriving): ask the server once whether it still
+        # serves the same file before reusing a kept copy or skipping —
+        # "NEVER re-download here" reused May's bytes after the payer
+        # published June under the same address (review 11 item 1.7)
+        then = {"validator": rec.get("server_validator"), "server_size": rec.get("server_size")}
+        if dest.exists():
+            km = _kept_meta(dest, url) or {}
+            then = {"validator": km.get("validator") or then["validator"],
+                    "server_size": km.get("server_size") or then["server_size"]}
+        now_srv = _server_now(cfg, url)
+        changed = _republished(then, now_srv)
+        store.update_url(url_id, revalidate=0)
+        if changed:
+            log.info("url %s: the payer republished this file — downloading the new "
+                     "version", url)
+            unlink_with_retry(dest)
+            unlink_with_retry(keep_p)
+        elif changed is False and reval == 1 and \
+                (store.file_status(dest.name) or {}).get("status") == "done":
+            store.update_url(url_id, status="done", error=(
+                f"checked {_utcnow_date()}: unchanged by {_unchanged_by(then, now_srv)} — "
+                "already loaded, nothing downloaded"))
+            log.info("url %s: unchanged since it was loaded", url)
+            return False
+    if dest.exists():
         # complete bytes already on disk (a kept duplicate download whose
         # twin failed, or a prior prefetch). NEVER re-download here: the
         # signed URL may have expired, and a terminal 403 would delete the
@@ -1500,19 +2788,48 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict) -> bool:
             log.info("url %s: stopped by user before reusing the kept download", url)
             return False
         try:
-            meta = json.loads(keep_p.read_text())
-            store.update_url(url_id, content_sha=meta["sha"], status="fetched")
+            meta = _kept_meta(dest, url)
+        except OSError:
+            meta = None
+        if meta:
+            # the row shows the file it holds: a reused download (its sidecar
+            # rebuilt from the bytes when it was missing) read "0 of 0 bytes"
+            # (review 12 item 4.1f)
+            try:
+                size = dest.stat().st_size
+            except OSError:
+                size = 0
+            store.update_url(url_id, content_sha=meta["sha"], status="fetched",
+                             server_validator=meta.get("validator"),
+                             server_size=meta.get("server_size"),
+                             bytes_done=size, bytes_total=size, progress=100.0)
             return True
-        except (ValueError, KeyError, OSError):
-            keep_p.unlink(missing_ok=True)  # corrupt sidecar — fresh download below
+    local = _local_duplicate_verdict(cfg, store, url_id, dest)
+    if local:
+        return _apply_verdict(cfg, store, url_id, url, dest, local)
     try:
       try:
         content_sha, final_url = download(
             cfg, url, dest,
             progress_cb=lambda d, t: store.url_progress(url_id, d, t),
             max_bytes=_size_limit_for(cfg, rec),
-            cancel_check=lambda: store.is_download_canceled(url_id))
+            cancel_check=lambda: store.is_download_canceled(url_id),
+            early_check=(early_duplicate_check(cfg, store, dest.name, url_id)
+                         if cfg.early_dedup_mb else None),
+            lane_max=lane_max)
       except DownloadError as e:
+        if e.verdict:
+            return _apply_verdict(cfg, store, url_id, url, dest, e.verdict,
+                                  getattr(e, "dup_bytes", None))
+        if e.handoff:
+            # a small-file slot met a big (or unsized) file: straight back in
+            # line for a big-file slot — not an error, not a retry
+            fields = {"status": "queued", "error": None, "big_lane": True}
+            if e.total:
+                fields["bytes_total"] = int(e.total)
+            store.update_url(url_id, **fields)
+            log.info("url %s: %s", url, e)
+            return False
         if e.canceled or store.is_download_canceled(url_id):
             # the user pressed "stop downloads": the row was already flipped to
             # 'skipped' by cancel_all_downloading, and the .part is kept for a
@@ -1525,7 +2842,6 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict) -> bool:
             return False
         # over the size limit is NOT a failure — it's "too big, needs your OK"
         # (distinct amber state so it never buries a real error in the count)
-        log.warning("url %s download stopped: %s", url, e)
         if "free disk space" in str(e):
             # a FULL DISK is one condition, not a per-row failure: failing this
             # row and instantly claiming the next converted every remaining
@@ -1547,10 +2863,58 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict) -> bool:
             # days"). Requeued, it resumes from its .part on the next pass.
             # It cannot spin: a file that STOPS progressing trips the stall
             # deadline instead, which is a real failure and ends it.
-            store.update_url(url_id, status="queued", error=str(e))
+            # behind the files waiting (the fair tier): requeued with no bump,
+            # the claim order handed this slot straight back to it — "so other
+            # files get a turn" was false (review 11 item 2.11)
+            store.update_url(url_id, status="queued", error=str(e),
+                             retries=int(rec.get("retries") or 0) + 1)
             log.info("url %s: %s", url, e)
             return False
-        store.update_url(url_id, status="oversize" if e.oversize else "failed", error=str(e))
+        if e.parked:
+            # no data for a few minutes: step aside for the next file and
+            # rejoin the line soon (wake_parked_urls: when the cool-down ends,
+            # or at once when nothing else is waiting). A park after real
+            # progress starts the count again; only parks in a ROW with no
+            # progress at all count toward the long pause below.
+            n = 1 if e.progressed else int(rec.get("park_count") or 0) + 1
+            if n <= cfg.download_park_limit:
+                mins = cfg.download_park_minutes
+                store.park_url(url_id, mins, n, (
+                    f"parked: {e}. Other files download meanwhile; this one goes "
+                    f"back in line in {mins:g} min (sooner if nothing else is "
+                    f"waiting) and resumes where it stopped (park {n} of "
+                    f"{cfg.download_park_limit})."))
+                log.info("url %s: parked (%d of %d) — %s", url, n,
+                         cfg.download_park_limit, e)
+                return False
+        if (e.retryable and not e.oversize and cfg.download_pause_hours > 0
+                and int(rec.get("auto_resumes") or 0) < cfg.download_auto_resumes):
+            # A STALLED or flaky server: free the slot for the next file now
+            # and come back to this one by itself later — the bytes so far are
+            # kept, so it resumes where it stopped. Failing it instead needed
+            # a human to notice and press retry.
+            part = dest.with_suffix(dest.suffix + ".part")
+            got = part.stat().st_size if part.exists() else 0
+            n = int(rec.get("auto_resumes") or 0) + 1
+            why = ("the payer's server stopped sending data"
+                   if e.parked or "no download progress" in str(e) else
+                   f"the download kept failing ({str(e)[:120]})")
+            hours = cfg.download_pause_hours
+            when = f"{hours:g} hour{'s' if hours != 1 else ''}"
+            store.pause_url(url_id, hours, (
+                f"paused: {why}. "
+                + (f"The {got / 1e6:.0f} MB downloaded so far are kept. " if got else "")
+                + f"It tries again by itself in {when} (pause {n} of "
+                f"{cfg.download_auto_resumes}); other files keep downloading meanwhile."))
+            log.info("url %s: paused for %s — %s", url, when, why)
+            return False
+        # the handled cases above (disk full, set aside, parked, paused) said
+        # their piece at INFO; only a real failure is a WARNING (round-7 audit:
+        # every routine park logged two warnings)
+        log.warning("url %s download stopped: %s", url, e)
+        store.update_url(url_id, status="oversize" if e.oversize else "failed",
+                         error=_failure_message(store, rec, e),
+                         **({"bytes_total": int(e.total)} if e.oversize and e.total else {}))
         # duplicates may have deferred to this row in an earlier life (it
         # ingested once, failed, was retried, and now its signed URL is dead):
         # they hold the kept bytes and must get their promised auto-retry
@@ -1560,10 +2924,14 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict) -> bool:
             # a stale complete download from an earlier run must not sit on
             # disk forever once its URL is TERMINALLY dead — but a transient
             # failure (network blip after retries) must not destroy it
-            dest.unlink(missing_ok=True)
-            _meta_path(dest).unlink(missing_ok=True)
+            unlink_with_retry(dest)
+            unlink_with_retry(_meta_path(dest))
         return False
       _write_meta(dest, content_sha, final_url)
+      srv = DOWNLOAD_IDENTITY.get(str(dest)) or {}
+      if srv.get("validator") or srv.get("server_size"):
+          store.update_url(url_id, server_validator=srv.get("validator"),
+                           server_size=srv.get("server_size"))
       if store.is_download_canceled(url_id):
         # the user hit "stop" in the instant AFTER download()'s last cancel
         # poll but before the stream ended, so it returned success: the row is
@@ -1571,7 +2939,8 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict) -> bool:
         # the stop instead of overwriting it with 'fetched'.
         log.info("url %s: finished just as the user stopped it — kept for retry", url)
         return False
-      store.update_url(url_id, content_sha=content_sha, status="fetched")
+      store.update_url(url_id, content_sha=content_sha, status="fetched", park_count=0)
+      _record_download_fingerprint(cfg, store, dest, url_id)
       return True
     finally:
       # a one-shot flag: once download() has returned (any outcome) it has done
@@ -1593,11 +2962,122 @@ def _mentions_allowed_amounts(dest: Path) -> bool:
         return False
 
 
-def _enqueue_children(store: Store, urls: list[str], parent_id: int) -> int:
+# The whole re-check of an index's loaded children is bounded: one request
+# per child, 8 at a time, each with a short timeout, and no new request after
+# RECHECK_BUDGET_S. 1,000 children against a host that black-holes
+# connections held a processor thread ~1 h (connect=30 s x 1,000 / 8 —
+# review 12 item 1.4). A child not asked in time is left as it is (loaded,
+# not re-queued) and asked again at the next refresh.
+RECHECK_BUDGET_S = 300.0
+RECHECK_TIMEOUT_S = 20.0
+
+
+def _refresh_loaded_children(cfg: MrfxConfig, store: Store, urls: list[str],
+                             parent_reval: int, parent_id: int | None = None) -> int | None:
+    """An index expanded AGAIN (the monthly refresh of a static index, a
+    retried capped index): its children that are already LOADED were left
+    alone whatever the server now held, so a payer republishing a file in
+    place under a stable address never loaded the new month (review 11 item
+    1.7 / seam M-4). Ask the server once per loaded child; a changed one is
+    queued again. A child with nothing recorded to compare (loaded by an
+    older version) is compared by the size its load recorded; only a child
+    with no size either is downloaded again, and only on the monthly refresh.
+
+    Every probe and re-download uses the link the index handed over NOW
+    (review 12 item 1.4: a signed child's stored link is dead by next month —
+    the probe met a 403 and a republished June never loaded). Nothing is
+    queued when the index is no longer 'expanding' (the user cleared it while
+    the children were being asked about — review 12 item 1.5): returns None."""
+    current = {dedup_key(u): u for u in urls}
+    rows = store.done_rate_rows(list(current))
+    if not rows:
+        return 0
+    for r in rows:
+        r["url"] = current.get(r["dedup_key"], r["url"])
+    deadline = time.monotonic() + RECHECK_BUDGET_S
+
+    def ask(r):
+        if time.monotonic() > deadline:
+            return None
+        if parent_id is not None and store.url_status(parent_id) != "expanding":
+            return None      # cleared meanwhile: stop asking
+        return _server_now(cfg, r["url"])
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=8, thread_name_prefix="mrfx-recheck") as ex:
+        nows = list(ex.map(ask, rows))
+    skipped_late = sum(1 for n in nows if n is None) if time.monotonic() > deadline else 0
+    if skipped_late:
+        log.info("index re-check: %d loaded file(s) not asked within %d s — they are asked "
+                 "again at the next refresh", skipped_late, int(RECHECK_BUDGET_S))
+    changed, unknown, notes = [], [], []
+    for r, now in zip(rows, nows):
+        then_size = r["server_size"] or r.get("loaded_size")
+        verdict = _republished({"validator": r["server_validator"],
+                                "server_size": then_size}, now)
+        # the probe answered but said NOTHING it could be compared on (no
+        # validator, no size — a chunked 200 to the 1-byte probe): a size
+        # recorded at load cannot be compared with a size the server did not
+        # state, so this is "can't be told", not "unchanged" (review 13 item
+        # 1.4: a 0.7.4-loaded child behind such a server stayed at its old
+        # month with no note; 0.7.5 re-downloaded it)
+        told_nothing = now is not None and not now.get("validator") and not now.get("total")
+        then_d = {"validator": r["server_validator"], "server_size": then_size}
+        if verdict:
+            changed.append(r["id"])
+        elif verdict is None and parent_reval == 1 and now is not None \
+                and (told_nothing or (not r["server_validator"] and not then_size)):
+            unknown.append(r["id"])
+        elif verdict is False:
+            # every probed child says when it was last checked and on what
+            # evidence (review 13 item 5.2.2 / P3: nothing was written)
+            notes.append((r["id"], f"checked {_utcnow_date()}: unchanged by "
+                                   f"{_unchanged_by(then_d, now)}"))
+        else:
+            notes.append((r["id"], f"checked {_utcnow_date()}: could not tell whether the "
+                                   "payer changed this file (its server did not answer the "
+                                   "check) — asked again at the next refresh; paste the "
+                                   "link again to force a fresh copy"))
+    if parent_id is not None and store.url_status(parent_id) != "expanding":
+        return None
+    for uid, note in notes:
+        try:
+            store.update_url(uid, only_if_status="done", error=note)
+        except Exception:  # noqa: BLE001 — a note never stops the re-check
+            pass
+    for r in rows:
+        if r["id"] in changed or r["id"] in unknown:
+            # a kept raw copy is the OLD version: never reuse it
+            kept = cfg.downloads_dir / filename_for(r["url"])
+            unlink_with_retry(kept)
+            unlink_with_retry(_meta_path(kept))
+    urls_by_id = {r["id"]: r["url"] for r in rows}
+    n = store.requeue_republished(
+        changed, 0, "the payer republished this file under the same address — "
+                    "downloading the new version", parent_id=parent_id, urls=urls_by_id)
+    if n is None:
+        return None
+    m = store.requeue_republished(
+        unknown, 0, "the monthly refresh downloads this file again: the payer's "
+                    "server did not say whether it changed (no size, no version tag)",
+        parent_id=parent_id, urls=urls_by_id)
+    if m is None:
+        return None
+    n += m
+    if n:
+        log.info("index re-check: %d loaded file(s) changed on the server — queued again", n)
+    return n
+
+
+def _enqueue_children(store: Store, urls: list[str], parent_id: int,
+                      cfg: MrfxConfig | None = None, only_if_expanding: bool = False) -> int | None:
     """Queue discovered child URLs under their parent row; returns how many
-    were newly queued. One lock/connection for the whole batch — thousands of
+    were newly queued (None: the parent was cleared meanwhile — nothing
+    queued). One lock/connection for the whole batch — thousands of
     children from one index must not thrash the store."""
-    return store.enqueue_urls([(u, dedup_key(u)) for u in urls], parent_id=parent_id)
+    return store.enqueue_urls(
+        [(u, dedup_key(u)) for u in urls], parent_id=parent_id,
+        oversize_limit=int(cfg.confirm_over_gb * 1e9) if cfg is not None else 0,
+        only_if_expanding=only_if_expanding)
 
 
 def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=None,
@@ -1611,7 +3091,7 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
     dest = cfg.downloads_dir / filename_for(url)
     meta_p = _meta_path(dest)
     meta = None
-    if dest.exists() and meta_p.exists():
+    if dest.exists():
         # prefetched by the downloader thread — pick up where it left off.
         # The sidecar is NOT unlinked here: it must outlive the whole ingest
         # (hours on a national file), because a kill mid-ingest re-queues the
@@ -1620,20 +3100,31 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
         # DELETE the only complete copy. Terminal states clean it up
         # (_cleanup_raw on success, the failure/skip paths below).
         try:
-            meta = json.loads(meta_p.read_text())
-            content_sha, final_url = meta["sha"], meta["final_url"]
-        except (ValueError, KeyError, OSError):
-            meta = None  # corrupt sidecar: fall through to a fresh download
-            meta_p.unlink(missing_ok=True)
+            meta = _kept_meta(dest, url)   # checked against the file (review 11 1.6)
+            if meta:
+                content_sha, final_url = meta["sha"], meta["final_url"]
+        except (OSError, KeyError):
+            meta = None  # unreadable: fall through to a fresh download
     if meta is None:
+        local = _local_duplicate_verdict(cfg, store, url_id, dest)
+        if local:
+            return _apply_verdict(cfg, store, url_id, url, dest, local)
+        # the download vanished after it was fetched: downloading it again is
+        # a DOWNLOAD — shown as one and stoppable by "stop downloads" (it ran
+        # hidden under 'ingesting', review 11 item 4.2)
+        store.update_url(url_id, status="downloading")
         try:
-            # (row already marked 'downloading' by next_queued_url when claimed)
             content_sha, final_url = download(
                 cfg, url, dest,
                 progress_cb=lambda d, t: store.url_progress(url_id, d, t),
                 max_bytes=_size_limit_for(cfg, rec),
-                cancel_check=lambda: store.is_download_canceled(url_id))
+                cancel_check=lambda: store.is_download_canceled(url_id),
+                early_check=(early_duplicate_check(cfg, store, dest.name, url_id)
+                             if cfg.early_dedup_mb else None))
         except DownloadError as e:
+            if e.verdict:
+                return _apply_verdict(cfg, store, url_id, url, dest, e.verdict,
+                                      getattr(e, "dup_bytes", None))
             if e.canceled or store.is_download_canceled(url_id):
                 # user stopped it — row already 'skipped', .part kept. The
                 # second check catches a stop that landed during a backoff
@@ -1647,19 +3138,21 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
                 return False
             log.warning("url %s download stopped: %s", url, e)
             store.update_url(url_id, status="oversize" if e.oversize else "failed",
-                             error=str(e))
+                             error=_failure_message(store, rec, e),
+                             **({"bytes_total": int(e.total)} if e.oversize and e.total else {}))
             _maybe_queue_prev_month(store, rec, str(e))
             # a failed re-download may strand twins that deferred to this row
             # on a PREVIOUS attempt (its sha is still on the record)
             _revive_twins(store, rec.get("content_sha") or "", url_id)
             if not e.retryable:
-                dest.unlink(missing_ok=True)
-                meta_p.unlink(missing_ok=True)
+                unlink_with_retry(dest)
+                unlink_with_retry(meta_p)
             return False
         store.update_url(url_id, content_sha=content_sha)
         # sidecar written on THIS path too, so a kill mid-ingest resumes from
         # the kept download instead of re-downloading (see the note above)
         _write_meta(dest, content_sha, final_url)
+        _record_download_fingerprint(cfg, store, dest, url_id)
 
     # download stage complete — retire the one-shot cancel flag (mirrors
     # fetch_url_record's finally). If the user's stop landed in the success-race
@@ -1680,20 +3173,42 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
     twin = store.find_url_with_same_content(content_sha, exclude_id=url_id)
     if twin:
         twin_url = twin[0]
+        # caught only after the FULL download (the original was loaded before
+        # fingerprints existed): fingerprint the original from these identical
+        # bytes, so every later copy of it is caught after its first MB
+        twin_file = store.done_filename_with_content(content_sha, url_id)
+        if twin_file and cfg.early_dedup_mb:
+            try:
+                fp = file_fingerprint(dest, cfg.early_dedup_mb)
+                if fp is not None:
+                    store.record_fingerprint(twin_file, fp)
+                    # the same bytes: the same identity and trailer proof
+                    # (the downloader computed both while writing `dest`)
+                    ident = DOWNLOAD_IDENTITY.get(str(dest))
+                    if ident and ident.get("sha") == content_sha:
+                        store.record_identity(twin_file, fp["size"], None, content_sha,
+                                              ident.get("trailer_proves"))
+            except Exception:  # noqa: BLE001 — cosmetic tier
+                log.debug("fingerprint backfill skipped", exc_info=True)
         store.update_url(url_id, status="skipped", kind="duplicate",
                          error="identical to a file already ingested (payers host copies "
                                f"of each other's files) — skipped as duplicate of {twin_url.split('?')[0]}")
-        dest.unlink(missing_ok=True)
-        meta_p.unlink(missing_ok=True)
+        unlink_with_retry(dest)
+        unlink_with_retry(meta_p)
         log.info("%s — byte-identical to %s; skipped", url, twin_url.split("?")[0])
         return False
 
     try:
         pf = preflight(dest, cfg, store)
     except Exception as e:  # noqa: BLE001 — classification must never crash the worker
-        store.update_url(url_id, status="failed", error=f"could not read file: {e}")
-        dest.unlink(missing_ok=True)
-        meta_p.unlink(missing_ok=True)
+        # in words, like the inbox (review 14 Group 3: a damaged gz via a
+        # link still read "could not read file: CRC check failed 0x…")
+        from .ingest import plain_parse_error
+        store.update_url(url_id, status="failed", error=plain_parse_error(e)
+                         if plain_parse_error(e) != f"{type(e).__name__}: {e}"
+                         else f"could not read file: {e}")
+        unlink_with_retry(dest)
+        unlink_with_retry(meta_p)
         # twins that deferred to this row were promised an automatic retry if
         # it failed — honor that on THIS failure path too, or their content is
         # stranded 'skipped' forever
@@ -1706,17 +3221,63 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
         try:
             # relative locations resolve against where the index actually came
             # from (post-redirect), not the possibly-redirected pasted URL
+            excluded: dict = {}
             if pf.file_type == "toc":
                 child_urls, truncated, plan_rows = expand_toc_with_plans(
                     dest, cfg.max_toc_files, base_url=final_url)
             else:
                 child_urls, truncated = expand_blobs_listing(
-                    dest, cfg.max_toc_files, base_url=final_url)
+                    dest, cfg.max_toc_files, base_url=final_url, excluded_out=excluded)
         except Exception as e:  # noqa: BLE001
             store.update_url(url_id, status="failed", kind="toc", error=f"index parse failed: {e}")
-            dest.unlink(missing_ok=True)
+            unlink_with_retry(dest)
+            unlink_with_retry(_meta_path(dest))  # its sidecar too (review 11 2.15)
             return False
-        added = _enqueue_children(store, child_urls, url_id)
+        # review 14 item 2.8 (decided): the MONTHLY RE-CHECK of a loaded index
+        # (monthly_recheck, on by default; the tick re-queues the index with
+        # revalidate=1) only PROBES the files already loaded. A file the index
+        # lists for the first time — next month's, usually tens of GB — is
+        # counted and named on the index row, never downloaded behind the
+        # user's back. Pasting the index again, or monthly_refresh: true,
+        # loads them (round 13's decision, which the code did not keep).
+        new_unloaded = 0
+        if int(rec.get("revalidate") or 0) == 1 and not getattr(cfg, "monthly_refresh", False):
+            known = store.known_dedup_keys([dedup_key(u) for u in child_urls])
+            new_unloaded = sum(1 for u in child_urls if dedup_key(u) not in known)
+            added = 0 if store.url_status(url_id) == "expanding" else None
+        else:
+            added = _enqueue_children(store, child_urls, url_id, cfg, only_if_expanding=True)
+        if added is None:
+            # the user pressed "Clear queue" while this index was being read:
+            # its files are not queued and the row keeps the user's status
+            # (review 11 item 2.3 — the expansion used to finish, queue every
+            # child and overwrite the skip with 'done')
+            log.info("%s — cleared while it was being read; its files were not queued", url)
+            unlink_with_retry(dest)
+            unlink_with_retry(_meta_path(dest))
+            return False
+        rechecked = _refresh_loaded_children(cfg, store, child_urls,
+                                             int(rec.get("revalidate") or 0), parent_id=url_id)
+        if rechecked is None:
+            # "Clear queue" pressed while the loaded children were being asked
+            # about: nothing re-queued, the row keeps the user's status
+            # (review 12 item 1.5 — it flipped back to 'done' and every
+            # republished child was downloaded and loaded)
+            log.info("%s — cleared while its files were being checked; nothing re-queued", url)
+            unlink_with_retry(dest)
+            unlink_with_retry(_meta_path(dest))
+            return False
+        added += rechecked
+        # a loaded file the index no longer lists says so on its row (review
+        # 13 item 5.2 P2: nothing told the user what the payer stopped
+        # publishing). Its loaded months stay — they were published.
+        try:
+            store.note_unlisted_children(
+                url_id, [dedup_key(u) for u in child_urls],
+                f"no longer listed in its index (checked {_utcnow_date()}) — the months "
+                "already loaded from it stay")
+        except Exception:  # noqa: BLE001 — a note never costs the expansion
+            log.debug("unlisted-children note skipped", exc_info=True)
         # which PLANS each queued file serves — the dimension that stops a
         # payer's narrow-network and broad-PPO books blending into one median.
         # Cosmetic-tier: a failure here must never cost the expansion.
@@ -1730,6 +3291,7 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
         msg = f"index expanded: {len(child_urls)} files listed, {added} newly queued"
         if truncated:
             msg += f" (capped at max_toc_files={cfg.max_toc_files})"
+            log.warning("%s — %s", url, cap_note(cfg.max_toc_files))
         if not child_urls:
             # a TOC with only allowed_amount_file entries is a common TPA
             # shape (out-of-network averages, no negotiated rates) — that's
@@ -1737,23 +3299,50 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
             if _mentions_allowed_amounts(dest):
                 store.update_url(url_id, status="skipped", kind="toc",
                                  error="this TOC lists only out-of-network allowed-amounts "
-                                       "files — no negotiated-rate files to ingest")
+                                       "files — no negotiated-rate files to ingest",
+                                 only_if_status="expanding")
             else:
                 store.update_url(url_id, status="failed", kind="toc",
-                                 error="this index/TOC lists no in-network file URLs")
+                                 error="this index/TOC lists no in-network file URLs",
+                                 only_if_status="expanding")
         else:
             log.info("%s — %s", url, msg)
             # child_count on a done TOC row is how the dashboard says
-            # "found N files inside, working through them"
-            store.update_url(url_id, status="done", kind="toc", child_count=added, error=None)
-        dest.unlink(missing_ok=True)  # the index itself carries no rates
+            # "found N files inside": the number LISTED — after a monthly
+            # re-fetch every child is already queued, and "found 0 files
+            # inside" read as an empty index (round 7 P1.6)
+            # only while still 'expanding': a "Clear queue" pressed at any
+            # point of the expansion keeps the user's status (review 12 1.5)
+            # what the listing left out BY NAME is said on its row (review 13
+            # item 5.2 P2: it was one log line)
+            left = []
+            if excluded.get("allowed-amounts"):
+                left.append(f"{excluded['allowed-amounts']:,} allowed-amounts file(s)")
+            if excluded.get("drug-pricing"):
+                left.append(f"{excluded['drug-pricing']:,} drug-pricing (NDC) file(s)")
+            notes = [cap_note(cfg.max_toc_files)] if truncated else []
+            if new_unloaded:
+                notes.append(
+                    f"checked {_utcnow_date()}: {new_unloaded:,} new file"
+                    f"{'s' if new_unloaded != 1 else ''} listed — not downloaded (the monthly "
+                    "check only asks about the files already loaded); paste this index "
+                    "again, or turn on monthly_refresh, to load "
+                    f"{'them' if new_unloaded != 1 else 'it'}")
+            if left:
+                notes.append("left out by their names (no medical rates): " + " and ".join(left))
+            store.update_url(url_id, status="done", kind="toc", child_count=len(child_urls),
+                             error="; ".join(notes) or None,
+                             revalidate=0, only_if_status="expanding")
+        unlink_with_retry(dest)  # the index itself carries no rates
+        unlink_with_retry(_meta_path(dest))  # its sidecar too (review 11 2.15)
         return False
 
     if pf.file_type == "allowed_amounts":
         # common on listing pages next to the rate files — skip, don't scare
         store.update_url(url_id, status="skipped", kind="allowed_amounts",
                          error="out-of-network allowed-amounts file (no negotiated rates) — skipped")
-        dest.unlink(missing_ok=True)
+        unlink_with_retry(dest)
+        unlink_with_retry(_meta_path(dest))  # its sidecar too (review 11 2.15)
         return False
 
     if pf.file_type == "unknown":
@@ -1761,14 +3350,19 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
         # file. If it's HTML, try to lift the file links off it; otherwise
         # explain what to do in plain language.
         if looks_like_html(dest):
-            links = extract_links_from_page(dest, final_url, cfg.max_toc_files)
-            dest.unlink(missing_ok=True)
+            trunc: dict = {}
+            links = extract_links_from_page(dest, final_url, cfg.max_toc_files, trunc=trunc)
+            unlink_with_retry(dest)
+            unlink_with_retry(_meta_path(dest))  # its sidecar too (review 11 2.15)
             # a Gatsby-built MRF hub (Sapphire etc.) may render some links in
             # the HTML and ship the rest as static JSON next to the page —
             # probe it either way and merge (one cheap request for non-hubs)
             seen_keys = {dedup_key(u) for u in links}
-            for hub_url in crawl_gatsby_hub(cfg, final_url, cfg.max_toc_files):
-                if dedup_key(hub_url) not in seen_keys and len(links) < cfg.max_toc_files:
+            for hub_url in crawl_gatsby_hub(cfg, final_url, cfg.max_toc_files, trunc=trunc):
+                if dedup_key(hub_url) not in seen_keys:
+                    if len(links) >= cfg.max_toc_files:
+                        trunc["truncated"] = True
+                        break
                     seen_keys.add(dedup_key(hub_url))
                     links.append(hub_url)
             if not links:
@@ -1784,12 +3378,17 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
                 store.update_url(url_id, error="page has no static links — rendering it in a headless browser…")
                 try:
                     links = render_page_links(cfg, final_url, cfg.max_toc_files)
+                    if len(links) >= cfg.max_toc_files:
+                        # the renderer stops collecting at the cap: reaching
+                        # it means there may be more
+                        trunc["truncated"] = True
                 except RenderBrowserMissing:
                     browser_missing = True
             if links:
-                added = _enqueue_children(store, links, url_id)
+                added = _enqueue_children(store, links, url_id, cfg)
                 log.info("%s — web page: found %d file links, %d newly queued", url, len(links), added)
-                store.update_url(url_id, status="done", kind="page", child_count=added, error=None)
+                store.update_url(url_id, status="done", kind="page", child_count=len(links),
+                                 error=cap_note(cfg.max_toc_files) if trunc.get("truncated") else None)
             else:
                 msg = (PAGE_HELP + " The app tried to download the headless browser "
                        "automatically but couldn't (usually no internet, or disk full). "
@@ -1802,16 +3401,28 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
         # {"TOC_Files": [...]} directories, for example) — lift any MRF-shaped
         # links out of a small unknown file before giving up.
         if dest.stat().st_size <= 64 << 20:
-            links = extract_links_from_page(dest, final_url, cfg.max_toc_files)
+            trunc = {}
+            links = extract_links_from_page(dest, final_url, cfg.max_toc_files, trunc=trunc)
             if links:
-                dest.unlink(missing_ok=True)
-                added = _enqueue_children(store, links, url_id)
+                unlink_with_retry(dest)
+                unlink_with_retry(_meta_path(dest))  # its sidecar too (review 11 2.15)
+                added = _enqueue_children(store, links, url_id, cfg)
                 log.info("%s — link container: %d file links, %d newly queued", url, len(links), added)
-                store.update_url(url_id, status="done", kind="page", child_count=added, error=None)
+                store.update_url(url_id, status="done", kind="page", child_count=len(links),
+                                 error=cap_note(cfg.max_toc_files) if trunc.get("truncated") else None)
                 return False
-        store.update_url(url_id, status="failed", kind="unknown",
-                         error="; ".join(pf.messages) or "unrecognized file (not MRF JSON)")
-        dest.unlink(missing_ok=True)
+        err = "; ".join(pf.messages) or "unrecognized file (not MRF JSON)"
+        if url.split("?", 1)[0].endswith("latest_metadata.json"):
+            # HealthSparq's file list (16 catalog sources) is an undocumented
+            # endpoint: if its shape changes, say THAT instead of a riddle
+            err = ("this HealthSparq file list (latest_metadata.json) no longer looks the "
+                   "way MRF Explorer expects — a \"files\" list whose entries carry a "
+                   "\"filePath\" — so the payer's platform changed it. Open the payer's "
+                   "transparency page in a browser and paste its file links instead; "
+                   "and please report it so the app can be updated.")
+        store.update_url(url_id, status="failed", kind="unknown", error=err)
+        unlink_with_retry(dest)
+        unlink_with_retry(_meta_path(dest))  # its sidecar too (review 11 2.15)
         return False
 
     # in-network rate file or standalone provider-reference file: run the
@@ -1828,14 +3439,25 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
     # same locked step (a caller-side flip would let two racing twins mutually
     # defer and both end skipped with nobody ingesting) — only the bytes are
     # handled here.
-    twin2 = store.claim_content_ingest(content_sha, url_id, pf.file_type, dest.name)
+    # the CONTENT identity too (review 13 item 5.2.1): the same document under
+    # other bytes (another gzip level, a decoded copy, .json vs .json.gz)
+    ident2 = DOWNLOAD_IDENTITY.get(str(dest)) or {}
+    csha = ident2.get("csha")
+    if csha is None and pf.file_type in ("in_network", "provider_reference"):
+        from .identity import content_digest
+        csha, csize = content_digest(dest)
+        if csha and str(dest) in DOWNLOAD_IDENTITY:
+            DOWNLOAD_IDENTITY[str(dest)].update(csha=csha, csize=csize)
+    from .ingest import _claim_month
+    twin2 = store.claim_content_ingest(content_sha, url_id, pf.file_type, dest.name,
+                                       content_sha2=csha, month=_claim_month(pf, dest.name))
     if twin2:
         twin2_url, twin2_status = twin2
         if twin2_status == "done":
             # the twin FINISHED while we were preflighting — same terminal
             # treatment as the early check: nothing to revive, drop the bytes
-            dest.unlink(missing_ok=True)
-            _meta_path(dest).unlink(missing_ok=True)
+            unlink_with_retry(dest)
+            unlink_with_retry(_meta_path(dest))
         else:
             # twin is mid-ingest and can still fail: keep the only other copy
             # so revive_skipped_duplicates can re-run this row without a
@@ -1849,38 +3471,69 @@ def process_url_record(cfg: MrfxConfig, store: Store, rec: dict, progress_bar=No
                               rebuild_rollups=rebuild_rollups)
     except Exception as e:  # noqa: BLE001 — belt and suspenders; ingest_file already isolates
         store.update_url(url_id, status="failed", kind=pf.file_type, error=f"ingest crashed: {e}")
-        _revive_twins(store, content_sha, url_id)
+        _revive_twins(store, content_sha, url_id, dest.name)
         return False
+    finally:
+        # review 14 item 2.1 (a round-13 regression): the content claim was
+        # released only by a SUCCESSFUL load (_finish_ok), so after a failed
+        # one the same document under another link was skipped for good and
+        # an inbox copy waited forever. Every exit releases it here.
+        if csha:
+            try:
+                store.release_content_claim(csha, dest.name)
+            except Exception:  # noqa: BLE001 — the owner check covers a miss
+                log.debug("content claim release failed", exc_info=True)
 
     status = result.get("status")
     if status == "done":
         n = result.get("rows", result.get("refs", 0))
+        # a rate file whose provider list has not arrived yet says so, not a
+        # bare 0 (review 9 item 3.2): it is loaded again when the list lands
+        skipped = int(result.get("ref_groups_skipped") or 0)
+        remote = int(result.get("remote_ref_groups") or 0)
+        note = ("waiting for this payer's provider reference file — "
+                f"{skipped:,} rate group(s) name providers only that file lists; "
+                "this file is loaded again automatically when it arrives"
+                if skipped > remote else None)
         store.update_url(url_id, status="done", kind=pf.file_type,
-                         rows_emitted=n or 0, error=None)
+                         rows_emitted=n or 0, error=note)
         if cfg.delete_raw_after_ingest:
             _cleanup_raw(cfg, dest)
             # duplicates that deferred to this row kept their downloads in
             # case we failed — we succeeded, so those bytes can go
             for u in store.skipped_duplicate_urls(content_sha, url_id):
                 dup = cfg.downloads_dir / filename_for(u)
-                dup.unlink(missing_ok=True)
-                _meta_path(dup).unlink(missing_ok=True)
+                unlink_with_retry(dup)
+                unlink_with_retry(_meta_path(dup))
         return True
+    elif status == "requeued":
+        # cancelled before it began by another file's worker-pool restart: the
+        # download + sidecar are on disk, so back to 'fetched' for the next
+        # processor — the log promised "re-queue automatically", and it does
+        store.update_url(url_id, status="fetched", kind=pf.file_type,
+                         error=result.get("error"))
+    elif status == "stopped":
+        # the user pressed "stop": not a failure. The download (and its
+        # sidecar) stay in place, so retry re-parses it without downloading
+        # again; twins that deferred to this row keep waiting on it.
+        store.update_url(url_id, status="skipped", kind=pf.file_type,
+                         error=result.get("error") or "stopped by you")
     elif status == "pending_confirmation":
         store.update_url(url_id, status="oversize", kind=pf.file_type,
                          error="file exceeds the confirm_over_gb safety limit — press "
                                "\"download anyway\" on this row, or raise confirm_over_gb "
                                "in config/mrfx.yaml")
-        _revive_twins(store, content_sha, url_id)
+        _revive_twins(store, content_sha, url_id, dest.name)
     else:
         store.update_url(url_id, status="failed", kind=pf.file_type,
                          error=result.get("error") or status)
-        _revive_twins(store, content_sha, url_id)
+        _revive_twins(store, content_sha, url_id, dest.name)
     return False
 
 
-def _revive_twins(store: Store, content_sha: str, failed_id: int) -> None:
-    n = store.revive_skipped_duplicates(content_sha, failed_id)
+def _revive_twins(store: Store, content_sha: str, failed_id: int,
+                  name: str | None = None) -> None:
+    n = store.revive_skipped_duplicates(content_sha, failed_id, twin_name=name)
     if n:
         log.info("re-queued %d duplicate link(s) that deferred to the failed row "
                  "(they resume from their kept downloads)", n)
@@ -1913,7 +3566,13 @@ def _normalize_url(u: str) -> str | None:
     if not u:
         return None
     if u.lower().startswith(("http://", "https://")):
-        return u
+        # a scheme with no host ("http://", "https:///x") is not a link: it
+        # was queued and failed later with a confusing error (audit 8 P3)
+        from urllib.parse import urlsplit
+        try:
+            return u if urlsplit(u).hostname else None
+        except ValueError:
+            return None
     if u.startswith("//"):          # protocol-relative
         return "https:" + u
     if _BARE_HOST_RE.match(u):      # bare host / host+path
@@ -1934,6 +3593,15 @@ def add_urls(store: Store, urls: list[str]) -> dict:
     from .known_sources import expand_placeholders
 
     added = skipped = invalid = 0
+    # a multi-link paste is DURABLE before its first row is queued: a kill
+    # in the middle used to drop the rest of the list (review 14 Group 3);
+    # the next start queues what is left (resume_pending_paste)
+    pending = [str(u) for u in urls if str(u or "").strip()]
+    if len(pending) > 1:
+        try:
+            store.meta_set(PENDING_PASTE_KEY, json.dumps(pending))
+        except Exception:  # noqa: BLE001 — the paste itself still runs
+            pass
     for raw in urls:
         u = _normalize_url(expand_placeholders(raw.strip()))
         if not u:
@@ -1943,50 +3611,68 @@ def add_urls(store: Store, urls: list[str]) -> dict:
             added += 1
         else:
             skipped += 1
+    if len(pending) > 1:
+        try:
+            store.meta_set(PENDING_PASTE_KEY, "")
+        except Exception:  # noqa: BLE001
+            pass
     return {"added": added, "skipped": skipped, "invalid": invalid}
 
 
-# The dedup/by-TIN rollups are a FULL rebuild over all rows (an hour+ once the
-# store holds tens of millions). Mid-grind rebuilds are therefore purely
-# TIME-based: at most one per adaptive interval (a multiple of how long the
-# last one took), plus a final one when the queue goes idle. The floor below
-# keeps a small store's dashboard fresh without per-file quadratic cost.
-ROLLUP_MAX_STALE_SECONDS = 90
-
-# Adaptive interval = this multiple of the last rebuild's duration: the disk
-# and CPU spend at most ~1/(N+1) of a long grind rebuilding analytics, and the
-# rest extracting. 2.0 was measured too aggressive on an 86M-row store on a
-# hard drive — rebuilds owned half the disk and chunk progress crawled.
-ROLLUP_INTERVAL_MULTIPLE = 4.0
+PENDING_PASTE_KEY = "pending_paste"
 
 
-def _rollup_due(pend: int, in_flight: int, since_last: float, min_interval: float) -> bool:
-    """The ONE mid-grind rebuild decision (unit-tested). Rebuild when ingests
-    are pending AND either the queue just went idle (grind over — dashboards
-    must be current) or the adaptive interval has elapsed. There is
-    deliberately NO count-based trigger: on a big store one rebuild outlasts
-    any batch of fresh ingests, so an unconditioned "N files pending" check
-    fired the instant each rebuild finished — rebuilds ran back-to-back for
-    the whole grind, monopolizing the store's disk, and extraction slowed to
-    what users reported as "chunks frozen, CPU busy"."""
-    if pend <= 0:
-        return False
-    return in_flight == 0 or since_last >= min_interval
+def resume_pending_paste(store: Store) -> int:
+    """Queue the rest of a paste a kill interrupted (every link of it is
+    added again: the ones already queued are answered as already there).
+    Returns how many were newly added. Never raises."""
+    try:
+        raw = store.meta_get(PENDING_PASTE_KEY)
+        urls = json.loads(raw) if raw else []
+        if not urls:
+            return 0
+        n = add_urls(store, urls)["added"]
+        store.meta_set(PENDING_PASTE_KEY, "")
+        if n:
+            log.info("queued %d link(s) of a paste the last run was stopped in the middle of", n)
+        return n
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+# The analytics fold-in is NOT the queue's job any more (review 14 item 1.1):
+# a part-way build or a failed attempt with no queue credit used to wait for
+# an IDLE queue, so one long download starved it for hours; mid-grind the next
+# update came at 4 x the last one. mrfx/foldin.py is the one scheduler: the
+# queue tells it how busy it is (FoldIn.note_queue) and pokes it when a file
+# lands; it decides when to fold in, at a bounded cadence.
 
 # how many files the downloader may fetch ahead of the parser (disk-bounded)
 PREFETCH_AHEAD = 1
+
+
+# An idle download/parse thread sleeps until a queue write signals it
+# (Store.queue_changed); this is only the safety net for a write path that
+# somehow did not signal. Not a latency: real work wakes the threads at once.
+QUEUE_IDLE_WAIT_SECONDS = 30.0
 
 
 def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain: bool = False) -> int:
     """Process queued URLs one at a time until the queue is empty (drain=True,
     for the CLI) or `stop` is set (the serve worker). Returns files processed.
 
-    Rollup rebuilds are time-batched (adaptive interval + once at idle — see
-    _rollup_due): the raw rates land immediately; dashboards catch up in
-    batches instead of the rebuild monopolizing the disk mid-grind."""
+    The analytics are folded in by the store's scheduler (mrfx/foldin.py):
+    this queue pokes it when a file lands and tells it how busy the queue is.
+    When no scheduler runs (a CLI drain, a test), run_queue starts one for its
+    own lifetime and, at the end, folds in whatever is left."""
     recovered = store.recover_stuck_urls()
     if recovered:
         log.info("resumed %d URL(s) left mid-flight by a previous run", recovered)
+    resume_pending_paste(store)
+    woke = store.wake_paused_urls()
+    if woke:
+        log.info("resumed %d paused download(s) whose wait is over", woke)
+    last_wake_check = time.monotonic()
     refit = store.requeue_oversize_within(int(cfg.confirm_over_gb * 1e9))
     if refit:
         log.info("re-queued %d file(s) previously over the size limit — they "
@@ -2003,93 +3689,36 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                 swept += 1
         if swept:
             log.info("reclaimed %d finished download(s) left behind by an earlier kill", swept)
+    # a sidecar whose download is gone describes nothing (every index /
+    # page / failed row left one behind, review 11 item 2.15) and a stale
+    # one was later trusted for a new file under the name (item 1.6)
+    orphans = 0
+    try:
+        for m in cfg.downloads_dir.glob("*" + _META_SUFFIX):
+            if not Path(str(m)[: -len(_META_SUFFIX)]).exists():
+                m.unlink(missing_ok=True)
+                orphans += 1
+        # a kill between _write_val's write and its rename leaves
+        # `<name>.part.val.tmp`; no download is running yet, so it is litter
+        # (review 12 item 4.1c)
+        for m in cfg.downloads_dir.glob("*.val.tmp"):
+            m.unlink(missing_ok=True)
+            orphans += 1
+    except OSError:
+        pass
+    if orphans:
+        log.info("removed %d download record(s) whose download is gone", orphans)
     processed = 0
-    ingests_pending_rollup = 0
     import threading
     state = threading.Lock()
-
-    rollup_failures = 0
-    last_rebuild_at = time.monotonic()
-    rollup_min_interval = float(ROLLUP_MAX_STALE_SECONDS)
-
-    def rebuild_now() -> bool:
-        """Returns True only when a rebuild actually RAN to completion. False on
-        no-op / coalesced-skip / failure so the coordinator backs off (sleeps)
-        instead of hot-spinning: _rollup_due fires unconditionally while the
-        queue is idle with credits pending, so a bare `continue` after a skip
-        would peg a CPU and flood the log for the whole length of a concurrent
-        multi-hour rebuild (audit HIGH-2)."""
-        nonlocal ingests_pending_rollup, rollup_failures, last_rebuild_at, rollup_min_interval
-        with state:
-            n = ingests_pending_rollup
-        if not n:
-            return False
-        # COALESCE: if a rebuild (e.g. the enrichment name refresh) is already
-        # running, don't queue behind it and then run our OWN multi-hour pass in
-        # turn — the credits stay pending and the next cycle retries. Check
-        # BEFORE logging/attempting so the idle back-off path stays quiet (no
-        # "updating rollups…" line every few seconds for hours). skip_if_busy on
-        # the store calls is the race-safe backstop for the check-then-act gap.
-        from .store import ROLLUP_SKIPPED
-        if store.rollup_in_progress():
-            return False
-        # stamp at attempt time so a failing rebuild doesn't re-fire the
-        # time-based trigger every loop (batch/idle triggers still apply)
-        last_rebuild_at = time.monotonic()
-        log.info("updating analytics rollups (%d newly ingested file(s))...", n)
-        try:
-            try:
-                # payer-slice update: cost scales with the new files' payers,
-                # not the whole store (an hour-long full scan on a big book)
-                r = store.update_rollups_incremental(skip_if_busy=True)
-            except Exception as e:  # noqa: BLE001 — incremental is an
-                # optimization with strict preconditions (prior full build,
-                # current schema, payer recorded); the full rebuild is the
-                # always-correct fallback
-                log.info("incremental analytics update unavailable (%s) — "
-                         "running a full rebuild", e)
-                r = store.rebuild_rollups(skip_if_busy=True)
-            if r == ROLLUP_SKIPPED:
-                # a rebuild is already running; keep the credits pending so the
-                # next _rollup_due fires after it, and don't count this as done
-                return False
-        except Exception:  # noqa: BLE001 — rollups retry on the next batch
-            rollup_failures += 1
-            if rollup_failures >= 3:
-                # never loop forever on a rebuild that keeps failing: the raw
-                # rates are safely on disk; dashboards just lag until the next
-                # successful rebuild (next batch, restart, or `mrfx serve`)
-                log.error(
-                    "rollup rebuild failed %d times — giving up for this run; "
-                    "raw data is safe, analytics will refresh on the next "
-                    "successful rebuild", rollup_failures)
-                with state:
-                    # drop only the credits THIS attempt covered — files that
-                    # landed during the failing attempts must still be able to
-                    # trigger a later rebuild within this run
-                    ingests_pending_rollup = max(0, ingests_pending_rollup - n)
-                return False
-            log.exception("rollup rebuild failed; will retry after the next file")
-            return False
-        rollup_failures = 0
-        # Re-stamp at COMPLETION and self-throttle by how long the rebuild
-        # actually took: counting the 90s window from the start would make a
-        # >90s rebuild permanently "stale" the moment it finished — a full
-        # rebuild after every single file, the exact per-file quadratic cost
-        # the batching exists to avoid, each one holding the write lock.
-        duration = time.monotonic() - last_rebuild_at
-        rollup_min_interval = max(float(ROLLUP_MAX_STALE_SECONDS),
-                                  ROLLUP_INTERVAL_MULTIPLE * duration)
-        last_rebuild_at = time.monotonic()
-        if duration > 60:
-            # a long rebuild means a long gap until the next one — say so, or
-            # hours of "numbers not updating" mid-grind reads as a hang
-            log.info("analytics refresh took %.0f min — next mid-grind refresh "
-                     "in ~%.0f min (extraction gets the disk in between; a "
-                     "final refresh always runs when the queue finishes)",
-                     duration / 60, rollup_min_interval / 60)
-        with state:
-            ingests_pending_rollup -= n
+    from . import foldin as _foldin
+    fold = _foldin.ensure(store)
+    # a serving process started the scheduler already; anything else (a CLI
+    # drain, a test) gets one for the life of this queue run
+    own_stop = threading.Event()
+    owns_fold = fold.start(own_stop)
+    if owns_fold:
+        fold.poke("queue start")
 
     # Pipeline: N downloader threads prefetch ahead while the parsers work —
     # network and CPU overlap instead of taking turns, and on many-small-file
@@ -2102,24 +3731,68 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
     # reservations against free space, so concurrent fetches can never
     # collectively overcommit the drive.
     dl_stop = threading.Event()
+    # thread name -> the url_queue id it has claimed and not yet finished.
+    # A thread that dies anyway (an error its loop re-raises) hands its row
+    # back through this before its replacement starts (round 7 P1.5: the row
+    # stayed 'downloading' with no owner until the next start, and a CLI
+    # drain counted it in flight for ever).
+    holding: dict[str, int] = {}
 
     # keep every parser fed: allow one fetched file per worker plus one spare
     prefetch_ahead = max(PREFETCH_AHEAD, resolve_worker_count(cfg) + 1)
 
-    def downloader():
+    def downloader(lane: str | None = None):
+        lane_bytes = cfg.small_file_mb << 20
         while not dl_stop.is_set() and (stop is None or not stop.is_set()):
             try:
+                # read the queue epoch BEFORE looking: a change in between
+                # makes the wait below return at once (no lost wake-up)
+                epoch = store.queue_epoch()
                 counts = store.url_queue_counts()
                 if counts.get("fetched", 0) >= prefetch_ahead:
-                    dl_stop.wait(0.5)
+                    store.wait_queue_change(epoch, QUEUE_IDLE_WAIT_SECONDS)
                     continue
-                rec = store.next_queued_url()  # atomic claim — threads never share a row
+                # atomic claim — threads never share a row
+                rec = store.next_queued_url(lane, lane_bytes)
+                if rec is None and store.wake_parked_urls(only_if_idle=True):
+                    # nothing fresh to fetch: go back to a PARKED file now
+                    # rather than leave this slot idle until its cool-down ends
+                    rec = store.next_queued_url(lane, lane_bytes)
                 if rec is None:
-                    dl_stop.wait(0.5)
+                    # nothing to download: sleep until a queue write signals
+                    # (was: re-query every 0.5 s, forever, on 6 threads)
+                    store.wait_queue_change(epoch, QUEUE_IDLE_WAIT_SECONDS)
                     continue
+                if lane in ("small", "small_only") and not int(rec.get("bytes_total") or 0) \
+                        and not rec.get("big_lane") and rec.get("kind") not in ("toc", "page"):
+                    # sizes are unknown on a fresh queue, so the small-file
+                    # slots took the first unsized BIG file and a 5 KB provider
+                    # list waited behind fifty shards (review 11 item 2.8). One
+                    # 1-byte request sizes the row before any body is fetched;
+                    # a big one goes back for a big slot (no GET wasted)
+                    probe = _server_now(cfg, rec["url"])
+                    size = int((probe or {}).get("total") or 0)
+                    if size > lane_bytes:
+                        store.update_url(rec["id"], status="queued", bytes_total=size,
+                                         big_lane=True)
+                        continue
+                    if size:
+                        store.update_url(rec["id"], bytes_total=size)
+                holding[threading.current_thread().name] = rec["id"]
                 try:
+                    # lanes decide which row a slot CLAIMS, never whether a
+                    # download it started continues: a small slot that learns
+                    # at the headers that its unsized row is big keeps the
+                    # bytes already flowing. Handing the row back cost every
+                    # big file a second GET (45 GETs for 24 files; 2,000 extra
+                    # aborted requests on a 2,000-file index of big files —
+                    # review 9 item 5.1)
                     fetch_url_record(cfg, store, rec)
-                except Exception:  # noqa: BLE001 — downloader must never die
+                except KeyboardInterrupt:
+                    raise
+                except BaseException:  # noqa: BLE001 — downloader must never die
+                    # (BaseException: a SystemExit from any library call would
+                    # otherwise end this thread silently and stall the queue)
                     log.exception("prefetch: unexpected error on %s", rec.get("url"))
                     try:
                         store.update_url(rec["id"], status="failed", error="unexpected download error")
@@ -2127,7 +3800,8 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                         # still ends this row: revive any twins that deferred to its
                         # content so the shared content isn't orphaned as skipped
                         # (matches the DownloadError path at fetch_url_record).
-                        _revive_twins(store, rec.get("content_sha") or "", rec["id"])
+                        _revive_twins(store, rec.get("content_sha") or "", rec["id"],
+                                      rec.get("filename"))
                     except Exception:  # noqa: BLE001 — correlated failure (disk full
                         # breaking both download AND the DB write): the row stays
                         # 'downloading' with no owner; say so instead of silently
@@ -2136,13 +3810,27 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                         log.exception(
                             "prefetch: could not record the failure for %s — the row "
                             "will be recovered on the next start", rec.get("url"))
+                holding.pop(threading.current_thread().name, None)
             except Exception:  # noqa: BLE001 — even store hiccups must not kill the loop
                 log.exception("prefetch: transient store error; retrying shortly")
                 dl_stop.wait(2.0)
 
     n_downloads = resolve_download_count(cfg)
-    dl_threads = [threading.Thread(target=downloader, daemon=True, name=f"mrfx-prefetch-{i}")
+    # size lanes: the first `n_small` slots take only small files; at least
+    # one big-file slot always remains
+    # with 2 or fewer slots, no lanes: one slot per lane halved a queue of
+    # big files' throughput (66 s vs 34 s for 24 files, review 9 item 5.1)
+    n_small = min(cfg.small_file_downloads, n_downloads - 1) if n_downloads > 2 else 0
+    # slot 0 is small-only (a small file arriving never waits); the other
+    # small slots help with big files when no small file is waiting
+    lanes = [("small_only" if i == 0 else "small") if i < n_small
+             else ("large" if n_small else None) for i in range(n_downloads)]
+    dl_threads = [threading.Thread(target=downloader, args=(lanes[i],), daemon=True,
+                                   name=f"mrfx-prefetch-{i}")
                   for i in range(n_downloads)]
+    if n_small:
+        log.info("download lanes: %d slot(s) for files up to %d MB, %d for bigger files",
+                 n_small, cfg.small_file_mb, n_downloads - n_small)
     for t in dl_threads:
         t.start()
     if n_downloads > 1:
@@ -2165,13 +3853,20 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
     active = 0
 
     def processor():
-        nonlocal processed, ingests_pending_rollup, active
+        nonlocal processed, active
         while not dl_stop.is_set() and (stop is None or not stop.is_set()):
             with state:
                 active += 1
+            epoch = store.queue_epoch()
             try:
                 rec = store.next_fetched_url()
-            except Exception:  # noqa: BLE001 — transient store error: back off, never die
+            except KeyboardInterrupt:
+                # leaving: give back the busy slot, or the coordinator counts
+                # this thread as working forever and the queue never drains
+                with state:
+                    active -= 1
+                raise
+            except BaseException:  # noqa: BLE001 — transient store error: back off, never die
                 log.exception("url worker: transient store error while claiming; retrying")
                 with state:
                     active -= 1
@@ -2180,8 +3875,9 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
             if rec is None:
                 with state:
                     active -= 1
-                dl_stop.wait(0.4)
+                store.wait_queue_change(epoch, QUEUE_IDLE_WAIT_SECONDS)
                 continue
+            holding[threading.current_thread().name] = rec["id"]
             try:
                 ok = False
                 try:
@@ -2189,13 +3885,20 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                         cfg, store, rec,
                         progress_bar=progress_bar if parallel == 1 else None,
                         rebuild_rollups=False)
-                except Exception:  # noqa: BLE001 — a bad URL must never kill the worker
+                except KeyboardInterrupt:
+                    raise
+                except BaseException:  # noqa: BLE001 — a bad URL must never kill the worker
+                    # BaseException: a SystemExit re-raised from a worker
+                    # process passed `except Exception` and ended this thread
+                    # with the row left 'ingesting' — the queue stalled with
+                    # nothing logged
                     log.exception("url worker: unexpected error on %s", rec.get("url"))
                     try:
                         store.update_url(rec["id"], status="failed", error="unexpected worker error")
                         # duplicates may have deferred to this row while it
                         # was 'ingesting' — free them to retry
-                        _revive_twins(store, rec.get("content_sha") or "", rec["id"])
+                        _revive_twins(store, rec.get("content_sha") or "", rec["id"],
+                                      rec.get("filename"))
                     except Exception:  # noqa: BLE001 — even the recovery write can
                         # hit a locked store; if it does, the row is unstuck by
                         # recover_stuck_urls on the next start — but this THREAD
@@ -2203,8 +3906,9 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                         log.exception("url worker: could not record the failure; continuing")
                 with state:
                     processed += 1
-                    if ok:
-                        ingests_pending_rollup += 1
+                if ok:
+                    fold.poke("file loaded")
+                holding.pop(threading.current_thread().name, None)
             finally:
                 with state:
                     active -= 1
@@ -2213,6 +3917,31 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                     for i in range(parallel)]
     for t in proc_threads:
         t.start()
+
+    def respawn_dead_threads() -> None:
+        """A processor/downloader thread that died anyway (an error the loops
+        could not catch) is replaced and SAID — never a silent, shrinking
+        pool that finally stops the queue with rows piling up 'fetched'."""
+        if dl_stop.is_set() or (stop is not None and stop.is_set()):
+            return
+        for pool_, target, label in ((proc_threads, processor, "mrfx-proc"),
+                                     (dl_threads, downloader, "mrfx-prefetch")):
+            for i, t in enumerate(pool_):
+                if not t.is_alive():
+                    rid = holding.pop(t.name, None)
+                    released = False
+                    if rid is not None:
+                        try:
+                            released = store.release_claim(rid)
+                        except Exception:  # noqa: BLE001 — recover_stuck_urls still catches it at the next start
+                            log.exception("could not hand back queue row %s", rid)
+                    log.error("%s-%d stopped unexpectedly — starting a replacement%s",
+                              label, i, " (the file it was on goes back in the queue)"
+                              if released else "")
+                    pool_[i] = threading.Thread(
+                        target=target, daemon=True, name=f"{label}-{i}",
+                        args=(lanes[i],) if pool_ is dl_threads else ())   # keep its lane
+                    pool_[i].start()
 
     interrupted = False
     try:
@@ -2225,20 +3954,25 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
                 continue
             with state:
                 busy = active
-                pend = ingests_pending_rollup
             in_flight = (counts.get("queued", 0) + counts.get("downloading", 0)
                          + counts.get("fetched", 0) + counts.get("expanding", 0)
                          + counts.get("ingesting", 0) + busy)
-            if _rollup_due(pend, in_flight, time.monotonic() - last_rebuild_at,
-                           rollup_min_interval):
-                if rebuild_now():
-                    continue   # a rebuild RAN — re-evaluate the queue now
-                # skipped (a rebuild is already running) or failed: fall through
-                # to the wait below so we don't hot-spin _rollup_due (which fires
-                # unconditionally while idle) for the whole concurrent rebuild.
-                # In drain mode there is no concurrent rebuild holder, so this
-                # path is only reached on a genuine failure; the post-loop final
-                # rebuild still handles any pending credits before returning.
+            if drain and counts.get("paused", 0):
+                # a PARKED file rejoins within minutes, so a CLI drain waits
+                # for it (a long-paused one, hours away, does not)
+                in_flight += store.parked_count()
+            respawn_dead_threads()
+            if time.monotonic() - last_wake_check >= 60:
+                last_wake_check = time.monotonic()
+                try:
+                    woke = store.wake_paused_urls()
+                    if woke:
+                        log.info("resumed %d paused download(s) whose wait is over", woke)
+                except Exception:  # noqa: BLE001 — a wake check must never stop the queue
+                    log.exception("could not check paused downloads; will retry")
+            # the analytics scheduler sees how busy the queue is (it folds in
+            # at its own cadence whatever the answer — review 14 item 1.1)
+            fold.note_queue(in_flight, counts)
             if in_flight == 0 and drain:
                 break
             if stop is not None:
@@ -2254,6 +3988,7 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
         raise
     finally:
         dl_stop.set()
+        store.queue_changed()   # wake every worker sleeping on the queue so it sees the stop
         join_proc = 2.0 if interrupted else cfg.download_timeout_seconds + 60
         join_dl = 2.0 if interrupted else cfg.download_timeout_seconds + 30
         for t in proc_threads:
@@ -2265,6 +4000,17 @@ def run_queue(cfg: MrfxConfig, store: Store, stop=None, progress_bar=None, drain
 
             _ingest_mod.set_parse_pool(None)
             pool.shutdown()
-    if ingests_pending_rollup:
-        rebuild_now()  # stop was set mid-batch — don't leave dashboards stale
+        fold.note_queue(0, {})
+        if owns_fold:
+            own_stop.set()
+            fold.stop()
+    if owns_fold and not interrupted:
+        # this run owned the scheduler: what is left goes in now, so a CLI
+        # drain (or a stopped test queue) never ends with the analytics behind
+        try:
+            if store.rollups_stale():
+                fold.run_once("the queue finished")
+        except Exception:  # noqa: BLE001 — the files are safely loaded either way
+            log.exception("final analytics update failed — the files are safely "
+                          "loaded and the next start catches up")
     return processed

@@ -1,0 +1,559 @@
+┌─────────────────────────────────────┐
+│┌───────────────────────────────────┐│
+││    Query Profiling Information    ││
+│└───────────────────────────────────┘│
+└─────────────────────────────────────┘
+EXPLAIN ANALYZE SELECT * FROM (     SELECT display_name, unit_id,            CASE WHEN len(tins) > 0 THEN array_to_string(tins, '; ') END AS tin_value,            is_mapped_entity, tin_is_really_npi,            len(tins) AS tin_count,            npi_count,            -- ONE meaning: how many different member-TIN rates the shown            -- median is taken over (rate_min/rate_max still span every            -- published value of every member)            len(list_distinct(rates)) AS rate_variants,            rate_min, rate_max,            payer, billing_code, billing_code_type,            discipline, is_timed,            modifier_set, billing_class, service_code_set, file_month,            negotiated_rate, negotiated_type, is_dollar_rate,            -- files behind the line: members of one payer usually share ONE            -- file, so summing per-member counts multiplied it (2 TINs from one            -- file read "2 files"). Distinct representative files, never less            -- than any single member's count — exact whenever each member's            -- line comes from one file (the export methodology says so)            greatest(max_source_count, len(files)) AS source_count,            CASE WHEN len(files) > 0 THEN array_to_string(files, ';') END AS source_files,            schema_version, last_updated_on, states, cities, is_therapy     FROM (     SELECT min(display_name) AS display_name,            entity_key AS unit_id,            list_sort(list_distinct(list(tin_value))) AS tins,            bool_or(is_mapped_entity) AS is_mapped_entity,            bool_or(tin_is_really_npi) AS tin_is_really_npi,            -- member TINs' NPI counts summed: an NPI listed under two member            -- TINs counts twice (the rollup keeps per-TIN counts, not the NPIs;            -- stated in the export methodology)            sum(npi_count) AS npi_count,            list(negotiated_rate) AS rates,            min(rate_min) AS rate_min, max(rate_max) AS rate_max,            payer, billing_code, min(billing_code_type) AS billing_code_type,            discipline, min(is_timed) AS is_timed,            modifier_set, billing_class, service_code_set, max(file_month) AS file_month,            -- Re-median across the entity's member TINs — but a placeholder-ONLY            -- TIN carries its 0.01 as its per-TIN "median" (store.BY_TIN_QUERY's            -- coalesce fallback), so folding it in would drag a multi-TIN entity            -- to a bogus midpoint (median of 0.01 and 80 = 40) and disagree with            -- the benchmark, which strips placeholders first. Mirror the TIN-level            -- FILTER exactly: drop placeholder members from a dollar group, but            -- keep a placeholder-only entity showing its value (coalesce) instead            -- of NULL. is_dollar_rate is a GROUP BY key, so this no-ops for            -- non-dollar (percentage) groups.            round(coalesce(                median(negotiated_rate) FILTER (NOT is_dollar_rate OR negotiated_rate > 0.01),                median(negotiated_rate)            ), 4) AS negotiated_rate,            min(negotiated_type) AS negotiated_type, is_dollar_rate,            max(source_count) AS max_source_count,            list_sort(list_distinct(list(source_files))) AS files,            min(schema_version) AS schema_version,            max(last_updated_on) AS last_updated_on,            list_sort(list_distinct(flatten(list(states)))) AS states,            list_sort(list_distinct(flatten(list(cities)))) AS cities,            bool_or(is_therapy) AS is_therapy   -- entity is therapy if any TIN is     FROM (SELECT s.*, coalesce(     s2.entity_name,     CASE WHEN NOT s.name_is_org OR s.display_name LIKE 'TIN %' THEN s.tin_value          ELSE s.display_name || coalesce(' · ' || s.primary_state, '') END) AS entity_key FROM (SELECT * FROM (SELECT      coalesce(em.entity_name, td.display_name, nn.org_name, 'TIN ' || CASE WHEN regexp_full_match(t.tin_value, '[0-9]{9}') AND substr(t.tin_value, 1, 2) IN ('00','07','08','09','17','18','19','28','29','49','69','70','78','79','89','96','97') THEN 'MASKED-SSN' ELSE t.tin_value END) AS display_name,     t.tin_value AS unit_id, t.tin_value,     em.entity_name IS NOT NULL AS is_mapped_entity,     t.tin_is_really_npi,     1 AS tin_count, t.npi_count, t.rate_variants, t.rate_min, t.rate_max,     t.payer, t.billing_code, t.billing_code_type, t.discipline, t.is_timed,     t.modifier_set, t.billing_class, t.service_code_set, t.file_month,     t.negotiated_rate, t.negotiated_type, t.is_dollar_rate,     t.source_count, t.source_files, t.schema_version, t.last_updated_on,     coalesce(td.states, CASE WHEN nn.state IS NULL THEN [] ELSE [nn.state] END) AS states,     coalesce(td.cities, CASE WHEN nn.city IS NULL THEN [] ELSE [nn.city] END) AS cities,     coalesce(td.is_therapy, ((nn.taxonomy_code IS NOT NULL AND ((nn.taxonomy_code LIKE '2251%' OR nn.taxonomy_code LIKE '2252%' OR nn.taxonomy_code LIKE '225X%' OR nn.taxonomy_code LIKE '224Z%' OR nn.taxonomy_code LIKE '235Z%' OR nn.taxonomy_code LIKE '2355S%') OR nn.taxonomy_code IN ('261QP2000X', '261QH0700X', '261QD1600X', '261QR0401X', '261QR0400X'))) OR (nn.taxonomy_codes IS NOT NULL AND ((('|' || nn.taxonomy_codes || '|') LIKE '%|2251%' OR ('|' || nn.taxonomy_codes || '|') LIKE '%|2252%' OR ('|' || nn.taxonomy_codes || '|') LIKE '%|225X%' OR ('|' || nn.taxonomy_codes || '|') LIKE '%|224Z%' OR ('|' || nn.taxonomy_codes || '|') LIKE '%|235Z%' OR ('|' || nn.taxonomy_codes || '|') LIKE '%|2355S%') OR (('|' || nn.taxonomy_codes || '|') LIKE '%|261QP2000X|%' OR ('|' || nn.taxonomy_codes || '|') LIKE '%|261QH0700X|%' OR ('|' || nn.taxonomy_codes || '|') LIKE '%|261QD1600X|%' OR ('|' || nn.taxonomy_codes || '|') LIKE '%|261QR0401X|%' OR ('|' || nn.taxonomy_codes || '|') LIKE '%|261QR0400X|%')))), FALSE) AS is_therapy,     -- for the entity key only (see _ENTITY_KEY_SQL): is the display name an     -- ORGANIZATION's (an NPI-2), and the practice's main state     coalesce(td.entity_kind = 'org', nn.entity_type = 'NPI-2', FALSE) AS name_is_org,     coalesce(td.primary_state, nn.state) AS primary_state  FROM rates_by_tin t      LEFT JOIN tin_directory td USING (tin_value)     LEFT JOIN entity_map em USING (tin_value)     -- payers that set tin.type='npi' publish an NPI in the TIN slot: name and     -- locate those rows from the NPI directory instead of leaving raw numbers.     -- The key is an EXPRESSION equality on purpose: written as     -- `ON t.tin_is_really_npi AND nn.npi = t.tin_value`, the one-sided     -- predicate made DuckDB fall back to a nested-loop join (BLOCKWISE_NL_JOIN:     -- every spine row against every named provider — 1.41M x 93k on the real     -- store, 529 thread-seconds; the Explorer's table took 158 s and the Code     -- page 10 s once practice names were loaded, 0.9 s / 0.1 s before). The     -- CASE yields NULL for an EIN row, which matches nothing — the same rows,     -- hash-joined.     LEFT JOIN npi_directory nn ON nn.npi = CASE WHEN t.tin_is_really_npi THEN t.tin_value END  WHERE t.is_latest) WHERE 1=1) s LEFT JOIN entity_map s2 ON s2.tin_value = s.tin_value)     GROUP BY entity_key, payer, billing_code, discipline, modifier_set,              billing_class, service_code_set, is_dollar_rate     ) ) WHERE is_dollar_rate AND negotiated_rate > 0.01 ORDER BY negotiated_rate DESC NULLS LAST, unit_id ASC, billing_code ASC, modifier_set ASC, payer ASC, file_month ASC, billing_class ASC, service_code_set ASC, is_dollar_rate ASC, tin_value ASC, tin_is_really_npi ASC, negotiated_rate ASC LIMIT ? OFFSET ?
+┌────────────────────────────────────────────────┐
+│┌──────────────────────────────────────────────┐│
+││               Total Time: 4.94s              ││
+│└──────────────────────────────────────────────┘│
+└────────────────────────────────────────────────┘
+┌───────────────────────────┐
+│           QUERY           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│      EXPLAIN_ANALYZE      │
+│    ────────────────────   │
+│                           │
+│           0 rows          │
+│           0.00s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│           TOP_N           │
+│    ────────────────────   │
+│          Top: 100         │
+│                           │
+│         Order By:         │
+│      unnamed_subquery     │
+│   .negotiated_rate DESC   │
+│  unnamed_subquery.unit_id │
+│             ASC           │
+│      unnamed_subquery     │
+│     .billing_code ASC     │
+│      unnamed_subquery     │
+│     .modifier_set ASC     │
+│ unnamed_subquery.payer ASC│
+│      unnamed_subquery     │
+│      .file_month ASC      │
+│      unnamed_subquery     │
+│     .billing_class ASC    │
+│      unnamed_subquery     │
+│   .service_code_set ASC   │
+│      unnamed_subquery     │
+│    .is_dollar_rate ASC    │
+│ unnamed_subquery.tin_value│
+│             ASC           │
+│      unnamed_subquery     │
+│   .tin_is_really_npi ASC  │
+│      unnamed_subquery     │
+│    .negotiated_rate ASC   │
+│                           │
+│                           │
+│                           │
+│          100 rows         │
+│           0.08s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│        display_name       │
+│          unit_id          │
+│         tin_value         │
+│      is_mapped_entity     │
+│     tin_is_really_npi     │
+│         tin_count         │
+│         npi_count         │
+│       rate_variants       │
+│          rate_min         │
+│          rate_max         │
+│           payer           │
+│        billing_code       │
+│     billing_code_type     │
+│         discipline        │
+│          is_timed         │
+│        modifier_set       │
+│       billing_class       │
+│      service_code_set     │
+│         file_month        │
+│      negotiated_rate      │
+│      negotiated_type      │
+│       is_dollar_rate      │
+│        source_count       │
+│        source_files       │
+│       schema_version      │
+│      last_updated_on      │
+│           states          │
+│           cities          │
+│         is_therapy        │
+│                           │
+│                           │
+│                           │
+│       1,348,421 rows      │
+│           1.36s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│        display_name       │
+│          unit_id          │
+│         len(tins)         │
+│            tins           │
+│      is_mapped_entity     │
+│     tin_is_really_npi     │
+│         npi_count         │
+│           rates           │
+│          rate_min         │
+│          rate_max         │
+│           payer           │
+│        billing_code       │
+│     billing_code_type     │
+│         discipline        │
+│          is_timed         │
+│        modifier_set       │
+│       billing_class       │
+│      service_code_set     │
+│         file_month        │
+│      negotiated_rate      │
+│      negotiated_type      │
+│       is_dollar_rate      │
+│      max_source_count     │
+│         len(files)        │
+│           files           │
+│       schema_version      │
+│      last_updated_on      │
+│           states          │
+│           cities          │
+│         is_therapy        │
+│                           │
+│                           │
+│                           │
+│       1,348,421 rows      │
+│           0.03s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│        display_name       │
+│          unit_id          │
+│            tins           │
+│      is_mapped_entity     │
+│     tin_is_really_npi     │
+│         npi_count         │
+│           rates           │
+│          rate_min         │
+│          rate_max         │
+│           payer           │
+│        billing_code       │
+│     billing_code_type     │
+│         discipline        │
+│          is_timed         │
+│        modifier_set       │
+│       billing_class       │
+│      service_code_set     │
+│         file_month        │
+│      negotiated_rate      │
+│      negotiated_type      │
+│       is_dollar_rate      │
+│      max_source_count     │
+│           files           │
+│       schema_version      │
+│      last_updated_on      │
+│           states          │
+│           cities          │
+│         is_therapy        │
+│                           │
+│                           │
+│                           │
+│       1,348,421 rows      │
+│           8.66s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│           FILTER          │
+│    ────────────────────   │
+│   (round(COALESCE(median  │
+│ (negotiated_rate) FILTER  │
+│        (WHERE ((NOT       │
+│     is_dollar_rate) OR    │
+│ (negotiated_rate > CAST(0 │
+│ .01 AS DOUBLE)))), median │
+│ (negotiated_rate)), 4) > 0│
+│            .01)           │
+│                           │
+│                           │
+│                           │
+│       1,348,421 rows      │
+│           0.08s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│             #0            │
+│             #1            │
+│__internal_decompress_strin│
+│           g(#2)           │
+│__internal_decompress_strin│
+│           g(#3)           │
+│__internal_decompress_strin│
+│           g(#4)           │
+│__internal_decompress_strin│
+│           g(#5)           │
+│             #6            │
+│             #7            │
+│             #8            │
+│             #9            │
+│            #10            │
+│            #11            │
+│            #12            │
+│            #13            │
+│            #14            │
+│            #15            │
+│            #16            │
+│            #17            │
+│            #18            │
+│            #19            │
+│            #20            │
+│            #21            │
+│            #22            │
+│            #23            │
+│            #24            │
+│            #25            │
+│            #26            │
+│            #27            │
+│            #28            │
+│                           │
+│                           │
+│                           │
+│       1,348,421 rows      │
+│           0.09s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│       HASH_GROUP_BY       │
+│    ────────────────────   │
+│          Groups:          │
+│             #0            │
+│             #1            │
+│             #2            │
+│             #3            │
+│             #4            │
+│             #5            │
+│             #6            │
+│             #7            │
+│                           │
+│        Aggregates:        │
+│          min(#8)          │
+│          list(#9)         │
+│        bool_or(#10)       │
+│        bool_or(#11)       │
+│          sum(#12)         │
+│         list(#13)         │
+│          min(#14)         │
+│          max(#15)         │
+│          min(#16)         │
+│          min(#17)         │
+│          max(#18)         │
+│ median(#19) FILTER (WHERE │
+│      #21) Filter: #21     │
+│        median(#21)        │
+│          min(#22)         │
+│          max(#23)         │
+│         list(#24)         │
+│          min(#25)         │
+│          max(#26)         │
+│         list(#27)         │
+│         list(#28)         │
+│        bool_or(#29)       │
+│                           │
+│                           │
+│                           │
+│       1,348,421 rows      │
+│           7.67s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│         entity_key        │
+│           payer           │
+│        billing_code       │
+│         discipline        │
+│        modifier_set       │
+│       billing_class       │
+│      service_code_set     │
+│       is_dollar_rate      │
+│        display_name       │
+│         tin_value         │
+│      is_mapped_entity     │
+│     tin_is_really_npi     │
+│         npi_count         │
+│      negotiated_rate      │
+│          rate_min         │
+│          rate_max         │
+│     billing_code_type     │
+│          is_timed         │
+│         file_month        │
+│      negotiated_rate      │
+│ ((NOT is_dollar_rate) OR  │
+│ (negotiated_rate > 0.01)) │
+│      negotiated_rate      │
+│      negotiated_type      │
+│        source_count       │
+│        source_files       │
+│       schema_version      │
+│      last_updated_on      │
+│           states          │
+│           cities          │
+│         is_therapy        │
+│                           │
+│                           │
+│                           │
+│       1,350,747 rows      │
+│           0.02s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│             #0            │
+│             #1            │
+│             #2            │
+│             #3            │
+│             #4            │
+│             #5            │
+│             #6            │
+│             #7            │
+│__internal_compress_string_│
+│        ubigint(#8)        │
+│             #9            │
+│__internal_compress_string_│
+│       uhugeint(#10)       │
+│            #11            │
+│__internal_compress_string_│
+│       uhugeint(#12)       │
+│__internal_compress_string_│
+│       uhugeint(#13)       │
+│            #14            │
+│            #15            │
+│            #16            │
+│            #17            │
+│            #18            │
+│            #19            │
+│            #20            │
+│            #21            │
+│            #22            │
+│            #23            │
+│            #24            │
+│            #25            │
+│            #26            │
+│                           │
+│                           │
+│                           │
+│       1,350,747 rows      │
+│           0.01s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         PROJECTION        │
+│    ────────────────────   │
+│        display_name       │
+│         tin_value         │
+│      is_mapped_entity     │
+│     tin_is_really_npi     │
+│         npi_count         │
+│          rate_min         │
+│          rate_max         │
+│           payer           │
+│        billing_code       │
+│     billing_code_type     │
+│         discipline        │
+│          is_timed         │
+│        modifier_set       │
+│       billing_class       │
+│      service_code_set     │
+│         file_month        │
+│      negotiated_rate      │
+│      negotiated_type      │
+│       is_dollar_rate      │
+│        source_count       │
+│        source_files       │
+│       schema_version      │
+│      last_updated_on      │
+│           states          │
+│           cities          │
+│         is_therapy        │
+│         entity_key        │
+│                           │
+│                           │
+│                           │
+│       1,350,747 rows      │
+│           0.08s           │
+└─────────────┬─────────────┘
+┌─────────────┴─────────────┐
+│         HASH_JOIN         │
+│    ────────────────────   │
+│      Join Type: LEFT      │
+│                           │
+│        Conditions:        │
+│   tin_value = tin_value   ├───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                           │                                                                                                                                                               │
+│                           │                                                                                                                                                               │
+│                           │                                                                                                                                                               │
+│       1,350,747 rows      │                                                                                                                                                               │
+│           0.01s           │                                                                                                                                                               │
+└─────────────┬─────────────┘                                                                                                                                                               │
+┌─────────────┴─────────────┐                                                                                                                                                 ┌─────────────┴─────────────┐
+│         PROJECTION        │                                                                                                                                                 │         TABLE_SCAN        │
+│    ────────────────────   │                                                                                                                                                 │    ────────────────────   │
+│        display_name       │                                                                                                                                                 │           Table:          │
+│         tin_value         │                                                                                                                                                 │    mrfx.main.entity_map   │
+│           false           │                                                                                                                                                 │                           │
+│     tin_is_really_npi     │                                                                                                                                                 │   Type: Sequential Scan   │
+│         npi_count         │                                                                                                                                                 │                           │
+│          rate_min         │                                                                                                                                                 │        Projections:       │
+│          rate_max         │                                                                                                                                                 │         tin_value         │
+│           payer           │                                                                                                                                                 │        entity_name        │
+│        billing_code       │                                                                                                                                                 │                           │
+│     billing_code_type     │                                                                                                                                                 │                           │
+│         discipline        │                                                                                                                                                 │                           │
+│          is_timed         │                                                                                                                                                 │                           │
+│        modifier_set       │                                                                                                                                                 │           0.00s           │
+│       billing_class       │                                                                                                                                                 │                           │
+│      service_code_set     │                                                                                                                                                 │                           │
+│         file_month        │                                                                                                                                                 │                           │
+│      negotiated_rate      │                                                                                                                                                 │                           │
+│      negotiated_type      │                                                                                                                                                 │                           │
+│       is_dollar_rate      │                                                                                                                                                 │                           │
+│        source_count       │                                                                                                                                                 │                           │
+│        source_files       │                                                                                                                                                 │                           │
+│       schema_version      │                                                                                                                                                 │                           │
+│      last_updated_on      │                                                                                                                                                 │                           │
+│           states          │                                                                                                                                                 │                           │
+│           cities          │                                                                                                                                                 │                           │
+│         is_therapy        │                                                                                                                                                 │                           │
+│        name_is_org        │                                                                                                                                                 │                           │
+│       primary_state       │                                                                                                                                                 │                           │
+│                           │                                                                                                                                                 │                           │
+│                           │                                                                                                                                                 │                           │
+│                           │                                                                                                                                                 │                           │
+│       1,350,747 rows      │                                                                                                                                                 │           0 rows          │
+│           0.23s           │                                                                                                                                                 │          (0.00s)          │
+└─────────────┬─────────────┘                                                                                                                                                 └───────────────────────────┘
+┌─────────────┴─────────────┐
+│         HASH_JOIN         │
+│    ────────────────────   │
+│      Join Type: MARK      │
+│                           │
+│        Conditions:        │
+│     taxonomy_code = #0    ├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                           │                                                                                                                                  │
+│                           │                                                                                                                                  │
+│                           │                                                                                                                                  │
+│       1,350,747 rows      │                                                                                                                                  │
+│           0.03s           │                                                                                                                                  │
+└─────────────┬─────────────┘                                                                                                                                  │
+┌─────────────┴─────────────┐                                                                                                                    ┌─────────────┴─────────────┐
+│         HASH_JOIN         │                                                                                                                    │      COLUMN_DATA_SCAN     │
+│    ────────────────────   │                                                                                                                    │                           │
+│      Join Type: MARK      │                                                                                                                    │                           │
+│                           │                                                                                                                    │           0.00s           │
+│        Conditions:        │                                                                                                                    │                           │
+│ substr(tin_value, 1, 2) = │                                                                                                                    │                           │
+│             #0            ├─────────────────────────────────────────────────────────────────────────────────────────────────────┐              │                           │
+│                           │                                                                                                     │              │                           │
+│                           │                                                                                                     │              │                           │
+│                           │                                                                                                     │              │                           │
+│       1,350,747 rows      │                                                                                                     │              │           5 rows          │
+│           0.11s           │                                                                                                     │              │          (0.00s)          │
+└─────────────┬─────────────┘                                                                                                     │              └───────────────────────────┘
+┌─────────────┴─────────────┐                                                                                       ┌─────────────┴─────────────┐
+│         HASH_JOIN         │                                                                                       │      COLUMN_DATA_SCAN     │
+│    ────────────────────   │                                                                                       │                           │
+│      Join Type: LEFT      │                                                                                       │                           │
+│                           │                                                                                       │           0.00s           │
+│        Conditions:        │                                                                                       │                           │
+│        CASE  WHEN         │                                                                                       │                           │
+│ (tin_is_really_npi) THEN  │                                                                                       │                           │
+│ (tin_value) ELSE NULL END ├────────────────────────────────────────────────────────────────────────┐              │                           │
+│           = npi           │                                                                        │              │                           │
+│                           │                                                                        │              │                           │
+│                           │                                                                        │              │                           │
+│                           │                                                                        │              │                           │
+│       1,350,747 rows      │                                                                        │              │          17 rows          │
+│           0.08s           │                                                                        │              │          (0.00s)          │
+└─────────────┬─────────────┘                                                                        │              └───────────────────────────┘
+┌─────────────┴─────────────┐                                                          ┌─────────────┴─────────────┐
+│         HASH_JOIN         │                                                          │         TABLE_SCAN        │
+│    ────────────────────   │                                                          │    ────────────────────   │
+│      Join Type: LEFT      │                                                          │           Table:          │
+│                           │                                                          │  mrfx.main.npi_directory  │
+│        Conditions:        │                                                          │                           │
+│   tin_value = tin_value   │                                                          │   Type: Sequential Scan   │
+│                           │                                                          │                           │
+│                           │                                                          │        Projections:       │
+│                           │                                                          │            npi            │
+│                           │                                                          │          org_name         │
+│           0.01s           ├───────────────────────────────────────────┐              │           state           │
+│                           │                                           │              │            city           │
+│                           │                                           │              │       taxonomy_code       │
+│                           │                                           │              │       taxonomy_codes      │
+│                           │                                           │              │        entity_type        │
+│                           │                                           │              │                           │
+│                           │                                           │              │                           │
+│                           │                                           │              │                           │
+│       1,350,747 rows      │                                           │              │        93,486 rows        │
+│          (0.01s)          │                                           │              │           0.01s           │
+└─────────────┬─────────────┘                                           │              └───────────────────────────┘
+┌─────────────┴─────────────┐                             ┌─────────────┴─────────────┐
+│         HASH_JOIN         │                             │         TABLE_SCAN        │
+│    ────────────────────   │                             │    ────────────────────   │
+│      Join Type: LEFT      │                             │           Table:          │
+│                           │                             │    mrfx.main.entity_map   │
+│        Conditions:        │                             │                           │
+│   tin_value = tin_value   │                             │   Type: Sequential Scan   │
+│                           │                             │                           │
+│                           ├──────────────┐              │        Projections:       │
+│                           │              │              │         tin_value         │
+│                           │              │              │        entity_name        │
+│           0.24s           │              │              │                           │
+│                           │              │              │                           │
+│                           │              │              │                           │
+│       1,350,747 rows      │              │              │           0 rows          │
+│          (0.24s)          │              │              │           0.00s           │
+└─────────────┬─────────────┘              │              └───────────────────────────┘
+┌─────────────┴─────────────┐┌─────────────┴─────────────┐
+│         TABLE_SCAN        ││         TABLE_SCAN        │
+│    ────────────────────   ││    ────────────────────   │
+│           Table:          ││           Table:          │
+│ mrfx.main.rates_by_tin_tbl││mrfx.main.tin_directory_tbl│
+│                           ││                           │
+│   Type: Sequential Scan   ││   Type: Sequential Scan   │
+│                           ││                           │
+│        Projections:       ││        Projections:       │
+│           payer           ││         tin_value         │
+│         tin_value         ││        display_name       │
+│        billing_code       ││        entity_kind        │
+│     tin_is_really_npi     ││           states          │
+│     billing_code_type     ││       primary_state       │
+│         discipline        ││           cities          │
+│          is_timed         ││         is_therapy        │
+│        modifier_set       ││                           │
+│       billing_class       ││                           │
+│      service_code_set     ││                           │
+│         file_month        ││                           │
+│       is_dollar_rate      ││           0.00s           │
+│      negotiated_rate      ││                           │
+│          rate_min         ││                           │
+│          rate_max         ││                           │
+│         npi_count         ││                           │
+│        source_count       ││                           │
+│        source_files       ││                           │
+│      negotiated_type      ││                           │
+│       schema_version      ││                           │
+│      last_updated_on      ││                           │
+│                           ││                           │
+│          Filters:         ││                           │
+│       is_dollar_rate      ││                           │
+│         is_latest         ││                           │
+│                           ││                           │
+│                           ││                           │
+│                           ││                           │
+│       1,350,747 rows      ││        19,442 rows        │
+│           0.10s           ││          (0.00s)          │
+└───────────────────────────┘└───────────────────────────┘

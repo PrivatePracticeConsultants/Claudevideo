@@ -1,0 +1,9 @@
+catalog: 150 sources, 150 distinct expanded URLs, 14 month-dated, 109 queueable
+  the same URL under two catalog entries: none
+  template: https://mrfdata.hmhs.com/files/443/wv/inbound/local/{FIRST_OF_MONTH}_Highmark_Blue_Cross_Blue_Shield_of_West_Virginia_index.json
+  pasted twice this month: {'added': 1, 'skipped': 0, 'invalid': 0} {'added': 0, 'skipped': 1, 'invalid': 0}
+  next month's expansion: {'added': 1, 'skipped': 0, 'invalid': 0} -> rows: 2
+  static index pasted twice: {'added': 1, 'skipped': 0, 'invalid': 0} {'added': 0, 'skipped': 1, 'invalid': 0}
+  monthly_refresh_tick with every top row 'done': {'month': '2026-11', 'dated': 1, 'static': 1, 'queued': 0, 'retried': 0, 'requeued_static': 1, 'done': True}
+  user-pasted non-catalog index after the tick: [{'id': 4, 'status': 'done', 'kind': 'toc', 'url': 'https://payer.example.com/mrf/index.json'}]
+  catalog static index after the tick: [('queued', 'https://bci.sapphiremrfhub.com/')]

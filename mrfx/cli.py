@@ -8,6 +8,7 @@ import logging
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 
 import duckdb
@@ -124,10 +125,11 @@ def _url_worker_loop(cfg: MrfxConfig, store: Store, stop: threading.Event) -> No
 
 
 def _monthly_refresh_loop(cfg: MrfxConfig, store: Store, stop: threading.Event) -> None:
-    """OPT-IN (monthly_refresh). Re-queue the tested payer indexes once per
-    calendar month so vintages stay current without the user remembering to
-    re-paste links — everything downstream (rate changes, the Clients digest,
-    month="latest") is only as fresh as the last ingest.
+    """The monthly pass: the RE-CHECK of every loaded index (monthly_recheck,
+    on by default — probes the loaded files, downloads only the changed ones,
+    names new ones without downloading them) and the OPT-IN queueing of new
+    dated months (monthly_refresh). Everything downstream (rate changes, the
+    Clients digest, month="latest") is only as fresh as the last ingest.
 
     ONCE PER MONTH, durably: the last month it ran is written to the store's
     meta table, so a restart (or five restarts) in the same month re-queues
@@ -135,32 +137,40 @@ def _monthly_refresh_loop(cfg: MrfxConfig, store: Store, stop: threading.Event) 
     one download per file and no re-ingest, but re-queueing on every boot
     would still thrash the queue and the disk.
     """
-    import datetime as _dt
+    from .fetch import monthly_refresh_tick
 
-    from .fetch import add_urls
-    from .known_sources import load_known_sources
-
-    KEY = "monthly_refresh_last"
     while not stop.is_set():
         try:
-            month = _dt.date.today().strftime("%Y-%m")
-            if store.meta_get(KEY) != month:
-                sources = load_known_sources(cfg.known_sources_path)
-                urls = [s["url"] for s in sources if s.get("queueable")]
-                if urls:
-                    counts = add_urls(store, urls)
-                    log.info("monthly refresh %s: queued %s new link(s), "
-                             "%s already known", month, counts["added"],
-                             counts["skipped"])
-                # mark AFTER a successful pass — a crash mid-queue retries
-                # next tick rather than skipping the month entirely
-                store.meta_set(KEY, month)
+            r = monthly_refresh_tick(
+                cfg, store, dated_sources=bool(getattr(cfg, "monthly_refresh", False)),
+                recheck=bool(getattr(cfg, "monthly_recheck", True)))
+            if r.get("queued") or r.get("retried") or r.get("requeued_static"):
+                log.info("monthly refresh %s: %d dated source(s) queued, %d not-yet-"
+                         "posted retried, %d index(es) re-fetched (only sources you "
+                         "have loaded)", r["month"], r["queued"], r["retried"],
+                         r["requeued_static"])
         except Exception:  # noqa: BLE001 — a refresh must never kill the server
             log.exception("monthly refresh failed; will retry")
         # hourly tick: cheap, and it catches the month rollover on a machine
         # that stays up for weeks
         if stop.wait(3600):
             return
+
+
+def _warn_if_running_another_folders_code() -> str | None:
+    """The typed `mrfx` command imports the package from the folder it was
+    INSTALLED in. Started from a copy in another folder (an update unzipped
+    to a new folder while the old one still exists), it would run the OLD
+    program against this folder's data without a word. Say so."""
+    running = Path(__file__).resolve().parents[1]
+    here = Path.cwd().resolve()
+    if (here / "mrfx" / "__init__.py").is_file() and here != running:
+        msg = (f"this window is in {here}, but the program running is the copy in "
+               f"{running}. Close it and double-click \"Start MRF Explorer\" in the "
+               "folder you want to use.")
+        print("NOTE: " + msg, file=sys.stderr)
+        return msg
+    return None
 
 
 def cmd_serve(cfg: MrfxConfig, args) -> int:
@@ -178,6 +188,7 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
         faulthandler.enable()
     except (RuntimeError, OSError, ValueError):
         pass  # no usable stderr (e.g. pythonw) — diagnostics are cosmetic
+    _warn_if_running_another_folders_code()
 
     # Claim the port BEFORE touching the store: a second `mrfx serve` used to
     # run crash-recovery (flipping the live server's in-flight rows) and start
@@ -202,52 +213,130 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
         print(f"port {cfg.port} is already in use — another mrfx dashboard (or other "
               "app) is running. Not touching its database. Stop it first, or change "
               "`port:` in config/mrfx.yaml.", file=sys.stderr)
-        return 1
+        return EXIT_NO_RESTART
 
     # keep_warm: serve is long-lived and fires several queries per dashboard
     # click, so pin the DuckDB settings once instead of re-SETting them on every
     # request connection (~14ms each). One-shot CLI commands stay unpinned.
-    store = Store(cfg.store_dir, cfg.duckdb_memory_gb, keep_warm=True, temp_dir=cfg.duckdb_temp_dir, auto_spill=True)
+    # the freeze recorder starts BEFORE the store opens: a slow start (a
+    # one-time update on a big store) is exactly when stacks_latest.txt must
+    # be fresh, and it used to hold the PREVIOUS session's snapshot until the
+    # store was open (review 9 item 2.3)
+    stop = threading.Event()
+    _start_stack_recorder(Path(cfg.store_dir), stop=stop)
+    log.info("opening the store at %s …", cfg.store_dir)
+    # the one-time stored-row update gets MIGRATION_BUDGET_S before the
+    # dashboard opens; the rest runs behind it (review 12 item 2.9)
+    from .store import MIGRATION_BUDGET_S
+    store = Store(cfg.store_dir, cfg.duckdb_memory_gb, keep_warm=True, temp_dir=cfg.duckdb_temp_dir,
+                  auto_spill=True, migrate_budget_s=MIGRATION_BUDGET_S)
+    store.finish_row_rules_in_background()
     # BEFORE any worker starts: a crash mid-parse leaves files at
     # 'processing', which scan_inbox skips forever. Flipping them to failed
     # here (single-threaded, nothing else owns the store yet) lets the very
     # first inbox scan re-ingest them without racing a live ingest.
     n_stuck = store.recover_stuck_files()
+    # ...and the queue's rows a dead run left in flight, before the inbox
+    # watcher can meet one of them as a "load in progress" (review 12 item 1.3;
+    # the URL worker's run_queue does it again, harmlessly)
+    store.recover_stuck_urls()
     if n_stuck:
         log.info("recovered %d file(s) left mid-parse by a previous run", n_stuck)
+    # review 14 item 1.1: ONE scheduler owns every analytics update of this
+    # process — the start-up catch-up (a kill between files going 'done' and
+    # their fold-in, a part-way build, a failed attempt), every file the queue,
+    # the inbox or an upload loads, and the user's Run now / Pause. It runs
+    # whenever the analytics are behind, whatever the queue is doing.
     if store.rollups_stale():
-        # a kill landed between files going 'done' and their BATCHED rollup:
-        # the Files tab showed them done while their rates were missing from
-        # every number, and nothing on restart noticed. Catch up now, in the
-        # background so the dashboard is usable meanwhile. Log the REASON so a
-        # slow full rebuild (rollup_needs_full) isn't a silent multi-hour hang.
-        log.info("analytics are behind the ingested files — catching up in the "
+        log.info("analytics are behind the loaded files — catching up in the "
                  "background. Reason: %s", store.rollup_stale_reason())
+    from . import foldin
+    foldin.ensure(store).start(stop)
+    # files loaded before identities were kept: named from their kept copies
+    # (review 13 item 5.2.6), off the start path
+    from .ingest import backfill_identities
+    # ...and files loaded before 0.7.7 are named by CONTENT too, so a
+    # re-encoded copy of one is recognised (review 14 item 2.2)
+    threading.Thread(target=lambda: backfill_identities(cfg, store, stop=stop),
+                     name="mrfx-identity-backfill", daemon=True).start()
+    # the kept per-part sets (NPIs, TINs, TIN-NPI pairs) the reports read
+    # instead of the whole store: brought up to date in the background, so a
+    # report never waits for them (0.8.3)
+    def _part_sets_loop():
+        if stop.wait(20):
+            return
+        while True:
+            store.warm_part_sets()
+            if stop.wait(60):
+                return
+    threading.Thread(target=_part_sets_loop, name="mrfx-part-sets", daemon=True).start()
+    if getattr(cfg, "cms_dac", "auto") == "auto":
+        # the CMS Doctors and Clinicians file (practice names, 0.8.5): fetched
+        # two minutes after start when the store has none or CMS published a
+        # newer release, then checked once a month; a failure is logged and
+        # retried the next day — names then come from the other rules
+        def _dac_loop():
+            import datetime as dt
 
-        def _catch_up() -> None:
-            # COALESCE (skip_if_busy): the URL worker may already be running its
-            # own catch-up rebuild by the time this thread is scheduled. Queuing
-            # behind it (blocking) is what logged "waiting for the previous
-            # rebuild to finish (1000+ min)" and then ran a REDUNDANT second pass
-            # over the same backlog. Skip when one is already in flight — it
-            # covers the data, and rollups_stale() re-triggers if anything is
-            # left. Only run our own pass when nothing else is.
-            from .store import ROLLUP_SKIPPED
-            try:
-                if store.update_rollups_incremental(skip_if_busy=True) == ROLLUP_SKIPPED:
-                    log.info("analytics catch-up: a rebuild is already running — "
-                             "it covers the backlog, so skipping the duplicate "
-                             "startup pass")
-            except Exception as e:  # noqa: BLE001 — incremental is an
-                # optimization; the full rebuild is the always-correct fallback
-                log.info("incremental analytics catch-up unavailable (%s) — "
-                         "running a full rebuild", e)
-                store.rebuild_rollups(skip_if_busy=True)
+            from .dac import ensure_dac
+            if stop.wait(120):
+                return
+            while True:
+                due = True
+                try:
+                    with store.connect() as con:
+                        last = store._meta_get(con, "dac_checked_at")
+                    due = (not last or (dt.datetime.now() - dt.datetime.fromisoformat(last))
+                           > dt.timedelta(days=30))
+                except Exception:  # noqa: BLE001
+                    pass
+                if due:
+                    try:
+                        ensure_dac(store, cfg.cms_dac_dir)
+                        with store.write_lock, store.connect() as con:
+                            con.execute("INSERT OR REPLACE INTO meta VALUES ('dac_checked_at', ?)",
+                                        [dt.datetime.now().isoformat(timespec="seconds")])
+                        store.refresh_practice_names()
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("CMS Doctors and Clinicians file not refreshed (%s) — "
+                                    "trying again tomorrow", e)
+                if stop.wait(24 * 3600):
+                    return
+        threading.Thread(target=_dac_loop, name="mrfx-cms-dac", daemon=True).start()
+    if getattr(cfg, "cms_reference", "auto") == "auto":
+        # practice-type evidence (0.8.6): CMS hospital + nursing-home address
+        # lists and the Medicare therapy rows — three minutes after start when
+        # never fetched, then monthly; each source fails alone and is retried
+        # the next day, the classification using whatever evidence is loaded
+        def _cmsref_loop():
+            import datetime as dt
 
-        threading.Thread(target=_catch_up,
-                         name="mrfx-rollup-catchup", daemon=True).start()
-    stop = threading.Event()
-    _start_stack_recorder(store.dir, stop=stop)
+            from .cmsref import ensure_cmsref
+            if stop.wait(180):
+                return
+            while True:
+                due = True
+                try:
+                    with store.connect() as con:
+                        last = store._meta_get(con, "cmsref_checked_at")
+                    due = (not last or (dt.datetime.now() - dt.datetime.fromisoformat(last))
+                           > dt.timedelta(days=30))
+                except Exception:  # noqa: BLE001
+                    pass
+                if due:
+                    try:
+                        got = ensure_cmsref(store, cfg.cms_ref_dir)
+                        for k, v in got.items():
+                            if isinstance(v, str) and v.startswith("not loaded"):
+                                log.warning("CMS %s list %s — trying again tomorrow "
+                                            "(or run `mrfx cmsref`)", k, v)
+                        store.refresh_practice_names()
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("CMS reference lists not refreshed (%s) — "
+                                    "trying again tomorrow", e)
+                if stop.wait(24 * 3600):
+                    return
+        threading.Thread(target=_cmsref_loop, name="mrfx-cms-ref", daemon=True).start()
     threading.Thread(
         target=_watcher_loop, args=(cfg, store, stop), name="mrfx-watcher", daemon=True
     ).start()
@@ -258,9 +347,14 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
     # the inbox watcher AND the URL worker), refreshing the directory
     # progressively rather than only when everything finishes.
     start_persistent_enrichment(cfg, store, stop)
-    if getattr(cfg, "monthly_refresh", False):
+    if getattr(cfg, "monthly_refresh", False) or getattr(cfg, "monthly_recheck", True):
         threading.Thread(target=_monthly_refresh_loop, args=(cfg, store, stop),
                          name="mrfx-monthly-refresh", daemon=True).start()
+    if getattr(cfg, "backup_dir", None):
+        # review 13 Group 6.3: the weekly hot backup, ten minutes after start
+        from .backup import backup_loop
+        threading.Thread(target=backup_loop, args=(cfg, store, stop),
+                         name="mrfx-backup", daemon=True).start()
     app = create_app(cfg, store)
     spill_line = ""
     if store.spill_is_relocated:
@@ -289,18 +383,47 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
           f"  or paste MRF/TOC URLs on the Files tab — downloads run automatically\n"
           f"  if the app ever freezes: open {store.dir / 'diagnostics' / 'stacks_latest.txt'}\n"
           f"  in Notepad and send its contents (auto-refreshed every 30s)\n")
+    # one line once the dashboard really answers: "nothing printed" must
+    # only ever mean "nothing is happening" (review 9 item 2.1)
+    def _announce_ready() -> None:
+        import time as _t
+        for _ in range(600):
+            try:
+                with socket.create_connection(("127.0.0.1", cfg.port), timeout=1):
+                    log.info("the dashboard is ready — open http://localhost:%d", cfg.port)
+                    return
+            except OSError:
+                _t.sleep(0.5)
+    threading.Thread(target=_announce_ready, name="mrfx-ready", daemon=True).start()
+    if os.name == "posix":
+        # a SIGTERM (a service manager, `kill`) ended the process at once:
+        # no `finally` below ran, the parser workers were orphaned and the
+        # resource tracker printed "5 leaked semaphore objects" (review 12
+        # item 4.1h). Treat it as the Ctrl-C it means. (Windows: no SIGTERM
+        # from a console close, and no resource tracker.)
+        import signal as _signal
+
+        def _term_as_interrupt(_sig, _frame):
+            raise KeyboardInterrupt
+        try:
+            _signal.signal(_signal.SIGTERM, _term_as_interrupt)
+        except (ValueError, OSError):      # not the main thread (tests)
+            pass
     try:
         uvicorn.run(app, host="127.0.0.1", port=cfg.port, log_level="warning")
     finally:
-        stop.set()
         # don't let concurrent.futures' atexit hook block process exit for
         # the remainder of a multi-hour parse: terminate workers now (their
-        # pid-suffixed temps are swept as orphans on the next start)
+        # pid-suffixed temps are swept as orphans on the next start). BEFORE
+        # stop.set(): the URL worker uninstalls the pool on stop, and the
+        # process then exited with its queues never closed — "5 leaked
+        # semaphore objects" on every POSIX stop (review 12 item 4.1h)
         from .ingest import get_parse_pool
 
         pool = get_parse_pool()
         if pool is not None and hasattr(pool, "shutdown_now"):
             pool.shutdown_now()
+        stop.set()
     return 0
 
 
@@ -320,7 +443,9 @@ def cmd_add(cfg: MrfxConfig, args) -> int:
     if args.known:
         from .known_sources import load_known_sources
 
-        known = load_known_sources(cfg.known_sources_path)
+        from .known_sources import for_states
+        known = for_states(load_known_sources(cfg.known_sources_path),
+                           (getattr(args, "states", "") or "").replace(",", " ").split())
         queueable = [s for s in known if s["queueable"]]
         for s in queueable:
             print(f"  + {s['name']}")
@@ -339,8 +464,11 @@ def cmd_add(cfg: MrfxConfig, args) -> int:
     import httpx as _httpx
 
     try:
+        # trust_env=False: a corporate HTTP(S)_PROXY must never carry a
+        # request to our own localhost server (audit 8 P3 — it answered 502
+        # and the links were "added" nowhere)
         r = _httpx.post(f"http://localhost:{cfg.port}/api/urls",
-                        json={"urls": urls}, timeout=30)
+                        json={"urls": urls}, timeout=30, trust_env=False)
         if r.status_code == 200:
             try:
                 d = r.json()
@@ -355,7 +483,7 @@ def cmd_add(cfg: MrfxConfig, args) -> int:
             print(f"handed to the running dashboard: {d['added']} queued, "
                   f"{d['skipped']} already known, {d['invalid']} not URLs")
             if args.retry_failed:
-                rf = _httpx.post(f"http://localhost:{cfg.port}/api/urls/retry-failed", timeout=30)
+                rf = _httpx.post(f"http://localhost:{cfg.port}/api/urls/retry-failed", timeout=30, trust_env=False)
                 print(f"re-queued {rf.json().get('requeued', 0)} previously failed URL(s)"
                       if rf.status_code == 200 else
                       "could not re-queue failed URLs on the server — retry them in the Files tab")
@@ -382,9 +510,13 @@ def cmd_add(cfg: MrfxConfig, args) -> int:
 
     from .fetch import add_urls, run_queue
 
+    # keep_warm: a drain makes thousands of small queue writes; a fresh
+    # connection each cost 12.6 ms and held write_lock 14.9 % of the wall
+    # (review 11 item 3.4) — the pinned store `serve` uses
     store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir,
-                  auto_spill=True)  # drains/rebuilds rollups — rollup-heavy
+                  auto_spill=True, keep_warm=True)  # drains/rebuilds rollups
     store.recover_stuck_files()  # no server owns the store — safe to recover
+    store.recover_stuck_urls()
     counts = add_urls(store, urls)
     print(f"queued {counts['added']} URL(s) "
           f"({counts['skipped']} already known, {counts['invalid']} not URLs)")
@@ -415,19 +547,94 @@ def cmd_add(cfg: MrfxConfig, args) -> int:
             print(f"  TOO BIG {rec['url'][:90]}\n          → over confirm_over_gb; raise it in "
                   "config/mrfx.yaml (or use the dashboard's \"download anyway\") and re-run")
     if cfg.enrichment.mode != "off" and processed:
-        print("looking up practice names (NPPES)...")
-        _run_enrichment_best_effort(cfg, store)
+        _run_enrichment_best_effort(cfg, store, interactive=True)
     return 0
 
 
-def _run_enrichment_best_effort(cfg: MrfxConfig, store: Store) -> None:
+# seconds between "names: N of M" lines during a CLI NPPES pass
+ENRICH_TICK_S = 15.0
+
+
+def _run_enrichment_best_effort(cfg: MrfxConfig, store: Store, interactive: bool = False) -> None:
     """Name lookups are a bonus pass AFTER the ingest already succeeded — a
-    bad bulk CSV or NPPES hiccup must not end the command with a traceback."""
+    bad bulk CSV or NPPES hiccup must not end the command with a traceback.
+
+    interactive (the `mrfx add` tail): one NPPES API request per new NPI is
+    >15 min on a few million rows, which used to print one line and go quiet.
+    Now it says how many remain, prints progress, and Ctrl-C skips the rest
+    cleanly (names fill in on the next run, or from the dashboard)."""
+    from .enrich import use_bulk_enrichment
+    from .nppes_auto import bulk_source, ensure_current
+
+    if not interactive:
+        try:
+            run_enrichment(cfg, store)
+        except Exception as e:  # noqa: BLE001
+            print(f"name enrichment hit a problem ({e}) — your rates are saved; "
+                  "names fill in on the next run")
+        return
+    # this month's NPPES file first (auto_download; skips when already current)
+    # so a fresh install resolves names locally instead of crawling the API
     try:
-        run_enrichment(cfg, store)
-    except Exception as e:  # noqa: BLE001
-        print(f"name enrichment hit a problem ({e}) — your rates are saved; "
+        ensure_current(cfg)
+    except Exception:  # noqa: BLE001 — never fail the command over names
+        pass
+    bulk = use_bulk_enrichment(cfg)
+    try:
+        left = store.enrichment_progress(max_age_seconds=0).get("remaining", 0)
+    except Exception:  # noqa: BLE001 — a count is cosmetic
+        left = 0
+    if bulk:
+        print(f"looking up practice names from the local NPPES file "
+              f"({Path(bulk_source(cfg)).name})...")
+    else:
+        print(f"looking up practice names for {left:,} NPI(s) via the NPPES website "
+              "(one request each). Press Ctrl-C to skip — your rates are saved and "
+              "names fill in on the next run.")
+        if left > 20_000:
+            print("  tip: the app normally downloads CMS's NPPES file by itself and names "
+                  "everyone in one local pass — it couldn't this time (see the NPPES: "
+                  "line above). GETTING_STARTED.md, 'Provider names fill in automatically'.")
+    stop = threading.Event()
+    state = {"done": 0, "err": None}
+
+    def work():
+        try:
+            run_enrichment(cfg, store, stop=stop,
+                           on_progress=lambda n: state.__setitem__("done", n))
+        except Exception as e:  # noqa: BLE001
+            state["err"] = e
+
+    th = threading.Thread(target=work, name="mrfx-cli-enrich", daemon=True)
+    th.start()
+    t0 = last = time.monotonic()
+    try:
+        while th.is_alive():
+            th.join(0.5)
+            now = time.monotonic()
+            if not bulk and now - last >= ENRICH_TICK_S:
+                last = now
+                n = state["done"]
+                rate = n / max(now - t0, 1e-9)
+                eta = (f", about {((left - n) / rate) / 60:.0f} min left"
+                       if rate > 0 and left > n else "")
+                print(f"  names: {n:,} of {left:,} looked up{eta}", flush=True)
+    except KeyboardInterrupt:
+        stop.set()
+        print("\nskipping the rest of the name lookups (Ctrl-C) — finishing the "
+              "requests already in flight...", flush=True)
+        try:
+            th.join(60)
+        except KeyboardInterrupt:
+            pass
+        print(f"skipped: {state['done']:,} names looked up; the rest fill in on the next "
+              "run or while the dashboard is open")
+        return
+    if state["err"] is not None:
+        print(f"name enrichment hit a problem ({state['err']}) — your rates are saved; "
               "names fill in on the next run")
+    elif not bulk:
+        print(f"names: {state['done']:,} looked up")
 
 
 def cmd_preflight(cfg: MrfxConfig, args) -> int:
@@ -511,8 +718,11 @@ def cmd_ingest(cfg: MrfxConfig, args) -> int:
     # auto_spill: a CLI ingest of a directory can trigger big rollups, so let it
     # route spill to a fast disk too (same as serve)
     store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir,
-                  auto_spill=True)
+                  auto_spill=True, keep_warm=True)   # pinned, like serve (review 11 3.4)
     store.recover_stuck_files()  # crashed 'processing' rows re-ingest this pass
+    # a link row a killed server left 'ingesting' is no load in progress: an
+    # inbox copy of its bytes must not wait for it forever (review 12 item 1.3)
+    store.recover_stuck_urls()
     path = Path(args.path) if args.path else cfg.inbox_dir
     bar = _make_cli_progress()
     if path.is_dir():
@@ -530,7 +740,10 @@ def cmd_ingest(cfg: MrfxConfig, args) -> int:
         if r.get("rows") is not None:
             line += f" ({r['rows']} rows"
             if r.get("ref_groups_skipped"):
-                line += f", {r['ref_groups_skipped']} rate groups skipped — missing provider reference file"
+                from .parser import skipped_groups_reason
+                why = skipped_groups_reason(r["ref_groups_skipped"], r.get("remote_ref_groups") or 0,
+                                            r.get("ambiguous_ref_ids") or 0)
+                line += f", {r['ref_groups_skipped']} rate groups skipped — {why}"
             line += ")"
         if r.get("error"):
             line += f" — {r['error']}"
@@ -572,17 +785,18 @@ def _print_code_coverage(cfg: MrfxConfig) -> None:
           f"codes{warn}")
     print(f"  {len(missing)} known code(s) are NOT being extracted; files are "
           "scanned only for the\n  list in codes.cpt_codes (config/mrfx.yaml). "
-          "Delete that whole list to collect\n  everything, then re-add links "
-          "to pick the new codes up in files you already have.")
+          "After adding codes, the Files tab's\n  'Re-read N files for the new codes' "
+          "button (or pasting a loaded link again)\n  reads the files already loaded "
+          "for them.")
 
 
-def _print_medicare_status(cfg: MrfxConfig) -> None:
+def _print_medicare_status(cfg: MrfxConfig, store: Store | None = None) -> None:
     """One line for the Medicare layers, so it's obvious whether the referral
     and eligibility halves are actually loaded."""
     try:
         from .medicare import STALE_ROSTER_DAYS, medicare_status
-        st = medicare_status(Store(cfg.store_dir, cfg.duckdb_memory_gb,
-                                   temp_dir=cfg.duckdb_temp_dir))
+        st = medicare_status(store or Store(cfg.store_dir, cfg.duckdb_memory_gb,
+                                            temp_dir=cfg.duckdb_temp_dir))
     except Exception:  # noqa: BLE001 — a status line must never block the command
         return
     e = st.get("eligibility")
@@ -604,15 +818,15 @@ def _print_medicare_status(cfg: MrfxConfig) -> None:
     print("medicare:   " + " · ".join(bits))
 
 
-def _print_reference_status(cfg: MrfxConfig) -> None:
+def _print_reference_status(cfg: MrfxConfig, store: Store | None = None) -> None:
     """One line for the optional reference datasets — the dollar math and the
     market sizing are only as good as whether these are actually loaded."""
     try:
         from .demographics import demographics_status
         from .nppes import feed_status
         from .utilization import utilization_status
-        store = Store(cfg.store_dir, cfg.duckdb_memory_gb,
-                      temp_dir=cfg.duckdb_temp_dir)
+        store = store or Store(cfg.store_dir, cfg.duckdb_memory_gb,
+                               temp_dir=cfg.duckdb_temp_dir)
         u, d, n = (utilization_status(store), demographics_status(store),
                    feed_status(store))
     except Exception:  # noqa: BLE001 — a status line must never block `status`
@@ -626,14 +840,42 @@ def _print_reference_status(cfg: MrfxConfig) -> None:
     print("reference:  " + " · ".join(bits))
 
 
+def _status_analytics(cfg: MrfxConfig) -> int:
+    """`mrfx status --analytics`: the dashboard's Analytics activity panel
+    as text (review 14 item 1.2) — asked of a running dashboard when one
+    answers (it owns the store), else built from the store directly."""
+    import httpx as _httpx
+
+    from . import activity
+    try:
+        r = _httpx.get(f"http://localhost:{cfg.port}/api/analytics/activity", timeout=20,
+                       trust_env=False)
+        if r.status_code == 200 and isinstance(r.json(), dict) and "analytics" in r.json():
+            print(activity.text(r.json()))
+            return 0
+    except Exception:  # noqa: BLE001 — no dashboard: read the store ourselves
+        pass
+    if _something_owns_the_port(cfg, "reading the store locally"):
+        return 1
+    store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir)
+    print(activity.text(activity.build(store)))
+    return 0
+
+
 def cmd_status(cfg: MrfxConfig, args) -> int:
+    if getattr(args, "analytics", False):
+        return _status_analytics(cfg)
     _print_code_coverage(cfg)
-    _print_medicare_status(cfg)
-    _print_reference_status(cfg)
     if _something_owns_the_port(cfg, "reading the store locally"):
         print("(the dashboard's Files tab shows the same information live)")
         return 1
+    # ONE open for the whole command (review 12 item 4.1e: the Medicare and
+    # reference lines each opened their own Store — the "analytics memory
+    # budget" line printed three times, and they opened it before the check
+    # above that a running dashboard does not own it)
     store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir)
+    _print_medicare_status(cfg, store)
+    _print_reference_status(cfg, store)
     with store.connect() as con:
         rows = con.execute(
             """
@@ -678,11 +920,15 @@ def cmd_export(cfg: MrfxConfig, args) -> int:
     # API's streaming export path was built to avoid.
     tmp = out.with_name(out.name + ".tmp")
     n = 0
+    from . import progress as _progress
+    bar = _progress.text_bar("export", label="Export")
     try:
-        with store.connect() as con:
+        with bar, store.connect() as con:
+            bar.stage("Writing the rows to a file")
             # sql_path: an output path containing an apostrophe (C:\Users\O'Brien\…)
             # must not break the COPY statement
             con.execute(f"COPY ({sql}) TO '{sql_path(tmp)}' (FORMAT CSV, HEADER)", params)
+            bar.stage("Writing the methodology")
         import shutil
         with open(out, "wb") as dst, open(tmp, "rb") as src:
             dst.write(b"\xef\xbb\xbf")
@@ -729,13 +975,60 @@ def cmd_outreach(cfg: MrfxConfig, args) -> int:
     except ValueError as e:  # e.g. --month latest (a report-tab sentinel, not a month)
         print(f"can't build that export: {e}", file=sys.stderr)
         return 1
-    headers, rows = build_outreach_rows(store, rel_sql(grain, fs), fs.params, fs.described.get("codes"))
+    from .outreach import OUTREACH_COLUMNS_NOTE
+    market = {"month": fs.described.get("as_of_month") or "latest",
+              "payers": list(fs.described.get("payers") or [])}
+    from . import progress as _progress
+    with _progress.text_bar("outreach", label="Outreach") as bar:
+        bar.stage("Listing the organizations in this view")
+        headers, rows = build_outreach_rows(store, rel_sql(grain, fs), fs.params,
+                                            fs.described.get("codes"), market=market)
+        bar.stage("Writing the CSV and methodology")
     out = Path(args.out)
-    out.write_text(outreach_csv(headers, rows), encoding="utf-8")
+    # bytes: the CSV ends rows with \r\n already (text mode doubled them on
+    # Windows — review 11 item 4.4d)
+    out.write_bytes(outreach_csv(headers, rows).encode("utf-8"))
     sidecar = out.with_name(out.stem + "_methodology.txt")
-    sidecar.write_text(methodology_text(cfg, store, grain, fs, "display_name", "asc", "outreach"))
+    sidecar.write_text(methodology_text(cfg, store, grain, fs, "display_name", "asc", "outreach")
+                       + "\n\n" + OUTREACH_COLUMNS_NOTE)
     print(f"exported {len(rows)} entities -> {out}\nmethodology -> {sidecar}")
     print("columns:", ", ".join(headers[:14]), f"... + {len(headers) - 14} per-code merge fields")
+    return 0
+
+
+def cmd_sources(cfg: MrfxConfig, args) -> int:
+    """List the tested-sources catalog, or --check it live (monthly re-audit:
+    payer pages move — 18 of 72 entries were dead after four months)."""
+    from .known_sources import for_states, load_known_sources
+
+    sources = for_states(load_known_sources(cfg.known_sources_path),
+                         (args.states or "").replace(",", " ").split())
+    if not args.check:
+        for s in sources:
+            kind = "auto" if s["queueable"] else "portal"
+            print(f"{kind:6} {' '.join(s['states']) or '?':12} {s['name']}")
+        print(f"{len(sources)} source(s); --check fetches each one to see if it still works")
+        return 0
+    from .source_check import check_sources
+
+    print(f"checking {len(sources)} source(s) — the first 2 MB of each, read-only…")
+    results = check_sources(cfg, sources, progress=lambda r: print(
+        f"  {r['result']:8} {r['name'][:60]:60} {r.get('detail', '')}", flush=True))
+    kinds = ("OK", "NEEDS-BROWSER", "PORTAL", "CHANGED", "DEAD")
+    n = {k: sum(1 for r in results if r["result"] == k) for k in kinds}
+    print("\n" + " · ".join(f"{n[k]} {k}" for k in kinds) +
+          "\nCHANGED / DEAD need a look (open them in a browser); NEEDS-BROWSER pages "
+          "list their files only in a browser; see docs/SOURCES_AUDIT_2026-11.md for "
+          "how each source was verified")
+    if args.report:
+        import csv as _csv
+        with open(args.report, "w", newline="", encoding="utf-8") as f:
+            w = _csv.writer(f)
+            w.writerow(["result", "name", "states", "queueable", "http", "detail", "url"])
+            for r in results:
+                w.writerow([r["result"], r["name"], " ".join(r.get("states", [])),
+                            r.get("queueable"), r.get("http", ""), r.get("detail", ""), r["url"]])
+        print(f"report written to {args.report}")
     return 0
 
 
@@ -756,7 +1049,11 @@ def cmd_forget(cfg: MrfxConfig, args) -> int:
             print(f"{name}: not in the store (check `mrfx status` for exact filenames)")
             rc = 1
             continue
-        if st.get("status") in ("processing", "queued") or store.url_inflight_for_filename(name):
+        # a 'queued' row nobody is loading (a "Keep both" whose load never ran)
+        # can be removed — it was stuck for good before (review 11 item 1.3)
+        from .ingest import ingest_in_progress
+        if st.get("status") == "processing" or store.url_inflight_for_filename(name) or \
+                (st.get("status") == "queued" and ingest_in_progress(name)):
             print(f"{name}: being processed right now — wait for it to finish, "
                   "then forget it (removing mid-parse would quietly resurrect)")
             rc = 1
@@ -799,6 +1096,9 @@ def cmd_enrich(cfg: MrfxConfig, args) -> int:
               f"({res['new_npis']:,} new NPIs, {res['updated_npis']:,} updated, "
               f"{res['deactivations_in_file']:,} carrying a deactivation date); "
               f"cache {res['cache_rows_before']:,} -> {res['cache_rows_after']:,}")
+        if res.get("directory_refreshed"):
+            print(f"{res['directory_refreshed']:,} already-identified provider(s) "
+                  "updated in the practice directory (new name, specialty or address).")
         print(f"\n{res['note']}")
         return 0
     if getattr(args, "bulk_file", None):
@@ -809,15 +1109,18 @@ def cmd_enrich(cfg: MrfxConfig, args) -> int:
               "or pass --bulk <NPPES zip/csv>.", file=sys.stderr)
         return 1
     from .enrich import use_bulk_enrichment
+    from .nppes_auto import bulk_source, ensure_current
+    if not getattr(args, "bulk_file", None):
+        ensure_current(cfg)   # fetch this month's NPPES file if auto_download is on
     if cfg.enrichment.mode == "bulk":
-        src = cfg.enrichment.bulk_csv_path
+        src = bulk_source(cfg)
         if not src or not Path(src).exists():
             print(f"bulk file not found: {src}\nDownload the NPPES full monthly file from "
                   "https://download.cms.gov/nppes/NPI_Files.html and point --bulk (or "
                   "enrichment.bulk_csv_path) at the .zip.", file=sys.stderr)
             return 1
     if use_bulk_enrichment(cfg):
-        print(f"resolving names from {cfg.enrichment.bulk_csv_path} in one local "
+        print(f"resolving names from {bulk_source(cfg)} in one local "
               "pass — this reads the file once…")
     else:
         print("resolving names via the NPPES API (can take a while for a large "
@@ -959,9 +1262,12 @@ def cmd_packets(cfg: MrfxConfig, args) -> int:
               "thing without stopping the server)")
         return 1
     store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir)
+    from . import progress as _progress
     try:
-        res = build_all_packets(cfg, store, args.out or getattr(cfg, "packets_dir", None),
-                                progress=lambda m: print(f"  {m}"))
+        with _progress.text_bar("packets", label="Monthly packets") as bar:
+            bar.stage("Finding each client's newest month")
+            res = build_all_packets(cfg, store, args.out or getattr(cfg, "packets_dir", None),
+                                    progress=lambda m: print(f"  {m}"))
     except Exception as e:  # noqa: BLE001 — a refusal is a message, not a trace
         print(f"could not build packets: {e}")
         return 1
@@ -972,6 +1278,17 @@ def cmd_packets(cfg: MrfxConfig, args) -> int:
         if p["skipped"]:
             line += f" — omitted: {'; '.join(x.split(':')[0] for x in p['skipped'])}"
         print(line)
+    if getattr(args, "pdf", False):
+        # review 13 Group 6.1: every document beside itself as .pdf, printed
+        # by ONE headless browser; no browser is a sentence, the HTML stays
+        from pathlib import Path as _P
+
+        from .pdf import html_files_to_pdf
+        paths = [_P(p["dir"]) / f for p in res["packets"] for f in p["written"]]
+        written, why = html_files_to_pdf(cfg, paths)
+        print(f"PDF: {len(written)} of {len(paths)} document(s) printed")
+        if why:
+            print(f"  {why}")
     return 0
 
 
@@ -1223,6 +1540,71 @@ def cmd_hospital(cfg: MrfxConfig, args) -> int:
     return 0
 
 
+def cmd_cmsref(cfg: MrfxConfig, args) -> int:
+    """Fetch CMS's hospital + nursing-home address lists and the Medicare
+    therapy rows, then re-classify every practice (naming.profile_sql)."""
+    from .cmsref import ensure_cmsref, fetch_medicare_therapy
+
+    if _something_owns_the_port(cfg, "writing to the store locally"):
+        return 1
+    store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir)
+    got = ensure_cmsref(store, cfg.cms_ref_dir)
+    if args.refresh:
+        try:
+            got["medicare"] = fetch_medicare_therapy(store, force=True)
+        except Exception as e:  # noqa: BLE001
+            got["medicare"] = f"not loaded: {e}"
+    bad = 0
+    f = got.get("facilities")
+    if isinstance(f, str) and f.startswith("not loaded"):
+        bad += 1
+        print(f"Hospital / nursing-home lists {f}", file=sys.stderr)
+    else:
+        print("Hospital / nursing-home address lists: "
+              + ("already current." if f == "current" else f"{f:,} hospitals and nursing homes loaded."))
+    m = got.get("medicare")
+    if isinstance(m, str):
+        bad += 1
+        print(f"Medicare therapy rows {m}", file=sys.stderr)
+    else:
+        print(f"Medicare Physician & Other Practitioners, {m['year']}: "
+              + (f"{m['rows']:,} therapy-code rows fetched." if m["fetched"] else "already current."))
+    if store.refresh_practice_names(force=True):
+        with store.connect() as con:
+            rows = con.execute("SELECT practice_type, count(*) FROM practice_names_tbl "
+                               "GROUP BY 1 ORDER BY 2 DESC, 1").fetchall()
+        print("Practices re-classified: " + ", ".join(f"{t} {n:,}" for t, n in rows))
+    return 1 if bad == 2 else 0
+
+
+def cmd_dac(cfg: MrfxConfig, args) -> int:
+    """Load the CMS Doctors and Clinicians file (practice names for tax IDs
+    with no organization NPI — mrfx/naming.py) and re-resolve the names."""
+    from .dac import ensure_dac, kept
+
+    if _something_owns_the_port(cfg, "writing to the store locally"):
+        return 1
+    store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir)
+    try:
+        got = ensure_dac(store, cfg.cms_dac_dir, force=args.refresh,
+                         path=args.file, release=args.release)
+    except Exception as e:  # noqa: BLE001 — one plain sentence, never a traceback
+        k = kept(cfg.cms_dac_dir)
+        print(f"Could not load the CMS Doctors and Clinicians file: {e}"
+              + (f" (a kept copy of the {k.get('release')} release is in {cfg.cms_dac_dir})"
+                 if k else ""), file=sys.stderr)
+        return 1
+    print(f"CMS Doctors and Clinicians file, {got['release'] or 'release unknown'}: "
+          f"{got['rows']:,} clinician-group rows "
+          + ("loaded." if got["loaded"] else "already loaded."))
+    if store.refresh_practice_names(force=got["loaded"]):
+        with store.connect() as con:
+            rows = con.execute("SELECT name_source, count(*) FROM practice_names_tbl "
+                               "GROUP BY 1 ORDER BY 2 DESC, 1").fetchall()
+        print("Practice names re-resolved: " + ", ".join(f"{s} {n:,}" for s, n in rows))
+    return 0
+
+
 def cmd_inflation(cfg: MrfxConfig, args) -> int:
     """Show or extend the price index that real-terms figures use."""
     from .inflation import InflationError, index_status, save_index_values
@@ -1250,6 +1632,35 @@ def cmd_inflation(cfg: MrfxConfig, args) -> int:
     return 0
 
 
+def cmd_update(cfg: MrfxConfig, args) -> int:
+    """Install a newer build from its zip, keeping data/ and the user's settings."""
+    from .updater import UpdateError, apply_update
+
+    if _something_owns_the_port(cfg, "updating the program"):
+        print("Close the MRF Explorer window (the one running the dashboard) first, "
+              "then run the update again.")
+        return 1
+    root = Path(__file__).resolve().parent.parent
+    print(f"updating MRF Explorer in {root}\n  from {args.zip}")
+    try:
+        res = apply_update(Path(args.zip), root, run_pip=not args.no_pip,
+                           allow_downgrade=getattr(args, "allow_downgrade", False))
+    except UpdateError as e:
+        print(f"update NOT applied — nothing was changed: {e}", file=sys.stderr)
+        return 1
+    except OSError as e:
+        print(f"update stopped by a file error ({e}). The previous program files are "
+              "saved in data/update_backups/ — run the update again after closing "
+              "other programs.", file=sys.stderr)
+        return 1
+    print("\nDone. Start MRF Explorer again as usual, then press Ctrl+Shift+R once in "
+          "the dashboard tab so your browser loads the new screens.")
+    if res["backup"]:
+        print(f"(If anything looks wrong, the previous program files are saved in "
+              f"{res['backup']}.)")
+    return 0 if res["pip_ok"] else 2
+
+
 def cmd_backup(cfg: MrfxConfig, args) -> int:
     """Copy the whole analytical store into one zip with a manifest, so the
     business asset on this one machine survives it. Parquet is already
@@ -1273,9 +1684,8 @@ def cmd_backup(cfg: MrfxConfig, args) -> int:
     if not root.is_dir():
         print(f"no store at {root}")
         return 1
-    files = sorted(p for p in root.rglob("*")
-                   if p.is_file() and not p.name.endswith((".tmp", ".part"))
-                   and "duckdb_tmp" not in p.parts and "diagnostics" not in p.parts)
+    from .backup import store_files
+    files = store_files(root)
     manifest: dict = {"created": dt.datetime.now(dt.timezone.utc).isoformat(),
                       "store_dir": str(root), "files": {}}
     total = 0
@@ -1317,10 +1727,6 @@ def cmd_verify(cfg: MrfxConfig, args) -> int:
     byte-for-byte against its own manifest; the live store is checked by
     binding every view and reading every parquet footer — the failures that
     otherwise surface only when a report needs the data."""
-    import hashlib
-    import json as _json
-    import zipfile
-
     from .store import sql_path
 
     target = Path(args.target) if args.target else None
@@ -1328,38 +1734,10 @@ def cmd_verify(cfg: MrfxConfig, args) -> int:
         if not target.is_file():
             print(f"no such backup file: {target}")
             return 1
-        bad = 0
-        try:
-            with zipfile.ZipFile(target) as z:
-                manifest = _json.loads(z.read("manifest.json"))
-                for rel, meta in manifest["files"].items():
-                    h = hashlib.sha256()
-                    try:
-                        with z.open(f"store/{rel}") as fh:
-                            for chunk in iter(lambda: fh.read(1 << 20), b""):
-                                h.update(chunk)
-                        ok = h.hexdigest() == meta["sha256"]
-                    except (zipfile.BadZipFile, KeyError, OSError) as e:
-                        ok = False
-                        print(f"  ({rel}: {e})")
-                    if not ok:
-                        bad += 1
-                        print(f"CORRUPT: {rel}")
-        except (zipfile.BadZipFile, KeyError, ValueError, OSError) as e:
-            # a torn central directory / missing manifest is corruption too —
-            # report it as the verdict, never a traceback
-            print(f"this backup is not readable ({e}) — it is damaged; "
-                  "take a fresh one.")
-            return 1
-        n = len(manifest["files"])
-        if bad:
-            print(f"\n{bad} of {n} files FAILED the checksum — this backup is "
-                  "damaged; take a fresh one.")
-            return 1
-        print(f"backup OK: {n} files match their checksums"
-              + (f"; recorded {manifest.get('counts', {}).get('rates', '?'):,} "
-                 "rate rows" if manifest.get("counts") else ""))
-        return 0
+        from .backup import verify_zip
+        ok, verdict = verify_zip(target, out=print)
+        print(verdict)
+        return 0 if ok else 1
 
     # live store: structural integrity, not checksums (it changes by design)
     if _something_owns_the_port(cfg, "verifying the store locally"):
@@ -1406,9 +1784,13 @@ def cmd_orgreport(cfg: MrfxConfig, args) -> int:
     market: dict = {"month": args.month}
     if args.state:
         market["state"] = args.state
+    from . import progress as _progress
     try:
-        profile = compute_org_profile(store, args.subject, market)
-        files = org_bundle_files(store, profile)
+        with _progress.text_bar("bundle", label="Tracker bundle") as bar:
+            profile = compute_org_profile(store, args.subject, market)
+            bar.stage("Collecting NPIs and contact details")
+            files = org_bundle_files(store, profile)
+            bar.stage("Zipping")
     except Exception as e:  # noqa: BLE001 — a lookup miss is a message, not a trace
         print(f"could not build the bundle: {e}")
         return 1
@@ -1559,6 +1941,28 @@ def cmd_speedtest(cfg: MrfxConfig, args) -> int:
     return 0
 
 
+def cmd_fastcheck(cfg: MrfxConfig, args) -> int:
+    """Run real files through BOTH parsers and confirm identical results."""
+    from .fastcheck import compare_parsers, format_report
+    from .sniff import preflight
+
+    two_pass = {"auto": None, "yes": True, "no": False}[args.two_pass]
+    bad = 0
+    for raw in args.paths:
+        path = Path(raw)
+        if not path.is_file():
+            print(f"{raw}: not a file")
+            bad += 1
+            continue
+        est = preflight(path, cfg).est_uncompressed_bytes
+        rep = compare_parsers(cfg, path, two_pass=two_pass)
+        print(format_report(rep, (est / 1e9) if est else None))
+        bad += not rep["identical"]
+    if len(args.paths) > 1:
+        print(f"\n{len(args.paths) - bad} of {len(args.paths)} files identical")
+    return 1 if bad else 0
+
+
 def cmd_reset(cfg: MrfxConfig, args) -> int:
     if not args.confirm:
         print("refusing: pass --confirm to clear the store (processed files are kept)")
@@ -1570,25 +1974,111 @@ def cmd_reset(cfg: MrfxConfig, args) -> int:
     return 0
 
 
+# `mrfx serve` exits with this when relaunching cannot help: the port is
+# already taken (the app is ALREADY running) or the config file has a typo.
+# The supervisor used to restart on anything but 0 — double-clicking Start
+# while the dashboard was up looped "port in use … restarting in 5 s, 10 s,
+# 20 s, 60 s" until the window was closed (round 7 P1.18).
+EXIT_NO_RESTART = 3
+
+_SERVE_LOG_MAX_BYTES = 5 << 20
+
+
+def _serve_log_path(config_path: str):
+    """<store>/diagnostics/serve.log, or None when the config can't say."""
+    try:
+        cfg = load_mrfx_config(config_path)
+        d = Path(cfg.store_dir) / "diagnostics"
+        d.mkdir(parents=True, exist_ok=True)
+        return d / "serve.log"
+    except Exception:  # noqa: BLE001 — the child reports config problems itself
+        return None
+
+
+def _run_child_teed(child: list, log_path) -> int:
+    """Run the server, echoing its output to this window AND appending it to
+    serve.log, so the last error survives the window being closed (the docs
+    send the user to "the mrfx serve window"; a closed window lost it)."""
+    import subprocess
+    env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
+    if log_path is None:
+        return subprocess.call(child, env=env)
+    try:
+        if log_path.exists() and log_path.stat().st_size > _SERVE_LOG_MAX_BYTES:
+            os.replace(log_path, log_path.with_name("serve.log.1"))
+    except OSError:
+        pass
+    proc = subprocess.Popen(child, env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT)
+    out = getattr(sys.stderr, "buffer", None)
+    try:
+        return _pump(proc, log_path, out)
+    except KeyboardInterrupt:
+        # Ctrl-C reaches the server too (same console): let it shut down
+        # cleanly instead of leaving it running behind a closed supervisor
+        try:
+            proc.wait(timeout=60)
+        except Exception:  # noqa: BLE001
+            proc.terminate()
+        raise
+
+
+def _pump(proc, log_path, out) -> int:
+    try:
+        with open(log_path, "ab") as logf:
+            logf.write(f"\n===== {_dt_now()} supervisor started the server =====\n".encode())
+            for line in iter(proc.stdout.readline, b""):
+                try:
+                    logf.write(line)
+                    logf.flush()
+                except OSError:
+                    pass
+                try:
+                    if out is not None:
+                        out.write(line)
+                        out.flush()
+                    else:
+                        sys.stderr.write(line.decode("utf-8", "replace"))
+                except (OSError, ValueError):
+                    pass
+    except OSError:
+        pass
+    return proc.wait()
+
+
+def _dt_now() -> str:
+    import datetime as _dtm
+    return _dtm.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _supervise_serve(config_path: str) -> int:
     """Run `mrfx serve` in a child process, restarting on any abnormal exit.
-    Stops cleanly on a normal exit (code 0, e.g. the port is taken) or on
-    Ctrl-C. Backs off between restarts so a crash-on-boot can't hot-loop."""
-    import subprocess
+    Stops on a normal exit (0, Ctrl-C) and on EXIT_NO_RESTART (the port is
+    taken — the app is already running — or the config is broken); backs off
+    between restarts so a crash-on-boot can't hot-loop."""
     import time as _time
 
     child = [sys.executable, "-m", "mrfx", "--config", config_path, "serve"]
+    log_path = _serve_log_path(config_path)
     print("MRF Explorer supervisor: auto-restart is ON. If the server ever "
           "stops unexpectedly it will relaunch in a few seconds and resume "
-          "where it left off. Press Ctrl-C (twice) to stop for good.\n",
-          file=sys.stderr)
+          "where it left off. Press Ctrl-C to stop for good."
+          + (f" Everything shown here is also saved to {log_path}." if log_path else "")
+          + "\n", file=sys.stderr)
     backoff = 5
     while True:
         started = _time.monotonic()
         try:
-            code = subprocess.call(child)
+            code = _run_child_teed(child, log_path)
         except KeyboardInterrupt:
             return 0  # user stopping the whole thing
+        if code == EXIT_NO_RESTART:
+            print("\nMRF Explorer did not start, and restarting would not help — "
+                  "see the message above (usually: it is ALREADY running, so just "
+                  "open the dashboard in your browser, or config/mrfx.yaml has a "
+                  "typo). "
+                  "Supervisor stopping.", file=sys.stderr)
+            return code
         # a server that ran healthily for a while then died is a fresh incident,
         # not a boot loop — reset the backoff so it comes right back
         if _time.monotonic() - started > 120:
@@ -1613,9 +2103,19 @@ def _supervise_serve(config_path: str) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # output redirected to a file on Windows (cp1252, no PYTHONUTF8) crashed
+    # on the first "→" or "—" AFTER the store was open (review 11 item 4.4g):
+    # an unprintable character prints as "?" instead
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
     ap = argparse.ArgumentParser(prog="mrfx", description="MRF Explorer — drop-in payer rate dashboard")
     ap.add_argument("--config", default="config/mrfx.yaml")
     ap.add_argument("-v", "--verbose", action="store_true")
+    from . import __version__ as _v
+    ap.add_argument("--version", action="version", version=f"mrfx {_v}")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("serve", help="start API + dashboard + inbox watcher")
@@ -1628,12 +2128,18 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--retry-failed", action="store_true", help="also re-queue previously failed URLs")
     p.add_argument("--known", action="store_true",
                    help="queue every tested payer index from config/known_sources.yaml")
+    p.add_argument("--states", default="",
+                   help="with --known: only these states' payers (plus national ones), "
+                        "e.g. --states MO,KS")
     p = sub.add_parser("preflight", help="inspect a file before committing to a long parse")
     p.add_argument("path")
     p = sub.add_parser("ingest", help="one-shot ingest of a file or directory (default: inbox)")
     p.add_argument("path", nargs="?")
     p.add_argument("--force", action="store_true", help="ignore confirm_over_gb and done-checkpoints")
-    sub.add_parser("status", help="files table summary")
+    p = sub.add_parser("status", help="files table summary")
+    p.add_argument("--analytics", action="store_true",
+                   help="the Analytics activity panel as text: what is being added to "
+                        "the numbers, what waits and why, what was added recently")
     p = sub.add_parser("export", help="export rates to CSV")
     p.add_argument("out")
     p.add_argument("--payer")
@@ -1660,6 +2166,12 @@ def main(argv: list[str] | None = None) -> int:
                    help="base-modifier rows only (default on; --no-base-only includes modified rows)")
     p = sub.add_parser("forget", help="erase chosen files' rates + raw copies (see `mrfx status` for names)")
     p.add_argument("filenames", nargs="+")
+    p = sub.add_parser("sources", help="the tested payer sources: list them, or --check them live")
+    p.add_argument("--check", action="store_true",
+                   help="fetch the first 2 MB of each source and report OK / CHANGED / DEAD "
+                        "(read-only; queues nothing)")
+    p.add_argument("--states", default="", help="only these states' sources (+ national), e.g. MO,KS")
+    p.add_argument("--report", default="", help="also write the results to this CSV file")
     p = sub.add_parser("enrich", help="resolve NPI names/geography now (NPPES bulk file or API)")
     p.add_argument("--bulk", dest="bulk_file", metavar="PATH",
                    help="NPPES full-file .zip (or unzipped .csv) — resolves all names in one local pass")
@@ -1683,6 +2195,8 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("packets", help="write a monthly packet for every watchlist client")
     p.add_argument("--out", default=None, help="output folder (default: packets_dir, else <store>/../packets)")
+    p.add_argument("--pdf", action="store_true",
+                   help="also save every document as a PDF beside it (needs the optional built-in browser)")
     p = sub.add_parser("renewals", help="contracts with a real published end date, soonest first")
     p.add_argument("--subject", default=None, help="one practice (entity/TIN/NPI)")
     p.add_argument("--clients", action="store_true", help="only your watchlist clients")
@@ -1749,6 +2263,22 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--month", default="latest", help="as-of month for the parity table")
 
     p = sub.add_parser(
+        "cmsref",
+        help="fetch CMS hospital/nursing-home lists + Medicare therapy rows (practice types)")
+    p.add_argument("--refresh", action="store_true",
+                   help="fetch the Medicare rows again even when the year is unchanged")
+
+    p = sub.add_parser(
+        "dac",
+        help="load the CMS Doctors and Clinicians file (names practices with no organization NPI)")
+    p.add_argument("--file", default=None,
+                   help="a DAC_NationalDownloadableFile.csv you downloaded; omit to download "
+                        "the current release from data.cms.gov (kept in cms_dac_dir)")
+    p.add_argument("--release", default=None, help="the release date of --file, e.g. 2026-10-30")
+    p.add_argument("--refresh", action="store_true",
+                   help="download and load again even when the release is unchanged")
+
+    p = sub.add_parser(
         "inflation",
         help="show or extend the price index behind real-terms (constant-dollar) figures")
     p.add_argument("--year", type=int, default=None, help="calendar year, e.g. 2025")
@@ -1758,6 +2288,12 @@ def main(argv: list[str] | None = None) -> int:
                    help="index label (default CPI-U)")
     p.add_argument("--source", default=None, help="where you read the value")
 
+    p = sub.add_parser("update", help="install a newer version from its .zip — keeps your data and settings")
+    p.add_argument("zip", help="the new mrfx_project.zip you downloaded")
+    p.add_argument("--no-pip", action="store_true", help="skip re-syncing the Python packages")
+    p.add_argument("--allow-downgrade", action="store_true",
+                   help="install an OLDER build on purpose (not recommended: an older "
+                        "program must not run against a store a newer one upgraded)")
     p = sub.add_parser("backup", help="copy the whole store into one zip with a checksum manifest")
     p.add_argument("dest", help="backup filename, e.g. E:\\backups\\mrfx_2026-08-12.zip")
     p = sub.add_parser("verify", help="check a backup zip against its manifest, or the live store's integrity")
@@ -1778,6 +2314,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("url", help="a direct MRF file URL (not an index/TOC page)")
     p.add_argument("--mb", type=int, default=40,
                    help="MB to pull per attempt (default 40; downloads it 4x, once per setting)")
+
+    p = sub.add_parser(
+        "fastcheck",
+        help="run files through the fast AND classic parsers; confirm identical rates")
+    p.add_argument("paths", nargs="+", help="in-network files (.json / .json.gz / .zip)")
+    p.add_argument("--two-pass", choices=["auto", "yes", "no"], default="auto",
+                   help="force the big-file two-pass mode on/off (default: as ingest would)")
 
     p = sub.add_parser("reset", help="clear the store (keeps processed files)")
     p.add_argument("--confirm", action="store_true")
@@ -1810,16 +2353,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "serve" and getattr(args, "supervise", False):
         return _supervise_serve(args.config)
 
+    # a broken config is not something a restart fixes: serve says so with
+    # EXIT_NO_RESTART so the supervisor stops instead of looping
+    fatal = EXIT_NO_RESTART if args.cmd == "serve" else 1
     try:
         cfg = load_mrfx_config(args.config)
         cfg.ensure_dirs()
     except ConfigFileError as e:
         print(f"config problem: {e}", file=sys.stderr)
-        return 1
+        return fatal
     except OSError as e:
         print(f"could not create the data directories from {args.config}: {e}\n"
               "Check the *_dir settings point at usable folder paths.", file=sys.stderr)
-        return 1
+        return fatal
     handler = {
         "serve": cmd_serve,
         "add": cmd_add,
@@ -1829,10 +2375,12 @@ def main(argv: list[str] | None = None) -> int:
         "export": cmd_export,
         "outreach": cmd_outreach,
         "forget": cmd_forget,
+        "sources": cmd_sources,
         "enrich": cmd_enrich,
         "medicare": cmd_medicare,
         "orgreport": cmd_orgreport,
         "speedtest": cmd_speedtest,
+        "fastcheck": cmd_fastcheck,
         "packets": cmd_packets,
         "renewals": cmd_renewals,
         "utilization": cmd_utilization,
@@ -1840,9 +2388,12 @@ def main(argv: list[str] | None = None) -> int:
         "newclinics": cmd_newclinics,
         "closures": cmd_closures,
         "inflation": cmd_inflation,
+        "cmsref": cmd_cmsref,
+        "dac": cmd_dac,
         "hospital": cmd_hospital,
         "floors": cmd_floors,
         "backup": cmd_backup,
+        "update": cmd_update,
         "verify": cmd_verify,
         "reset": cmd_reset,
     }[args.cmd]

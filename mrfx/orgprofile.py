@@ -27,7 +27,7 @@ import datetime as dt
 import io
 
 from . import __version__
-from .benchmark import BenchmarkError, normalize_market, resolve_subject_tins
+from .benchmark import BenchmarkError, normalize_market
 from .catalog import code_info
 from .schedule import (_methodology, compute_fee_schedule,
                        payer_scorecard, require_rate_card_content)
@@ -43,7 +43,10 @@ def _w(rows: list[list]) -> str:
 def compute_org_profile(store: Store, subject: str, market: dict) -> dict:
     """Identity + NPIs + the full rate profile for ONE organization."""
     market = normalize_market(market)
-    tins = resolve_subject_tins(store, subject)
+    # the subject rule (subject_tins_for_market): a name used in two states
+    # is the practice in the market's state (review 10 item 2.9)
+    from .benchmark import subject_tins_for_market
+    tins = subject_tins_for_market(store, subject, market)
     if not tins:
         raise BenchmarkError(f"no practice matched '{subject}'")
 
@@ -55,23 +58,24 @@ def compute_org_profile(store: Store, subject: str, market: dict) -> dict:
         # The NPIs that actually bill under this practice's TIN(s) — the handle
         # the tracker works in. Includes the NPI-in-the-TIN-slot case.
         npis = [r[0] for r in con.execute(
-            "SELECT DISTINCT npi FROM rates WHERE tin_value IN "
+            f"SELECT DISTINCT npi FROM {store.pairs_relation()} WHERE tin_value IN "
             "(SELECT unnest(?::VARCHAR[])) AND npi IS NOT NULL ORDER BY npi",
             [tins]).fetchall()]
         ident = con.execute(
-            "SELECT any_value(display_name), "
+            "SELECT first(display_name ORDER BY npi_count DESC NULLS LAST, tin_value) "
+            "       FILTER (display_name IS NOT NULL), "
             "       list_sort(list_distinct(flatten(list(states)))), "
             "       list_sort(list_distinct(flatten(list(cities)))) "
             "FROM tin_directory WHERE tin_value IN (SELECT unnest(?::VARCHAR[]))",
             [tins]).fetchone() or (None, [], [])
         # NPPES contact detail, same source the outreach export uses
         contact = con.execute(
-            "SELECT mode(org_name) FILTER (org_name IS NOT NULL), "
-            "       mode(address)  FILTER (address IS NOT NULL), "
-            "       mode(city)     FILTER (city IS NOT NULL), "
-            "       mode(state)    FILTER (state IS NOT NULL), "
-            "       mode(zip)      FILTER (zip IS NOT NULL), "
-            "       mode(phone)    FILTER (phone IS NOT NULL) "
+            "SELECT mode(org_name ORDER BY org_name) FILTER (org_name IS NOT NULL), "
+            "       mode(address ORDER BY address)  FILTER (address IS NOT NULL), "
+            "       mode(city ORDER BY city)     FILTER (city IS NOT NULL), "
+            "       mode(state ORDER BY state)    FILTER (state IS NOT NULL), "
+            "       mode(zip ORDER BY zip)      FILTER (zip IS NOT NULL), "
+            "       mode(phone ORDER BY phone)    FILTER (phone IS NOT NULL) "
             "FROM npi_directory WHERE npi IN (SELECT unnest(?::VARCHAR[]))",
             [npis or [""]]).fetchone() or (None,) * 6
         months = [r[0] for r in con.execute(
@@ -244,6 +248,7 @@ def org_bundle_files(store: Store, profile: dict) -> dict[str, str]:
         f"Rate rows:      {max(0, len(rows) - 1)}",
         "",
         _methodology(store, fs),
+        *store.analytics_note(),
         "",
         "Source: payers' Transparency-in-Coverage machine-readable files, as",
         "ingested by this app. These are PUBLISHED NEGOTIATED RATES — not paid",

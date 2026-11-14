@@ -1,0 +1,17 @@
+08:53:57 INFO    mrfx.cli: opening the store at /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/scale4n/store …
+08:53:57 INFO    mrfx.store: analytics memory budget: 6 GB (5.6 GiB, as DuckDB reports it) — chosen automatically from this machine's RAM; raise duckdb_memory_gb in config/mrfx.yaml if rebuilds run out
+08:53:57 INFO    mrfx.cli: watching /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/scale4n/in
+08:53:57 INFO    mrfx.fetch: download lanes: 3 slot(s) for files up to 100 MB, 3 for bigger files
+08:53:57 INFO    mrfx.fetch: parallel downloads: 6 fetcher thread(s)
+08:53:57 INFO    mrfx.fetch: parallel ingest: 3 parser worker process(es)
+
+  MRF Explorer  →  http://localhost:8392
+  store: /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/scale4n/store  (45 file(s) ingested)
+  inbox: /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/scale4n/in  (drop .json / .json.gz / .zip here)
+  or paste MRF/TOC URLs on the Files tab — downloads run automatically
+  if the app ever freezes: open /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/scale4n/store/diagnostics/stacks_latest.txt
+  in Notepad and send its contents (auto-refreshed every 30s)
+
+08:53:57 INFO    mrfx.cli: the dashboard is ready — open http://localhost:8392
+08:54:14 INFO    mrfx.store: analytics update: 1 new file(s), 0 queued slice(s) — recomputing 1 payer slice(s) instead of the whole store
+08:54:26 INFO    mrfx.store: analytics update finished in 12s (payer slice, not a full rebuild)

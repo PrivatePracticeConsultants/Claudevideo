@@ -223,7 +223,7 @@ def test_second_concurrent_ingest_of_same_file_bows_out(cfg, store, monkeypatch)
 
     real = ing._ingest_file_locked
 
-    def slow(cfg2, store2, path2, pf2, bar2, rb2):
+    def slow(cfg2, store2, path2, pf2, bar2, rb2, **_kw):
         barrier.wait()  # hold the claim until the second call has been tried
         return real(cfg2, store2, path2, pf2, bar2, rb2)
 
@@ -245,7 +245,9 @@ def test_second_concurrent_ingest_of_same_file_bows_out(cfg, store, monkeypatch)
 
 def test_worker_count_auto_scales_and_clamps(monkeypatch):
     import mrfx.fetch as fetch
+    import mrfx.store as store_mod
     from mrfx.config import MrfxConfig
+    monkeypatch.setattr(store_mod, "_total_ram_bytes", lambda: 0)   # RAM unknown: cores decide
     monkeypatch.setattr(fetch.os, "cpu_count", lambda: 8)
     assert fetch.resolve_worker_count(MrfxConfig(parallel_ingests=0)) == 7  # auto = cores-1
     assert fetch.resolve_worker_count(MrfxConfig(parallel_ingests=3)) == 3  # pinned
@@ -255,6 +257,23 @@ def test_worker_count_auto_scales_and_clamps(monkeypatch):
     assert fetch.resolve_worker_count(MrfxConfig(parallel_ingests=0)) == 8  # auto capped at 8
     monkeypatch.setattr(fetch.os, "cpu_count", lambda: 1)
     assert fetch.resolve_worker_count(MrfxConfig(parallel_ingests=0)) == 1  # never below 1
+
+
+def test_auto_worker_count_respects_ram(monkeypatch):
+    """8 cores used to mean 7 workers even on a 16 GB laptop: 7 x ~2 GB on a
+    reference-heavy payer plus the 6 GB analytics pool overcommits RAM."""
+    import mrfx.fetch as fetch
+    import mrfx.store as store_mod
+    from mrfx.config import MrfxConfig
+    monkeypatch.setattr(fetch.os, "cpu_count", lambda: 8)
+    for ram_gb, want in ((8, 1), (16, 3), (32, 7), (64, 7)):
+        monkeypatch.setattr(store_mod, "_total_ram_bytes", lambda g=ram_gb: g * 10**9)
+        assert fetch.resolve_worker_count(MrfxConfig(parallel_ingests=0)) == want, ram_gb
+    # a pinned pool size shrinks the analytics share and frees room for workers
+    monkeypatch.setattr(store_mod, "_total_ram_bytes", lambda: 16 * 10**9)
+    assert fetch.resolve_worker_count(MrfxConfig(parallel_ingests=0, duckdb_memory_gb=2)) == 5
+    # an explicit parallel_ingests is the user's call: cores still clamp, RAM doesn't
+    assert fetch.resolve_worker_count(MrfxConfig(parallel_ingests=6)) == 6
 
 
 def test_json_backend_detector_runs():

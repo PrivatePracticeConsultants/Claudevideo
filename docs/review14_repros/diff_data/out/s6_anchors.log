@@ -1,0 +1,5 @@
+medicaid, practice rate 29.996 -> Medicaid pays $30.00 for 97110 in MO; Alpha pays you $30.00 (below Medicaid).
+medicaid, practice rate 30.004 -> Medicaid pays $30.00 for 97110 in MO; Alpha pays you $30.00 (100% of Medicaid).
+medicaid, practice rate 29.9951 -> Medicaid pays $30.00 for 97110 in MO; Alpha pays you $30.00 (below Medicaid).
+hospital without state -> {'lines': [], 'reason': "no loaded hospital file in MO lists a rate from this practice's payers for these codes (payer names must match exactly between the two sources)"}
+two same-name MO hospitals -> ['97112: Alpha pays Mercy Hospital $200.00 (you: $40.00).']

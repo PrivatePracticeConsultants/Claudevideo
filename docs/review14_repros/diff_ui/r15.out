@@ -1,0 +1,5 @@
+  from starlette.testclient import TestClient as TestClient  # noqa
+/api/export.zip mrfx_explorer_2026-11-12_0847.csv identical | token inside: False
+/api/export.zip mrfx_explorer_2026-11-12_0847_methodology.txt identical | token inside: False
+/api/export/outreach.zip mrfx_outreach_2026-11-12.csv identical | token inside: False
+/api/export/outreach.zip mrfx_outreach_2026-11-12_methodology.txt identical | token inside: False

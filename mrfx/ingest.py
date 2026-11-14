@@ -18,11 +18,16 @@ from pathlib import Path
 from .config import MrfxConfig
 from .parser import (
     InNetworkParser,
+    fast_big_file_available,
     parse_provider_reference_file,
-    skim_needed_ref_ids,
+    published_month_of,
+    run_big_file_fast,
+    run_in_network_parse,
+    run_skim,
+    skipped_groups_reason,
 )
 from .sniff import Preflight, open_stream, preflight
-from .store import FINISHED_NOW, Store, file_key, sql_path
+from .store import FINISHED_NOW, Store, file_key, sql_path, unlink_with_retry
 
 log = logging.getLogger(__name__)
 
@@ -94,6 +99,25 @@ class _ProgressTracker:
             except Exception:  # noqa: BLE001 — a display bar is cosmetic; drop it
                 self.on_bar = None
 
+    def set_percent(self, pct: float) -> None:
+        """Drive the bar by percent (the single-read path's phases). Chunks
+        are 64 MB compressed — too coarse to show a long replay moving — so
+        a half-percent of movement updates the bar too."""
+        chunk = int(self.chunks_total * min(100.0, pct) / 100.0)
+        if chunk == self._last_chunk and pct - getattr(self, "_last_pct", -1.0) < 0.5:
+            return
+        self._last_chunk = chunk
+        self._last_pct = pct
+        try:
+            self.store.update_progress(self.filename, pct, chunks_done=chunk, chunks_total=self.chunks_total)
+        except Exception:  # noqa: BLE001 — progress writes must never break ingest
+            pass
+        if self.on_bar:
+            try:
+                self.on_bar(chunk, self.chunks_total, pct)
+            except Exception:  # noqa: BLE001 — a display bar is cosmetic; drop it
+                self.on_bar = None
+
     def finish(self) -> None:
         try:
             self.store.update_progress(self.filename, 100.0, self.chunks_total, self.chunks_total)
@@ -106,17 +130,100 @@ class _ProgressTracker:
                 self.on_bar = None
 
 
-def qa_report(store: Store, qa_counters: dict, source_file: str) -> dict:
+def _chunk_label(last) -> str:
+    """The last chunk count the parent saw from a worker, for log lines.
+    `last` is -1 before any report, else (chunks_done, pct)."""
+    if isinstance(last, tuple) and isinstance(last[0], int) and last[0] >= 0:
+        return str(last[0])
+    return "0"
+
+
+class SingleReadProgress:
+    """Progress for run_big_file_fast, whose work is NOT two equal passes:
+    a full scan, an optional SHORT re-read of the reference table, then a
+    replay of the spooled target items (on a row-dense file — 590M rows from
+    one Aetna file — the replay is most of the time). A two-pass bar sat at
+    ~50% for the whole single read and jumped to 100% at the end.
+
+    Shares: scan 0-80% (compressed bytes read), reference re-read 80-85%
+    (scaled by where the reference table ended, learned during the scan),
+    replay 85-99% (spool bytes replayed), 100% at finish. Monotonic, and it
+    keeps moving during the replay — the parent's frozen-worker watchdog
+    reads a moving chunk count as "alive"."""
+
+    SCAN_END, REFS_END, REPLAY_END = 80.0, 85.0, 99.0
+    STEP = 0.25   # emit at most every quarter percent
+
+    def __init__(self, compressed_total: int, emit):
+        self.total = max(int(compressed_total or 0), 1)
+        self.emit = emit
+        self.phase = "scan"
+        self.pos = 0
+        self.refs_end: int | None = None
+        self.pct = 0.0
+        self._last = -1.0
+
+    def feed(self, compressed_read: int) -> None:      # open_stream progress_cb
+        self.pos = compressed_read
+        if self.phase == "scan":
+            self._set(self.SCAN_END * min(1.0, compressed_read / self.total))
+        elif self.phase == "refs":
+            span = self.refs_end or self.total
+            self._set(self.SCAN_END + (self.REFS_END - self.SCAN_END) * min(1.0, compressed_read / span))
+
+    def refs_closed(self) -> None:
+        if self.phase == "scan" and self.refs_end is None:
+            self.refs_end = max(self.pos, 1)
+
+    def second_pass(self) -> None:
+        self.phase = "refs"
+
+    def replay(self, done: int, total: int) -> None:
+        self.phase = "replay"
+        self._set(self.REFS_END + (self.REPLAY_END - self.REFS_END) * min(1.0, done / max(total, 1)))
+
+    def _set(self, pct: float) -> None:
+        pct = max(pct, self.pct)
+        self.pct = pct
+        if pct - self._last >= self.STEP:
+            self._last = pct
+            self.emit(pct)
+
+
+NO_TARGET_MSG = ("scanned: none of the target billing codes appear in this file — "
+                 "0 rows is the honest answer, not an error")
+
+
+def _no_target_note(qa: dict, no_target: bool) -> dict:
+    """A 0-row file with none of the target codes says so on every path —
+    only the big-file short-circuit did; a small file showed a bare 0 on the
+    Files tab (review 11 item 4.6)."""
+    if no_target and not qa.get("rows"):
+        qa.setdefault("messages", []).append(NO_TARGET_MSG)
+    return qa
+
+
+def qa_report(store: Store, qa_counters: dict, source_file: str,
+              agg: tuple[int, int, int] | None = None) -> dict:
     """Per-file data-quality summary (§7A.3). The incremental counters come from
     the parser (as a plain dict, so parallel workers can ship them across
     processes); the aggregate metrics (outliers, duplicate ratio, TIN=NPI
     count) are computed in DuckDB over the written part so this scales to
-    files with millions of rows without holding them in Python memory."""
+    files with millions of rows without holding them in Python memory.
+
+    `agg` = (outliers, tin_is_really_npi rows, distinct facts) already
+    computed by the parse WORKER on its own part (qa_aggregate_counts on a
+    private connection) — then the main process's shared DuckDB, which also
+    serves the dashboard and the rollups, isn't scanned at all."""
     qa = dict(qa_counters)
     total = qa["rows"]
     part = store.rates_dir / f"{file_key(source_file)}.parquet"
     try:
-        _qa_aggregates(store, part, total, qa)
+        if agg is None:
+            with store.connect() as con:
+                agg = (qa_aggregate_counts(con, part) if total and part.exists()
+                       else (0, 0, 0))
+        _apply_qa_aggregates(qa, total, agg)
     except Exception as e:  # noqa: BLE001 — this runs AFTER the parse succeeded
         # and its parquet is durable: derived stats failing (store briefly
         # locked by an external reader) must degrade, not flip a finished
@@ -129,32 +236,73 @@ def qa_report(store: Store, qa_counters: dict, source_file: str) -> dict:
     return qa
 
 
-def _qa_aggregates(store: Store, part: Path, total: int, qa: dict) -> None:
-    outliers = tin_npi = distinct_facts = 0
-    if total and part.exists():
-        with store.connect() as con:
-            p = str(part)
-            outliers = con.execute(
-                f"""
-                WITH r AS (SELECT * FROM read_parquet('{sql_path(p)}') WHERE is_dollar_rate),
-                med AS (SELECT billing_code, median(negotiated_rate) m FROM r GROUP BY billing_code)
-                SELECT count(*) FROM r JOIN med USING (billing_code)
-                WHERE m > 0 AND (negotiated_rate > 5 * m OR negotiated_rate < 0.2 * m)
-                """
-            ).fetchone()[0]
-            tin_npi = con.execute(
-                f"SELECT count(*) FROM read_parquet('{sql_path(p)}') WHERE tin_is_really_npi"
-            ).fetchone()[0]
-            distinct_facts = con.execute(
-                f"""
-                SELECT count(*) FROM (
-                    SELECT DISTINCT payer, tin_value, npi, billing_code,
-                           array_to_string(billing_code_modifier, '|'),
-                           negotiated_rate, billing_class
-                    FROM read_parquet('{sql_path(p)}')
-                )
-                """
-            ).fetchone()[0]
+def qa_aggregate_counts(con, part: Path) -> tuple[int, int, int]:
+    """(outlier dollar rates, tin_is_really_npi rows, distinct negotiated
+    facts) of one rate part — THE definition, run by the parse worker on a
+    private connection or by the main process as a fallback. Two scans:
+    outliers and the TIN=NPI count share one pass (verified identical to the
+    former three-query form on 11 real parts, 32M rows)."""
+    src = f"read_parquet('{sql_path(str(part))}')"
+    outliers, tin_npi = con.execute(
+        f"""
+        WITH med AS (SELECT billing_code, median(negotiated_rate) AS m FROM {src}
+                     WHERE is_dollar_rate GROUP BY billing_code)
+        SELECT count(*) FILTER (WHERE r.is_dollar_rate AND med.m > 0
+                                AND (r.negotiated_rate > 5 * med.m
+                                     OR r.negotiated_rate < 0.2 * med.m)),
+               count(*) FILTER (WHERE r.tin_is_really_npi)
+        FROM {src} r LEFT JOIN med USING (billing_code)
+        """
+    ).fetchone()
+    distinct_facts = con.execute(
+        f"""
+        SELECT count(*) FROM (
+            SELECT DISTINCT payer, tin_value, npi, billing_code,
+                   array_to_string(billing_code_modifier, '|'),
+                   negotiated_rate, billing_class
+            FROM {src}
+        )
+        """
+    ).fetchone()[0]
+    return int(outliers or 0), int(tin_npi or 0), int(distinct_facts or 0)
+
+
+# the worker's private QA connection: a slice of the machine, never the
+# whole of it (the other workers are parsing meanwhile)
+WORKER_QA_THREADS = 2
+WORKER_QA_MEMORY = "1GB"
+
+
+def _worker_qa_counts(part: Path) -> tuple[int, int, int] | None:
+    """qa_aggregate_counts on a private in-memory DuckDB, inside the parse
+    worker. Spills (a 590M-row DISTINCT does) to a pid-named folder beside the
+    part — never the current directory — removed afterwards and swept at the
+    next start if the worker dies. None on any failure: the parent then runs
+    the same query on the main connection, so QA never fails a parse."""
+    import duckdb
+
+    spill = part.with_name(part.name.removesuffix(".parquet.tmp") + ".qa-spill")
+    con = None
+    try:
+        con = duckdb.connect()
+        con.execute(f"SET threads = {WORKER_QA_THREADS}")
+        con.execute(f"SET memory_limit = '{WORKER_QA_MEMORY}'")
+        con.execute("SET preserve_insertion_order = false")
+        con.execute("SET enable_progress_bar = false")   # else it paints the console
+        con.execute(f"SET temp_directory = '{sql_path(str(spill))}'")
+        return qa_aggregate_counts(con, part)
+    except Exception as e:  # noqa: BLE001 — cosmetic tier: the parent recomputes
+        log.info("%s: worker QA skipped (%s) — the main process will compute it",
+                 part.name, e)
+        return None
+    finally:
+        if con is not None:
+            con.close()
+        shutil.rmtree(spill, ignore_errors=True)
+
+
+def _apply_qa_aggregates(qa: dict, total: int, agg: tuple[int, int, int]) -> None:
+    outliers, tin_npi, distinct_facts = agg
     prices = qa.get("prices") or 0
     qa.update({
         "outlier_rates": outliers,
@@ -167,8 +315,114 @@ def _qa_aggregates(store: Store, part: Path, total: int, qa: dict) -> None:
     })
 
 
+class PoolRestarted(RuntimeError):
+    """A QUEUED parse cancelled by another file's force_heal (a wedged worker
+    was killed). Nothing of THIS file was read: the URL path re-queues it
+    (the download and its sidecar are on disk) instead of leaving a 'failed'
+    row the user must notice and retry by hand."""
+
+
+class ParentGone(RuntimeError):
+    """A parse worker found the app that started it gone and stopped. If the
+    app IS alive (Windows refused the check), the file fails with this plain
+    message and "retry" processes it again — nothing is silently lost."""
+
+
 def _now() -> dt.datetime:
-    return dt.datetime.now(dt.timezone.utc)
+    # naive UTC — the store's one clock (store._utcnow explains why not aware)
+    return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+
+
+# (size, mtime_ns) of each file as its ingest started, by path: _finish_ok
+# compares, so a file replaced while it was being read is neither recorded
+# as "loaded" nor moved (review 9 item 1.2 / F9)
+_INGEST_STAT: dict[str, tuple[int, int]] = {}
+
+
+def _note_ingest_start(path: Path) -> None:
+    try:
+        st = path.stat()
+        _INGEST_STAT[str(path)] = (st.st_size, st.st_mtime_ns)
+    except OSError:
+        pass
+
+
+def _download_identity(path: Path) -> dict | None:
+    """sha + trailer_proves the downloader computed while it wrote `path`."""
+    from .fetch import DOWNLOAD_IDENTITY
+    ident = DOWNLOAD_IDENTITY.pop(str(path), None)
+    if ident:
+        return ident
+    meta = Path(str(path) + ".fetchmeta")
+    try:
+        m = json.loads(meta.read_text())
+        if m.get("sha"):
+            return {"sha": m["sha"], "trailer_proves": m.get("trailer_proves")}
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def code_set_key(cfg: MrfxConfig) -> str:
+    """The active billing-code list as the files table records it."""
+    cs = cfg.code_set
+    return "ALL" if cs is None else ",".join(sorted(cs))
+
+
+def _finish_ok(cfg: MrfxConfig, store: Store, path: Path) -> None:
+    """A file ingested successfully: remember its fingerprint (so a copy of
+    it under another web address is recognised before it finishes
+    downloading — fetch.early_duplicate_check) and its IDENTITY (size + the
+    mtime it had when read, full sha256 when known, whether its tail vouches
+    for its whole content), then the usual housekeeping. A file that changed
+    while it was being read is left where it is and recorded as nothing:
+    the rows came from the bytes that were read, and the next scan offers
+    the new bytes as what they are. Cosmetic tier: an identity that can't be
+    recorded costs only an early skip / a same-name check, never the
+    ingest."""
+    from .identity import LOCAL_HASH_MAX_BYTES
+    started = _INGEST_STAT.pop(str(path), None)
+    try:
+        # the code list this file was read for (review 13 item 5.2.4)
+        store.upsert_file(path.name, code_set=code_set_key(cfg))
+    except Exception:  # noqa: BLE001 — bookkeeping
+        pass
+    try:
+        st = path.stat()
+        if started is not None and (st.st_size, st.st_mtime_ns) != started:
+            log.warning("%s changed while it was being read — its rows are from the "
+                        "version that was read; the new version stays where it is and "
+                        "is offered at the next scan", path.name)
+            return
+        from .fetch import file_fingerprint, trailer_proves_for
+        ident = _download_identity(path)
+        # the identity pass made before the load (the content claim, review
+        # 11 items 1.1 + 3.2) already holds the fingerprint and the sha: no
+        # second and third read of the file here
+        seen = _IDENT_SEEN.pop((str(path), st.st_size, st.st_mtime_ns), None)
+        if seen is None and ident is None and st.st_size <= LOCAL_HASH_MAX_BYTES:
+            seen = _identity_of(path, cfg.early_dedup_mb, keep=False)
+        fp = (ident or {}).get("fp") or (seen or {}).get("fp")
+        if fp is None and cfg.early_dedup_mb:
+            fp = file_fingerprint(path, cfg.early_dedup_mb)
+        if fp is not None:
+            store.record_fingerprint(path.name, fp)
+        if ident is None and seen is not None and seen.get("sha"):
+            ident = {"sha": seen["sha"], "csha": seen.get("csha"), "csize": seen.get("csize"),
+                     "trailer_proves": trailer_proves_for(path, seen.get("gz_members"))}
+        store.record_identity(path.name, st.st_size, st.st_mtime_ns,
+                              (ident or {}).get("sha"), (ident or {}).get("trailer_proves"),
+                              (ident or {}).get("csha"), (ident or {}).get("csize"))
+        # a link's download releases its content claim here (the inbox path
+        # releases in ingest_file)
+        try:
+            if (ident or {}).get("csha"):
+                store.release_content_claim(ident["csha"], path.name)
+        except Exception:  # noqa: BLE001
+            pass
+    except Exception:  # noqa: BLE001
+        log.debug("fingerprint not recorded for %s", path.name, exc_info=True)
+    _finish_file(cfg, path, ok=True)
 
 
 def _finish_file(cfg: MrfxConfig, path: Path, ok: bool) -> None:
@@ -182,6 +436,19 @@ def _finish_file(cfg: MrfxConfig, path: Path, ok: bool) -> None:
     a non-technical user with a failure on data that actually ingested fine.
     Log it and leave the file in place (a re-scan sees status='done' and skips
     it)."""
+    if not ok:
+        try:
+            from .fetch import DOWNLOAD_IDENTITY
+            DOWNLOAD_IDENTITY.pop(str(path), None)
+        except Exception:  # noqa: BLE001 — housekeeping
+            pass
+        # a link's download record describes a file that is leaving: an
+        # orphaned sidecar was later trusted for whatever arrived under the
+        # name (review 11 item 1.6)
+        try:
+            Path(str(path) + ".fetchmeta").unlink(missing_ok=True)
+        except OSError:
+            pass
     if not path.exists():
         return
     try:
@@ -207,6 +474,33 @@ def _finish_file(cfg: MrfxConfig, path: Path, ok: bool) -> None:
 _PARSE_POOL = None
 
 
+PARENT_WATCH_SECONDS = 3.0
+
+
+def _worker_watch_parent(parent_pid: int) -> None:
+    """Pool initializer: every parser worker ends itself when the process that
+    started it is gone. The liveness check inside a parse ran only on a chunk
+    change (never after the first report for a file under 64 MB) and an IDLE
+    worker blocks on the pool's queue — killed servers left workers alive for
+    good, ~220 MB each (review 11 item 3.3). Not PR_SET_PDEATHSIG: it fires
+    when the THREAD that spawned the worker ends (a replaced processor
+    thread), which would kill a healthy parse."""
+    import threading as _th
+
+    def watch() -> None:
+        from .store import _pid_alive
+        while True:
+            time.sleep(PARENT_WATCH_SECONDS)
+            try:
+                gone = (os.getppid() != parent_pid) if os.name == "posix" \
+                    else not _pid_alive(parent_pid)
+            except Exception:  # noqa: BLE001 — never kill a worker on a probe error
+                gone = False
+            if gone:
+                os._exit(0)
+    _th.Thread(target=watch, name="mrfx-parent-watch", daemon=True).start()
+
+
 class ParsePoolManager:
     """Self-healing wrapper around a ProcessPoolExecutor. If a worker process
     dies (OOM killer, crash, someone kills it), the executor is permanently
@@ -218,6 +512,7 @@ class ParsePoolManager:
 
         self._max_workers = max_workers
         self._lock = threading.Lock()
+        self.shutting_down = False
         self._pool = self._make()
 
     def _make(self):
@@ -226,7 +521,8 @@ class ParsePoolManager:
 
         return concurrent.futures.ProcessPoolExecutor(
             max_workers=self._max_workers,
-            mp_context=multiprocessing.get_context("spawn"))
+            mp_context=multiprocessing.get_context("spawn"),
+            initializer=_worker_watch_parent, initargs=(os.getpid(),))
 
     def submit(self, fn, *args):
         with self._lock:
@@ -274,6 +570,7 @@ class ParsePoolManager:
         Plain shutdown (and concurrent.futures' atexit hook) WAITS for
         running futures — a SIGTERM'd server would block for the rest of a
         multi-hour parse before exiting."""
+        self.shutting_down = True
         with self._lock:
             pool = self._pool
             if pool is None:
@@ -296,6 +593,46 @@ class ParsePoolManager:
                     proc.terminate()
                 except Exception:  # noqa: BLE001 — already gone
                     pass
+            _release_pool_resources(pool, procs)
+
+    def close(self) -> None:
+        """Orderly end (run_queue's finally): wait for the pool, then free its
+        queues' semaphores (review 12 item 4.1h)."""
+        with self._lock:
+            pool = self._pool
+            procs = list((getattr(pool, "_processes", None) or {}).values())
+            pool.shutdown(wait=True, cancel_futures=True)
+            _release_pool_resources(pool, procs)
+
+
+def _release_pool_resources(pool, procs) -> None:
+    """Join the (terminated) workers briefly, then close the executor's two
+    multiprocessing queues. Left to the interpreter's exit they were never
+    finalised and POSIX's resource tracker printed "There appear to be 5
+    leaked semaphore objects" on every stop of `mrfx serve` (review 12 item
+    4.1h; Windows has no resource tracker). Best-effort: exiting must never
+    need a clean stop."""
+    for proc in procs:
+        try:
+            proc.join(timeout=2)
+        except Exception:  # noqa: BLE001
+            pass
+    mgr = getattr(pool, "_executor_manager_thread", None)
+    if mgr is not None:
+        try:
+            mgr.join(timeout=2)
+        except Exception:  # noqa: BLE001
+            pass
+    for name in ("_call_queue", "_result_queue"):
+        q = getattr(pool, name, None)
+        if q is None:
+            continue
+        try:
+            q.close()
+            if hasattr(q, "join_thread"):
+                q.join_thread()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def set_parse_pool(pool) -> None:
@@ -308,15 +645,61 @@ def get_parse_pool():
     return _PARSE_POOL
 
 
+class ParseStopped(Exception):
+    """The user pressed "stop" on a file mid-parse. Not a failure: the row
+    says so in plain words and the download is kept for a retry."""
+
+    def __init__(self, msg: str = "stopped by you"):
+        super().__init__(msg)
+
+
+# files-table / url-queue wording for a stopped parse
+STOPPED_MSG = ("stopped by you before it finished — nothing from this run was "
+               "saved (an earlier version of the file, if any, is unchanged)")
+
+
+def stop_sentinel_for(progress_path: str) -> Path:
+    """The file the parent creates to tell a parse WORKER to stop (workers
+    have no access to the store's in-memory flags)."""
+    return Path(progress_path + ".stop")
+
+
+def _stop_aware(store: Store, name: str, inner=None):
+    """A read-progress callback that also honors a stop request for `name`
+    (in-process parse): open_stream calls it on every ~1 MB read, so a stop
+    lands within one read wherever the parse is."""
+    def cb(n):
+        if store.is_parse_stopped(name):
+            raise ParseStopped()
+        if inner is not None:
+            inner(n)
+    return cb
+
+
+def _cleanup_unlink(p) -> None:
+    """Best-effort temp-file delete for cleanup paths: retries a transient
+    Windows lock, and never raises (a leftover is swept at the next start)."""
+    try:
+        unlink_with_retry(Path(p))
+    except OSError:
+        pass
+
+
+def spool_path_for(part_tmp) -> Path:
+    """The big-file spool sits next to its part's .parquet.tmp with the SAME
+    key and pid, so the store's orphan sweep removes it after a crash."""
+    p = Path(part_tmp)
+    return p.with_name(p.name.removesuffix(".parquet.tmp") + ".spool.tmp")
+
+
 def _parse_worker(cfg: MrfxConfig, path_str: str, name: str, header_defaults: dict,
                   external_refs: dict, est: int, compressed_bytes: int,
                   tmp_out: str, progress_path: str) -> dict:
     """Runs in a child process. Returns a picklable summary; raises on failure
     (the parent marks the file failed)."""
-    import pyarrow as pa
-    import pyarrow.parquet as pq
 
-    from .store import PARQUET_COMPRESSION, RATES_SCHEMA
+    from .parser import batch_to_table
+    from .store import PARQUET_COMPRESSION, RATES_SCHEMA, BackgroundParquetWriter
 
     path = Path(path_str)
     file_chunks = max(1, -(-max(compressed_bytes, 1) // CHUNK_COMPRESSED_BYTES))
@@ -329,10 +712,26 @@ def _parse_worker(cfg: MrfxConfig, path_str: str, name: str, header_defaults: di
 
     def report(compressed_read: int) -> None:
         in_pass = min(file_chunks, compressed_read // CHUNK_COMPRESSED_BYTES)
-        chunk = state["pass"] * file_chunks + in_pass
-        if chunk == state["last"]:
+        report_chunk(state["pass"] * file_chunks + in_pass)
+
+    def report_percent(pct: float) -> None:
+        report_chunk(int(chunks_total * min(100.0, pct) / 100.0), pct)
+
+    stop_flag = stop_sentinel_for(progress_path)
+
+    def report_chunk(chunk: int, pct: float | None = None) -> None:
+        # the user pressed "stop" (the parent created the sentinel): checked
+        # on EVERY report, ahead of the throttle — one stat per ~1 MB read
+        if stop_flag.exists():
+            raise ParseStopped()
+        if pct is None:
+            pct = min(100.0, 100.0 * chunk / chunks_total)
+        # a chunk is 64 MB compressed — a 700 MB file has ~22 of them, so a
+        # long replay phase would show no movement; percent moves count too
+        if chunk == state["last"] and pct - state.get("last_pct", -1.0) < 0.5:
             return
         state["last"] = chunk
+        state["last_pct"] = pct
         # the server that dispatched this parse is GONE (killed without pool
         # shutdown). Nobody will collect the result — seen live as orphans
         # burning 85% CPU on 12 GB files. Stop within one chunk; the
@@ -343,23 +742,19 @@ def _parse_worker(cfg: MrfxConfig, path_str: str, name: str, header_defaults: di
         died = (os.getppid() != parent_pid if os.name != "nt"
                 else not _pid_alive(parent_pid))
         if died:
-            raise SystemExit("parent process died — abandoning orphaned parse")
+            # RuntimeError, not SystemExit: a SystemExit re-raised by
+            # fut.result() in a LIVE parent (a false "parent gone") passed
+            # every `except Exception` and silently killed a processor thread
+            raise ParentGone("this file's worker lost contact with MRF Explorer and "
+                             "stopped (press retry to process it again)")
         try:
             tmp = progress_path + ".tmp"
             with open(tmp, "w") as f:
                 json.dump({"chunks_done": chunk, "chunks_total": chunks_total,
-                           "pct": min(100.0, 100.0 * chunk / chunks_total)}, f)
+                           "pct": round(min(100.0, pct), 2)}, f)
             os.replace(tmp, progress_path)
         except OSError:
             pass  # progress is cosmetic
-
-    keep_ref_ids = None
-    if big:
-        with open_stream(path, progress_cb=report) as stream:
-            keep_ref_ids, target_items = skim_needed_ref_ids(cfg, stream)
-        if target_items == 0:
-            return {"short_circuit": True, "chunks_total": chunks_total}
-        state["pass"] = 1
 
     rows_written = 0
     writer = None
@@ -368,29 +763,90 @@ def _parse_worker(cfg: MrfxConfig, path_str: str, name: str, header_defaults: di
         nonlocal rows_written, writer
         if not rows:
             return
-        table = pa.Table.from_pylist(rows, schema=RATES_SCHEMA)
+        table = batch_to_table(rows, RATES_SCHEMA)
         if writer is None:
-            writer = pq.ParquetWriter(tmp_out, RATES_SCHEMA, compression=PARQUET_COMPRESSION)
+            writer = BackgroundParquetWriter(tmp_out, RATES_SCHEMA, PARQUET_COMPRESSION)
         writer.write_table(table)
         rows_written += len(rows)
 
-    parser = InNetworkParser(
-        cfg, source_file=name, external_refs=external_refs,
-        sink=sink, header_defaults=header_defaults, keep_ref_ids=keep_ref_ids,
-    )
+    made: list = []
+
+    def make_parser(keep_ref_ids=None) -> InNetworkParser:
+        made.append(InNetworkParser(
+            cfg, source_file=name, external_refs=external_refs,
+            sink=sink, header_defaults=header_defaults, keep_ref_ids=keep_ref_ids,
+        ))
+        return made[-1]
+
+    def refs_only() -> bool:
+        return bool(made) and made[-1].reference_only
+
     try:
-        with open_stream(path, progress_cb=report) as stream:
-            result = parser.parse(stream)
+        result = None
+        if big and fast_big_file_available(cfg):
+            # ONE full read + a short read of the reference table (see
+            # run_big_file_fast) instead of skim + extract's two full reads
+            from .fastscan import FastScanUnsupported
+            srp = SingleReadProgress(compressed_bytes, report_percent)
+            try:
+                result, target_items = run_big_file_fast(
+                    cfg, make_parser(), lambda: open_stream(path, progress_cb=srp.feed),
+                    spool_path_for(tmp_out), progress=srp)
+            except FastScanUnsupported as e:
+                log.info("%s: single read declined (%s) — two-pass", name, e)
+                state["pass"] = 0
+            else:
+                if target_items == 0:
+                    return {"short_circuit": True, "chunks_total": chunks_total,
+                            "refs_only": refs_only()}
+        if result is None:
+            keep_ref_ids = None
+            if big:
+                shape: dict = {}
+                keep_ref_ids, target_items = run_skim(
+                    cfg, lambda: open_stream(path, progress_cb=report), shape)
+                if target_items == 0:
+                    # a reference table and no in_network: a provider list
+                    # the sniff misread (review 9 item 3.1)
+                    return {"short_circuit": True, "chunks_total": chunks_total,
+                            "refs_only": bool(shape.get("refs") and not shape.get("in_network"))}
+                state["pass"] = 1
+            _, result = run_in_network_parse(
+                cfg, lambda: make_parser(keep_ref_ids), lambda: open_stream(path, progress_cb=report))
+    except ParentGone:
+        # the parent is gone (report_chunk noticed): nobody will adopt these
+        # files, and they carry the dead parent's pid — they'd sit (possibly
+        # GBs) until the next start's sweep. Remove our own temps now.
+        if writer is not None:
+            try:
+                writer.close()
+            except BaseException:  # noqa: BLE001 — leaving anyway
+                pass
+            writer = None
+        for leftover in (tmp_out, spool_path_for(tmp_out), progress_path,
+                         progress_path + ".tmp", stop_sentinel_for(progress_path)):
+            _cleanup_unlink(leftover)   # held open (AV/indexer) -> next start's sweep
+        raise
     finally:
         if writer is not None:
             writer.close()
+    # QA aggregates HERE, on this worker's own part, so the main process's
+    # shared DuckDB (dashboard, rollups, every other file's adoption) isn't
+    # scanned once per file. Stop requests are honored up to this point only.
+    qa_agg = (_worker_qa_counts(Path(tmp_out))
+              if rows_written and Path(tmp_out).exists() else (0, 0, 0))
     return {
         "short_circuit": False,
+        "refs_only": refs_only() and not rows_written,
         "chunks_total": chunks_total,
+        "qa_agg": qa_agg,
         "payer": result.payer,
         "schema_version": result.schema_version,
         "last_updated_on": result.last_updated_on,
+        "file_month": result.file_month,
+        "published_month": published_month_of(name, result.ingest_month or result.file_month),
         "ref_groups_skipped": result.ref_groups_skipped,
+        "items_matched": result.items_matched,
         "qa": result.qa.to_dict(),
         "rows": result.qa.rows,
         "rows_written": rows_written,
@@ -404,7 +860,7 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
     import concurrent.futures
 
     name = path.name
-    external_refs = store.load_provider_refs(pf.payer) if pf.payer else {}
+    external_refs = _companion_refs(store, pf, path.name)
     header_defaults = {
         "payer": pf.payer, "schema_version": pf.schema_version,
         "last_updated_on": pf.last_updated_on,
@@ -445,17 +901,29 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
         kill_ref_mb = -1.0   # output size when the freeze began (for the kill test)
         kill_ref_at = time.monotonic()
         stacks_dumped = False  # one auto-dump per stall episode, not per warn
+
+        def _relay_stop() -> None:
+            # the worker can't see the store's flags: hand a "stop" over as a
+            # sentinel file it checks on its next read
+            if store.is_parse_stopped(name):
+                try:
+                    stop_sentinel_for(progress_path).touch()
+                except OSError:
+                    pass
+
+        _relay_stop()   # a stop pressed before dispatch reaches the first read
         while True:
             try:
                 return fut.result(timeout=2.0)
             except concurrent.futures.TimeoutError:
+                _relay_stop()
                 try:
                     prog = json.loads(Path(progress_path).read_text())
                 except (OSError, ValueError):
                     prog = None
                 now = time.monotonic()
-                if prog and prog.get("chunks_done", -1) != last:
-                    last = prog["chunks_done"]
+                if prog and (prog.get("chunks_done", -1), prog.get("pct")) != last:
+                    last = (prog.get("chunks_done", -1), prog.get("pct"))
                     last_advance = now
                     last_out_mb = -1.0
                     kill_ref_mb = -1.0  # progress resets the hard-kill clock
@@ -487,7 +955,7 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
                         "If it stays frozen too for hours, Ctrl-C and restart "
                         "— the file re-queues and everything else resumes.",
                         name, (now - last_advance) / 60,
-                        last if last >= 0 else "0", out_mb)
+                        _chunk_label(last), out_mb)
                     # counter AND output both frozen across two consecutive
                     # complaints = a real stall. Put the diagnosis in the
                     # console right here — when a stall wedges the whole
@@ -528,7 +996,14 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
     try:
         try:
             payload = dispatch_and_wait()
-        except concurrent.futures.process.BrokenProcessPool:
+        except concurrent.futures.process.BrokenProcessPool as e:
+            if getattr(pool, "shutting_down", False):
+                # the server is stopping (Ctrl-C): the pool's workers were
+                # ended on purpose. Healing and resubmitting printed two
+                # tracebacks per file in flight (review 11 item 4.4f); the row
+                # is picked up again at the next start
+                raise PoolRestarted("stopped with the program — picked up again "
+                                    "at the next start") from e
             # a worker died mid-parse (crash / OOM kill). Heal the pool and
             # retry this file once — the download is still on disk.
             log.warning("%s: parser worker died mid-parse; restarting pool and retrying once", name)
@@ -541,18 +1016,38 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
             # sails past every `except Exception` fault-isolation layer and
             # silently kills the processor/watcher thread that hit it
             # (verification audit). Convert so the normal failed+retry flow runs.
-            raise RuntimeError(
-                "parse was cancelled by a worker-pool restart — press retry "
-                "on this file; other files resume automatically") from e
+            raise PoolRestarted(
+                "parse was cancelled by a worker-pool restart before it began — "
+                "it is re-queued automatically") from e
     except Exception:
-        tmp_out.unlink(missing_ok=True)
+        _cleanup_unlink(tmp_out)
         raise
     finally:
-        Path(progress_path).unlink(missing_ok=True)
-        Path(progress_path + ".tmp").unlink(missing_ok=True)
+        # Every delete here is retry-tolerant and never raises: on Windows an
+        # antivirus/indexer briefly holding one of these files open made the
+        # unlink raise FROM THIS finally, replacing a successful parse's
+        # result (or the real error) with a PermissionError — a finished file
+        # marked failed over a temp file. A file still held is swept at the
+        # next start.
+        _cleanup_unlink(progress_path)
+        _cleanup_unlink(progress_path + ".tmp")
+        _cleanup_unlink(stop_sentinel_for(progress_path))
+        # the worker deletes its own spool, but a worker that DIES (OOM kill,
+        # crash, force_heal) can't — and the spool carries THIS (live)
+        # process's pid, so the orphan sweep would keep it until restart.
+        # It can be GBs; the parent always removes it.
+        _cleanup_unlink(spool_path_for(tmp_out))
+        # same for the worker's QA spill folder (a worker killed mid-QA leaves
+        # GBs that the sweep keeps while THIS process lives)
+        _qa_spill = Path(str(tmp_out).removesuffix(".parquet.tmp") + ".qa-spill")
+        if _qa_spill.exists():
+            shutil.rmtree(_qa_spill, ignore_errors=True)
 
     store.update_progress(name, 100.0, chunks_done=payload["chunks_total"],
                           chunks_total=payload["chunks_total"])
+    if payload.get("refs_only"):
+        _cleanup_unlink(tmp_out)
+        return _ingest_reference_file(cfg, store, path, pf)
     if payload["short_circuit"]:
         msg = ("scanned: none of the target billing codes appear in this "
                "file — extraction pass skipped")
@@ -561,22 +1056,27 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
         # store agree (the normal paths do this via finalize_rates_part)
         store.drop_rates_part(name)
         store.upsert_file(name, payer=pf.payer, status="done", rows_emitted=0,
-                          qa={"rows": 0, "messages": [msg]}, finished_at=FINISHED_NOW)
-        _finish_file(cfg, path, ok=True)
+                          qa={"rows": 0, "messages": [msg]}, finished_at=FINISHED_NOW,
+                          **_read_identity(path, cfg))
+        _finish_ok(cfg, store, path)
         log.info("%s: %s", name, msg)
         return {"status": "done", "rows": 0, "payer": pf.payer, "note": msg}
 
     store.finalize_rates_part(name, tmp_out, payload["rows_written"])
-    store.upsert_file(
-        name,
+    _commit_done(
+        store, name,
         payer=payload["payer"],
         schema_version=payload["schema_version"],
         last_updated_on=payload["last_updated_on"],
         status="done",
         rows_emitted=payload["rows"],
+        file_month=payload.get("file_month"),
+        published_month=payload.get("published_month"),
         ref_groups_skipped=payload["ref_groups_skipped"],
-        qa=qa_report(store, payload["qa"], name),
+        qa=_no_target_note(qa_report(store, payload["qa"], name, agg=payload.get("qa_agg")),
+                           payload.get("items_matched") == 0),
         finished_at=FINISHED_NOW,
+        **_read_identity(path, cfg),
     )
     # rollup AFTER the done-upsert: the incremental update finds its work by
     # "done files newer than the coverage marker" — called before the upsert
@@ -584,18 +1084,76 @@ def _ingest_in_network_pooled(cfg: MrfxConfig, store: Store, path: Path, pf: Pre
     # (a crash between the two leaves the marker behind; serve-start catches up)
     if rebuild_rollups:
         _rebuild_rollups_best_effort(store, name)
-    _finish_file(cfg, path, ok=True)
+    _finish_ok(cfg, store, path)
+    qa = payload.get("qa") or {}
     if payload["ref_groups_skipped"]:
-        log.warning("%s: %d rate groups skipped — missing provider reference file",
-                    name, payload["ref_groups_skipped"])
+        log.warning("%s: %d rate groups skipped — %s", name, payload["ref_groups_skipped"],
+                    skipped_groups_reason(payload["ref_groups_skipped"],
+                                          qa.get("remote_ref_groups", 0),
+                                          qa.get("ambiguous_ref_ids", 0)))
     return {"status": "done", "rows": payload["rows"],
-            "ref_groups_skipped": payload["ref_groups_skipped"]}
+            "ref_groups_skipped": payload["ref_groups_skipped"],
+            "remote_ref_groups": qa.get("remote_ref_groups", 0),
+            "ambiguous_ref_ids": qa.get("ambiguous_ref_ids", 0)}
+
+
+def _read_identity(path: Path, cfg: MrfxConfig | None = None) -> dict:
+    """Fields the 'done' commit carries about the bytes it read: their size,
+    mtime and sha (files.read_identity) and the code list they were read for
+    — so a kill before _finish_ok loses neither (the round-11 s4 harness's
+    after_commit window held the same file as "a different file")."""
+    out: dict = {}
+    try:
+        st = _INGEST_STAT.get(str(path))
+        now = path.stat()
+        # bytes that changed while being read are not "what was loaded"
+        # (_finish_ok's rule): such a commit carries no read identity
+        if st is not None and (now.st_size, now.st_mtime_ns) == st:
+            seen = _IDENT_SEEN.get((str(path), st[0], st[1])) or {}
+            from .fetch import DOWNLOAD_IDENTITY
+            dl = DOWNLOAD_IDENTITY.get(str(path)) or {}      # a peek: _finish_ok pops it
+            # the content sha too: every claim path consults this when the
+            # identity row is missing (review 14 item 2.11)
+            out["read_identity"] = json.dumps({"size": st[0], "mtime_ns": st[1],
+                                               "sha": seen.get("sha") or dl.get("sha"),
+                                               "csha": seen.get("csha") or dl.get("csha")})
+        if cfg is not None:
+            out["code_set"] = code_set_key(cfg)
+    except Exception:  # noqa: BLE001 — bookkeeping never fails the commit
+        pass
+    return out
+
+
+def _commit_done(store: Store, name: str, **fields) -> None:
+    """The 'done' upsert that follows a part going live. If it fails, the
+    handler marked the row failed while its rates stayed live in every
+    number — and the source went to failed/, so nothing ever healed it
+    (round 7 P1.8). Retry once (a transient lock), then take the part back
+    out before the error propagates: a row that is not 'done' never owns a
+    live part it just wrote."""
+    try:
+        store.upsert_file(name, **fields)
+        return
+    except Exception:  # noqa: BLE001 — one retry, then undo
+        log.warning("%s: recording the finished file failed once — retrying", name,
+                    exc_info=True)
+    try:
+        store.upsert_file(name, **fields)
+    except Exception:
+        try:
+            store.drop_rates_part(name)
+        except Exception:  # noqa: BLE001 — the original error is the one to report
+            log.exception("%s: could not withdraw the part after a failed commit", name)
+        raise
 
 
 # One ingest per filename at a time, process-wide. Guards the shared
 # pid-suffixed temp path AND gives forget a way to exclude live parses.
 _CLAIMS_LOCK = threading.Lock()
 _ACTIVE_INGESTS: set[str] = set()
+
+
+CLAIM_LOST = "already being ingested by another worker"
 
 
 def _claim_ingest(name: str) -> bool:
@@ -614,6 +1172,13 @@ def _release_ingest(name: str) -> None:
 def ingest_in_progress(name: str) -> bool:
     with _CLAIMS_LOCK:
         return name in _ACTIVE_INGESTS
+
+
+def active_ingest_count() -> int:
+    """In-process ingests running now (the analytics scheduler counts an
+    inbox scan's parse as a busy store — mrfx/foldin.py)."""
+    with _CLAIMS_LOCK:
+        return len(_ACTIVE_INGESTS)
 
 
 def forget_file(cfg: MrfxConfig, store: Store, filename: str) -> dict:
@@ -641,7 +1206,8 @@ def _forget_file_locked(cfg: MrfxConfig, store: Store, filename: str) -> dict:
     # raw copies go FIRST — deleting the inbox copy after the DB rows would
     # leave a window where the watcher re-ingests the very file being erased
     freed_raw = 0
-    for d in (cfg.inbox_dir, cfg.processed_dir, cfg.failed_dir, cfg.downloads_dir):
+    for d in (cfg.inbox_dir, cfg.processed_dir, cfg.failed_dir, cfg.downloads_dir,
+              cfg.inbox_dir / HELD_DIR, cfg.inbox_dir / REPLACING_DIR):
         p = d / filename
         try:
             if p.exists():
@@ -664,46 +1230,33 @@ def _forget_file_locked(cfg: MrfxConfig, store: Store, filename: str) -> dict:
 def _rebuild_rollups_best_effort(store: Store, name: str,
                                  incremental: bool = True) -> None:
     """The parquet part is already durable when this runs: an analytics
-    rebuild failing (disk pressure, memory) must NOT fail the file — hours of
-    parsing would be retried for data that already landed. Rollups refresh on
-    the next successful rebuild, same contract as the queue's batched path.
+    update failing (disk pressure, memory) must NOT fail the file — hours of
+    parsing would be retried for data that already landed.
 
-    Removals are found via the rollup_pending_payers note the removal itself
-    queues (forget_file / drop_rates_part / a replaced part), so the
-    incremental path handles them too. incremental=False remains for callers
-    that explicitly want the full rebuild.
-
-    COALESCED (skip_if_busy): this is best-effort, so if a rebuild is already
-    running we skip rather than BLOCK behind it — a blocking wait here was the
-    last remaining pile-up source (the inbox watcher / a direct ingest queuing
-    behind the queue worker's multi-hour rebuild, seen as "waiting 57 min").
-    The rollup refreshes on the next cycle. ROLLUP_SKIPPED is a normal return,
-    so the incremental's `return` already avoids the full-rebuild fallback."""
+    In a serving process the analytics scheduler (mrfx/foldin.py) owns every
+    update: this only tells it something changed, and it folds in at its own
+    cadence — never skipped for good because another update was running
+    (review 14: an inbox file skipped during a name refresh waited 117 s for
+    the idle probe; "the running one covers it" was not true). With no
+    scheduler (a CLI command) the update runs here, with the same decision
+    tree (`foldin.fold_in`: a full build only when the incremental's
+    precondition fails). incremental=False asks for the full rebuild."""
+    from . import foldin
     from .store import ROLLUP_SKIPPED
-
-    def _skip_kw(fn):
-        try:
-            import inspect
-            return {"skip_if_busy": True} if "skip_if_busy" in inspect.signature(fn).parameters else {}
-        except (TypeError, ValueError):  # C-callable / old test stub
-            return {}
+    if incremental and foldin.poke(store, name):
+        log.debug("%s: the analytics scheduler will fold it in", name)
+        return
     try:
-        if incremental:
-            try:
-                if store.update_rollups_incremental(
-                        **_skip_kw(store.update_rollups_incremental)) == ROLLUP_SKIPPED:
-                    log.info("%s: a rebuild is already running — skipping this "
-                             "best-effort refresh (the running one covers it)", name)
-                return
-            except Exception as e:  # noqa: BLE001 — strict-precondition
-                # optimization; the full rebuild is the always-correct fallback
-                log.info("%s: incremental analytics update unavailable (%s) — "
-                         "running a full rebuild", name, e)
-        store.rebuild_rollups(**_skip_kw(store.rebuild_rollups))
+        if not incremental:
+            store.rebuild_rollups()
+            return
+        if foldin.fold_in(store, name) == ROLLUP_SKIPPED:
+            log.info("%s: another analytics update is running — this file goes in "
+                     "with the next one", name)
     except Exception:  # noqa: BLE001
         log.exception(
-            "%s: rollup rebuild failed — the file's rows are safely stored; "
-            "analytics will refresh on the next successful rebuild", name)
+            "%s: analytics update failed — the file's rows are safely stored; "
+            "the analytics catch up on the next successful update", name)
 
 
 def ingest_file(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight | None = None,
@@ -719,22 +1272,114 @@ def ingest_file(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight | None 
     is always current; only the dedup/by-TIN rollups lag until the batch
     rebuild."""
     name = path.name
+    if getattr(store, "current_code_set", None) is None:
+        try:
+            store.stamp_code_sets(code_set_key(cfg))
+        except Exception:  # noqa: BLE001
+            pass
     if not _claim_ingest(name):
         # two threads on one filename share the same pid-suffixed temp: the
         # slower writer's half-written parquet would be renamed into the live
         # part. Watcher + upload background scan + confirm double-click +
         # requeue_skipped can all collide here — one wins, the rest bow out.
         log.info("%s: already being ingested by another worker — skipping", name)
-        return {"status": "skipped", "error": "already being ingested by another worker"}
+        return {"status": "skipped", "error": CLAIM_LOST}
+    claim: dict = {}
+    result = None
+    # review 13 item 5.2.7: the payer's provider lists as of the START of this
+    # read — compared again once it is done (_reread_if_refs_landed)
+    refs_before = store.refs_epochs() if hasattr(store, "refs_epochs") else {}
     try:
-        return _ingest_file_locked(cfg, store, path, pf, progress_bar, rebuild_rollups)
+        result = _ingest_file_locked(cfg, store, path, pf, progress_bar, rebuild_rollups,
+                                     claim=claim)
     finally:
+        sha = claim.get("sha")
+        if claim.get("csha"):
+            store.release_content_claim(claim["csha"], name)
+        if sha:
+            # the files row (done, with its sha) is the record from here on
+            store.release_inbox_claim(sha, name)
+            if not result or result.get("status") != "done":
+                # link copies of these bytes (or of this CONTENT) deferred to
+                # this load: it did not load, so they get their promised
+                # automatic retry
+                try:
+                    store.revive_skipped_duplicates(sha, -1, twin_name=name)
+                except Exception:  # noqa: BLE001 — the next scan/retry covers it
+                    log.debug("duplicate revival skipped", exc_info=True)
         _release_ingest(name)
+    if result and result.get("status") == "done":
+        again = _reread_if_refs_landed(cfg, store, path, refs_before, rebuild_rollups)
+        if again is not None:
+            return again
+        # the analytics scheduler, when one runs, folds it in at its cadence
+        # (review 14 item 1.1 — every load path, not only the queue's)
+        try:
+            from . import foldin
+            foldin.poke(store, "file loaded")
+        except Exception:  # noqa: BLE001 — cosmetic for the load itself
+            pass
+    return result
+
+
+def _reread_if_refs_landed(cfg: MrfxConfig, store: Store, path: Path, before: dict,
+                           rebuild_rollups: bool = True) -> dict | None:
+    """A rate file read while its payer's provider list was still landing
+    keeps "rate groups skipped — missing provider reference file" for good
+    when the list finished during its read: the list's own re-read pass
+    (requeue_skipped) runs once, and it saw this file either not yet 'done'
+    or still claimed (review 13 item 5.2.7 — test_parallel_ingest_matches_
+    serial failed 3 of 12 runs, (4, 4) rows instead of (6, 4)). Closed here:
+    after its claim is released, a file that skipped or missed ids compares
+    its payer's provider-list counter with the one at its start and, if a
+    list finished meanwhile, is read again (once more per list, never a
+    loop). Returns the re-read's result (the caller reports it), or None.
+    Never raises: the file is already safely loaded."""
+    name = path.name
+    try:
+        st = store.file_status(name) or {}
+        if (st.get("file_type") or "in_network") != "in_network":
+            return
+        qa = st.get("qa")
+        if isinstance(qa, str):
+            try:
+                qa = json.loads(qa)
+            except ValueError:
+                qa = {}
+        qa = qa if isinstance(qa, dict) else {}
+        waiting = (int(st.get("ref_groups_skipped") or 0) > 0
+                   or int(qa.get("missing_ref_ids") or 0) > 0
+                   or int(qa.get("ambiguous_ref_ids") or 0) > 0)
+        payer = st.get("payer")
+        if not waiting or not payer:
+            return
+        if store.refs_epochs().get(payer, 0) == before.get(payer, 0):
+            return
+        log.info("%s: its payer's provider list finished while it was being read — "
+                 "reading it again with the list", name)
+        for src in (path, cfg.processed_dir / name, cfg.inbox_dir / name,
+                    cfg.downloads_dir / name):
+            if src.exists():
+                again = ingest_file(cfg, store, src, rebuild_rollups=rebuild_rollups)
+                if (again or {}).get("error") == CLAIM_LOST:
+                    # review 14 item 2.3 (a race round 13's 5.2.7 introduced):
+                    # the list's own re-read pass (requeue_skipped) is reading
+                    # this file right now — it IS the re-read; this file's done
+                    # load stands (the link row ended 'failed' 1 run in 30)
+                    log.info("%s: already being read again with the new list — "
+                             "that read takes it", name)
+                    return None
+                return again
+        requeue_skipped(cfg, store, payer, only={name})     # no copy: its link again
+    except Exception:  # noqa: BLE001 — housekeeping, never fails the done file
+        log.debug("provider-list re-read check skipped for %s", name, exc_info=True)
+    return None
 
 
 def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight | None,
-                        progress_bar, rebuild_rollups: bool) -> dict:
+                        progress_bar, rebuild_rollups: bool, claim: dict | None = None) -> dict:
     name = path.name
+    _note_ingest_start(path)
     try:
         # preflight + the initial 'processing' upsert live INSIDE the try so a
         # corrupt file (e.g. a truncated .gz that makes preflight raise) on the
@@ -775,17 +1420,25 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
             _finish_file(cfg, path, ok=False)
             return {"status": "quarantined", "error": msg}
 
+        if pf.file_type not in ("in_network", "provider_reference"):
+            # a portal file listing ({"blobs": [...]}) or any other shape the
+            # sniff says is NOT A RATE FILE: it was parsed as a rate file and
+            # recorded done with 0 rows and no word (review 11 item 1.10)
+            msg = ("a portal file listing, not a rate file — paste its web address on "
+                   "the Links tab instead, and the files it lists are downloaded"
+                   if pf.file_type == "blob_listing" else
+                   "; ".join(pf.messages) or "not a rate file")
+            store.upsert_file(name, status="quarantined", error=msg, finished_at=_now())
+            _finish_file(cfg, path, ok=False)
+            return {"status": "quarantined", "error": msg}
+
+        if claim is not None:
+            twin = _content_claim(cfg, store, path, name, claim, month=_claim_month(pf, name))
+            if twin:
+                return _record_duplicate(cfg, store, path, name, pf, twin)
+
         if pf.file_type == "provider_reference":
-            with open_stream(path) as stream:
-                payer, last_updated, refs = parse_provider_reference_file(cfg, stream)
-            store.save_provider_refs(payer, name, last_updated, refs)
-            store.upsert_file(
-                name, payer=payer, status="done", last_updated_on=last_updated,
-                rows_emitted=len(refs), finished_at=FINISHED_NOW,
-            )
-            _finish_file(cfg, path, ok=True)
-            requeued = requeue_skipped(cfg, store, payer)
-            return {"status": "done", "refs": len(refs), "requeued": requeued}
+            return _ingest_reference_file(cfg, store, path, pf)
 
         # in-network rate file. When a parse pool is installed (queue worker
         # with parallel_ingests > 1) the CPU-heavy parse runs in a child
@@ -798,7 +1451,7 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
         if pool is not None:
             return _ingest_in_network_pooled(cfg, store, path, pf, pool,
                                              progress_bar, rebuild_rollups)
-        external_refs = store.load_provider_refs(pf.payer) if pf.payer else {}
+        external_refs = _companion_refs(store, pf, path.name)
         header_defaults = {
             "payer": pf.payer, "schema_version": pf.schema_version,
             "last_updated_on": pf.last_updated_on,
@@ -811,6 +1464,8 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
         est = pf.est_uncompressed_bytes or 0
         big = est >= LARGE_FILE_UNCOMPRESSED_BYTES
         keep_ref_ids = None
+        result = None
+        parser = None
         if big:
             # progress spans two passes: pass 1 fills 0-50%, pass 2 fills 50-100%
             progress = _ProgressTracker(store, name, pf.compressed_bytes,
@@ -819,10 +1474,37 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
                      name, est / 1e9, progress.chunks_total)
             store.upsert_file(name, chunks_total=progress.chunks_total, progress=0.0)
             progress.set_pass(0)
-            with open_stream(path, progress_cb=progress.update) as stream:
-                keep_ref_ids, target_items = skim_needed_ref_ids(cfg, stream)
-            log.info("%s: pass 1 done — %d target-code items, %d target-cited references",
-                     name, target_items, len(keep_ref_ids))
+            if fast_big_file_available(cfg):
+                # ONE full read + a short read of the reference table
+                # (run_big_file_fast) instead of skim + extract's two full reads
+                from .fastscan import FastScanUnsupported
+                try:
+                    srp = SingleReadProgress(pf.compressed_bytes, progress.set_percent)
+                    with store.rates_part_writer(name) as writer:
+                        big_parser = InNetworkParser(
+                            cfg, source_file=name, external_refs=external_refs,
+                            sink=writer.write_batch, header_defaults=header_defaults)
+                        result, target_items = run_big_file_fast(
+                            cfg, big_parser,
+                            lambda: open_stream(path, progress_cb=_stop_aware(store, name, srp.feed)),
+                            spool_path_for(writer.tmp), progress=srp)
+                    if big_parser.reference_only and not result.qa.rows:
+                        progress.finish()
+                        return _ingest_reference_file(cfg, store, path, pf)
+                except FastScanUnsupported as e:
+                    log.info("%s: single read declined (%s) — two-pass", name, e)
+                    result = None
+                    progress.set_pass(0)
+            if result is None:
+                shape: dict = {}
+                keep_ref_ids, target_items = run_skim(
+                    cfg, lambda: open_stream(
+                        path, progress_cb=_stop_aware(store, name, progress.update)), shape)
+                if target_items == 0 and shape.get("refs") and not shape.get("in_network"):
+                    progress.finish()
+                    return _ingest_reference_file(cfg, store, path, pf)
+                log.info("%s: pass 1 done — %d target-code items, %d target-cited references",
+                         name, target_items, len(keep_ref_ids))
             if target_items == 0:
                 # the scan IS the answer: none of the user's billing codes
                 # appear anywhere in this file, so the extraction pass would
@@ -837,78 +1519,792 @@ def _ingest_file_locked(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight
                     name, payer=pf.payer, status="done", rows_emitted=0,
                     qa={"rows": 0, "messages": [msg]}, finished_at=FINISHED_NOW,
                 )
-                _finish_file(cfg, path, ok=True)
+                _finish_ok(cfg, store, path)
                 log.info("%s: %s", name, msg)
                 return {"status": "done", "rows": 0, "payer": pf.payer, "note": msg}
-            progress.set_pass(1)
+            if result is None:
+                progress.set_pass(1)
         else:
             progress = None
 
-        with store.rates_part_writer(name) as writer:
-            parser = InNetworkParser(
-                cfg, source_file=name, external_refs=external_refs,
-                sink=writer.write_batch, header_defaults=header_defaults,
-                keep_ref_ids=keep_ref_ids,
-            )
-            with open_stream(path, progress_cb=progress.update if progress else None) as stream:
-                result = parser.parse(stream)
+        if result is None:
+            with store.rates_part_writer(name) as writer:
+                parser, result = run_in_network_parse(
+                    cfg,
+                    lambda: InNetworkParser(
+                        cfg, source_file=name, external_refs=external_refs,
+                        sink=writer.write_batch, header_defaults=header_defaults,
+                        keep_ref_ids=keep_ref_ids,
+                    ),
+                    lambda: open_stream(path, progress_cb=_stop_aware(
+                        store, name, progress.update if progress else None)),
+                )
         if progress is not None:
             progress.finish()
-        store.upsert_file(
-            name,
+        if parser is not None and parser.reference_only and not result.qa.rows:
+            return _ingest_reference_file(cfg, store, path, pf)
+        _commit_done(
+            store, name,
             payer=result.payer,
             schema_version=result.schema_version,
             last_updated_on=result.last_updated_on,
             status="done",
             rows_emitted=result.qa.rows,
+            file_month=result.file_month if result.qa.rows else None,
+            published_month=published_month_of(name, result.ingest_month or result.file_month),
             ref_groups_skipped=result.ref_groups_skipped,
-            qa=qa_report(store, result.qa.to_dict(), name),
+            qa=_no_target_note(qa_report(store, result.qa.to_dict(), name),
+                               result.items_matched == 0),
             finished_at=FINISHED_NOW,
+            **_read_identity(path, cfg),
         )
         # rollup AFTER the done-upsert — same reason as the pooled path: the
         # incremental update keys on done files newer than the coverage marker
         if rebuild_rollups:
             _rebuild_rollups_best_effort(store, name)
-        _finish_file(cfg, path, ok=True)
+        _finish_ok(cfg, store, path)
         if result.ref_groups_skipped:
             log.warning(
-                "%s: %d rate groups skipped — missing provider reference file", name, result.ref_groups_skipped
-            )
+                "%s: %d rate groups skipped — %s", name, result.ref_groups_skipped,
+                skipped_groups_reason(result.ref_groups_skipped, result.qa.remote_ref_groups,
+                                      result.qa.ambiguous_ref_ids))
         return {
             "status": "done",
             "rows": result.qa.rows,
             "ref_groups_skipped": result.ref_groups_skipped,
+            "remote_ref_groups": result.qa.remote_ref_groups,
+            "ambiguous_ref_ids": result.qa.ambiguous_ref_ids,
         }
 
+    except ParseStopped:
+        store.requeue_part_payers(name)   # a stopped RE-ingest leaves the old part live
+        in_inbox = cfg.inbox_dir in path.parents
+        msg = STOPPED_MSG + (" — the file was moved to data/failed; drop it into the "
+                             "inbox again to process it" if in_inbox else
+                             " — the download is kept; press retry to process it")
+        log.info("%s: %s", name, msg)
+        store.upsert_file(name, status="stopped", error=msg, finished_at=_now())
+        if in_inbox:
+            # left in the inbox, the watcher would simply start it again
+            _finish_file(cfg, path, ok=False)
+        return {"status": "stopped", "error": msg}
+    except PoolRestarted as e:
+        # nothing of this file was read; its source stays where it is (inbox
+        # file / downloaded copy) and it is picked up again automatically
+        log.info("%s: %s", name, e)
+        store.upsert_file(name, status="queued", error=str(e))
+        return {"status": "requeued", "error": str(e)}
     except Exception as e:  # noqa: BLE001 — fault isolation is the contract here
         log.exception("ingest failed for %s", name)
-        store.upsert_file(name, status="failed", error=f"{type(e).__name__}: {e}", finished_at=_now())
+        store.upsert_file(name, status="failed", error=plain_parse_error(e), finished_at=_now())
+        store.requeue_part_payers(name)   # a failed RE-ingest leaves the old part live
         _finish_file(cfg, path, ok=False)  # never raises; the row is already 'failed'
         return {"status": "failed", "error": str(e)}
+    finally:
+        # ANY outcome ends a stop request: a stop pressed after the last read
+        # (QA, finalize, rollup) was never honored by ParseStopped, stayed set
+        # for the server's life, and the NEXT ingest of this filename died at
+        # its first read as "stopped by you"
+        store.clear_parse_stop(name)
 
 
-def requeue_skipped(cfg: MrfxConfig, store: Store, payer: str) -> list[str]:
-    """After a reference file lands, re-ingest this payer's in-network files
-    that had skipped groups (if their source file is still on disk)."""
+def plain_parse_error(e: BaseException) -> str:
+    """A failed file's message in words, with the technical cause after it.
+    The one rule for malformed VALUES (audit 8 P3-1): the fast reader (the
+    default) skips in_network members for codes it does not need without
+    reading them, so a NaN or a 20-digit number THERE never fails a file; a
+    malformed value in data that must be read (a target code's rates, the
+    reference table, or anything when the classic reader is in use) fails
+    the file with this sentence — never a silently wrong number."""
+    text = f"{type(e).__name__}: {e}"
+    low = str(e).lower()
+    if type(e).__name__ in ("BadGzipFile", "EOFError", "BadZipFile", "error") and (
+            "crc check failed" in low or "end-of-stream marker" in low
+            or "not a gzipped file" in low or "not a zip file" in low
+            or "incorrect length" in low or "invalid" in low and "zlib" in type(e).__module__):
+        # the raw library text was the whole sentence (review 11 items 4.5 / 4.6)
+        why = ("the file is damaged or incomplete — its compressed data ends early or "
+               "fails its own checksum (a cut-off download, or extra bytes after the end)")
+        return (f"{why}. Nothing from it was loaded; press retry (a link downloads again) "
+                f"or drop in a fresh copy ({text[:160]})")
+    if str(e).startswith("parser worker wedged"):
+        return str(e)            # already a sentence (no "RuntimeError: " prefix)
+    if type(e).__name__ == "BrokenProcessPool":
+        # the parser process died twice (the pool healed and retried once):
+        # a sentence, not a Python exception (review 11 item 2.5)
+        return ("the parser process for this file was ended by the system twice "
+                "(usually the computer ran out of memory) — press retry; if it "
+                "happens again, lower parallel_ingests in config/mrfx.yaml")
+    if "overflow" in low:
+        why = ("the payer's file holds a number too large to be a real value "
+               "(e.g. a 20-digit NPI or rate)")
+    elif "lexical error" in low or "invalid char" in low or "nan" in low.split():
+        why = ("the payer's file holds a value that is not valid JSON "
+               "(e.g. NaN or Infinity)")
+    else:
+        return text
+    return (f"{why} in data MRF Explorer had to read — the file is malformed; "
+            f"ask the payer for a corrected copy ({text[:200]})")
+
+
+def _companion_refs(store: Store, pf: Preflight, name: str) -> dict:
+    """The payer's standalone provider lists of THIS rate file's vintage —
+    its header date, else its publication month by the file_month rule
+    (review 9 item 1.3)."""
+    if not pf.payer:
+        return {}
+    from .parser import file_month_for
+    now_month = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m")
+    month = file_month_for(pf.last_updated_on, name, now_month)[0]
+    return store.load_provider_refs(pf.payer, pf.last_updated_on, month)
+
+
+def _ingest_reference_file(cfg: MrfxConfig, store: Store, path: Path, pf: Preflight) -> dict:
+    """A standalone provider-reference file: stream its table into
+    provider_refs in batches (flat memory for a multi-million-id table —
+    the old path built the whole dict first), then re-ingest this payer's
+    rate files that were waiting on it. Also reached AFTER an in-network
+    parse that found a reference table and no in_network array (the 1 MB
+    sniff could not see past a big table — audit 8 P1-2)."""
+    name = path.name
+    store.drop_rates_part(name)          # a 0-row in-network attempt left nothing to serve
+    store.clear_provider_refs(name)
+    state = {"n": 0, "payer": pf.payer or "Unknown payer"}
+
+    def write(batch: dict) -> None:
+        store.save_provider_refs(state["payer"], name, pf.last_updated_on, batch, append=True)
+        state["n"] += len(batch)
+
+    with open_stream(path) as stream:
+        payer, last_updated, _ = parse_provider_reference_file(cfg, stream, on_batch=write)
+    store.finish_provider_refs(name, payer, last_updated)
+    store.upsert_file(
+        name, payer=payer, status="done", last_updated_on=last_updated,
+        file_type="provider_reference", rows_emitted=state["n"], finished_at=FINISHED_NOW,
+    )
+    _finish_ok(cfg, store, path)
+    from .parser import file_month_for
+    ref_month = file_month_for(last_updated, name,
+                               dt.datetime.now(dt.timezone.utc).strftime("%Y-%m"))[0]
+    requeued = requeue_skipped(cfg, store, payer, last_updated, ref_month)
+    log.info("%s: provider reference file — %d reference ids stored", name, state["n"])
+    return {"status": "done", "refs": state["n"], "requeued": requeued}
+
+
+def reread_for_new_codes(cfg: MrfxConfig, store: Store, names: list[str] | None = None) -> dict:
+    """Read again the loaded files that were read WITHOUT codes the list now has
+    (review 13 item 5.2.4): from the kept raw copy (processed/, inbox/,
+    downloads/) when there is one, else by downloading the link again; a file
+    with neither is told on its row. Returns {"reread", "redownload", "asked"}."""
+    store.current_code_set = code_set_key(cfg)
+    todo = [r["filename"] for r in store.files_missing_codes()]
+    if names is not None:
+        todo = [n for n in todo if n in set(names)]
+    out = {"reread": [], "redownload": [], "asked": []}
+    for fname in todo:
+        for base in (cfg.processed_dir, cfg.inbox_dir, cfg.downloads_dir):
+            src = base / fname
+            if src.exists():
+                log.info("re-reading %s for the billing codes added since it was read", fname)
+                ingest_file(cfg, store, src, rebuild_rollups=False)
+                out["reread"].append(fname)
+                break
+        else:
+            if store.requeue_url_for_file(
+                    fname, "downloading again: billing codes were added to your list "
+                           "since this file was read"):
+                out["redownload"].append(fname)
+            else:
+                store.upsert_file(fname, error=(
+                    "billing codes were added to your list since this file was read — drop "
+                    "it in again to pick them up (its download is gone and it came from no link)"))
+                out["asked"].append(fname)
+    if out["reread"]:
+        _rebuild_rollups_best_effort(store, "re-read for new codes")
+    return out
+
+
+def requeue_skipped(cfg: MrfxConfig, store: Store, payer: str,
+                    last_updated_on: str | None = None, month: str | None = None,
+                    only: set | None = None) -> list[str]:
+    """After a reference file lands, load again this payer's in-network files
+    OF ITS VINTAGE (item 1.3) that had skipped / missing / ambiguous ids:
+    from the raw copy if it is still on disk (processed/, inbox/ or
+    downloads/), else by downloading its link again — a linked rate file
+    loaded before its provider list stayed at 0 rows for good, because
+    downloads were looked for only in processed/ and inbox/ (review 9 item
+    3.2). Files of other months are left alone: a new list never makes
+    another month's files download again."""
     with store.connect() as con:
         rows = con.execute(
             """
-            SELECT filename FROM files
+            SELECT filename, last_updated_on, file_month FROM files
             WHERE payer = ? AND file_type = 'in_network'
-              AND status = 'done' AND ref_groups_skipped > 0
+              AND status = 'done'
+              AND (ref_groups_skipped > 0
+                   OR coalesce(TRY_CAST(json_extract_string(qa, '$.missing_ref_ids') AS BIGINT), 0) > 0
+                   OR coalesce(TRY_CAST(json_extract_string(qa, '$.ambiguous_ref_ids') AS BIGINT), 0) > 0)
+            ORDER BY filename
             """,
             [payer],
         ).fetchall()
+    lu = str(last_updated_on or "").strip()[:10]
     requeued = []
-    for (fname,) in rows:
-        for base in (cfg.processed_dir, cfg.inbox_dir):
+    for fname, flu, fmonth in rows:
+        if only is not None and fname not in only:
+            continue
+        if lu or month:
+            same = (lu and str(flu or "").strip()[:10] == lu) or \
+                   (month and str(fmonth or "")[:7] == str(month)[:7])
+            if not same:
+                continue
+        if ingest_in_progress(fname):
+            # being read right now (its first read, or its own re-read): that
+            # read compares the provider-list counter at its end and reads
+            # again with the list — ONE place decides the re-read (review 14
+            # item 2.3: two re-reads of one rate file collided)
+            log.info("%s is being read right now — its own read picks up %s's provider "
+                     "list", fname, payer)
+            requeued.append(fname)
+            continue
+        for base in (cfg.processed_dir, cfg.inbox_dir, cfg.downloads_dir):
             src = base / fname
             if src.exists():
                 log.info("re-ingesting %s now that %s reference data is present", fname, payer)
                 ingest_file(cfg, store, src)
                 requeued.append(fname)
                 break
+        else:
+            if store.requeue_url_for_file(
+                    fname, "downloading again: this payer's provider reference file "
+                           "arrived after this file was loaded"):
+                log.info("%s: its provider reference file arrived after it was loaded and "
+                         "its download was removed — downloading it again", fname)
+                requeued.append(fname)
+            else:
+                # no raw copy and no link: nothing can re-read it — say so on
+                # the file's row instead of a silent 0 (review 11 item 2.16)
+                st = store.file_status(fname) or {}
+                n = int(st.get("ref_groups_skipped") or 0)
+                store.upsert_file(fname, error=(
+                    f"its payer's provider list has now arrived — drop this file in again "
+                    f"to pick up the {n:,} rate group(s) that were waiting for it"
+                    if n else "its payer's provider list has now arrived — drop this file "
+                              "in again to pick up the providers it was missing"))
+                log.info("%s: its provider list arrived but the file is gone — asked the "
+                         "user to drop it in again", fname)
     return requeued
+
+
+_SHA_SEEN: dict = {}   # (path, size, mtime_ns) -> sha256, so a kept file is hashed once
+
+HELD_DIR = ".held"          # inbox subfolders the scan never classifies:
+REPLACING_DIR = ".replacing"  # a candidate waiting for the user, a chosen replacement
+NEEDS_CHOICE = "needs_choice"
+
+
+def _sha_of(path: Path) -> str | None:
+    from .identity import LOCAL_HASH_MAX_BYTES, hash_file
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    if st.st_size > LOCAL_HASH_MAX_BYTES:
+        return None
+    key = (str(path), st.st_size, st.st_mtime_ns)
+    if key in _IDENT_SEEN:
+        return _IDENT_SEEN[key]["sha"]
+    if key not in _SHA_SEEN:
+        if st.st_size > (256 << 20):
+            log.info("%s: reading it to see whether it is the file already loaded "
+                     "(%.1f GB)", path.name, st.st_size / 1e9)
+        _SHA_SEEN[key] = hash_file(path)[0]
+    return _SHA_SEEN[key]
+
+
+# (path, size, mtime_ns) -> {"sha", "gz_members", "fp"}: the ONE read that
+# names a local file's content (fetch.file_identity), made before its load for
+# the content claim and reused by _finish_ok after it (review 11 items 1.1/3.2)
+_IDENT_SEEN: dict = {}
+
+
+# above this size the identity read (before the parse) says what it is doing
+# on the file's own Files-tab row: a 4 GB drop on a USB drive is minutes of
+# 'processing' with no progress bar otherwise (review 12 item 4.1d)
+IDENTITY_NOTE_BYTES = 256 << 20
+
+
+def _identity_of(path: Path, head_mb: int, keep: bool = True, note=None) -> dict:
+    from .fetch import file_identity
+    st = path.stat()
+    key = (str(path), st.st_size, st.st_mtime_ns)
+    got = _IDENT_SEEN.get(key)
+    if got is None:
+        progress = None
+        if st.st_size > IDENTITY_NOTE_BYTES:
+            log.info("%s: reading it once to see whether these bytes are already "
+                     "loaded (%.1f GB)", path.name, st.st_size / 1e9)
+            if note is not None:
+                def progress(done, total):
+                    note(f"reading the file once to see whether these bytes are already "
+                         f"loaded — {done / 1e6:,.0f} of {total / 1e6:,.0f} MB")
+                progress(0, st.st_size)
+        got = file_identity(path, head_mb, progress=progress)
+        if progress is not None:
+            note(None)
+        if keep:
+            if len(_IDENT_SEEN) > 2000:      # a long-lived server: never grows unbounded
+                _IDENT_SEEN.clear()
+            _IDENT_SEEN[key] = got
+    return got
+
+
+def _big_local_twin(cfg: MrfxConfig, store: Store, path: Path, name: str) -> str | None:
+    """A local file over LOCAL_HASH_MAX_BYTES is not hashed in full: it is a
+    copy of a loaded file when the proof the link path already trusts holds —
+    same size, beginning, end and 8 samples, compressed with a trailer that
+    vouches for the whole content (fetch._proves)."""
+    from .fetch import _proves, file_fingerprint
+    if not cfg.early_dedup_mb:
+        return None
+    fp = file_fingerprint(path, cfg.early_dedup_mb)
+    if not fp:
+        return None
+    for c in store.fingerprint_candidates(fp["size"], None, name):
+        if c["kind"] == "loaded" and int(c["head_bytes"] or 0) == fp["head_bytes"] \
+                and c["head_sha"] == fp["head_sha"] and _proves(fp, c):
+            return c["filename"]
+    return None
+
+
+def _claim_month(pf, name: str) -> str | None:
+    """The month this file's rows will carry (parser.file_month_for: the
+    header's, else the name's, else this month) — two copies of one document
+    are twins only within one month (review 14 Group 3). Never raises."""
+    try:
+        import datetime as _dt
+
+        from .parser import file_month_for
+        return file_month_for(getattr(pf, "last_updated_on", None), name,
+                              _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m"))[0]
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _content_claim(cfg: MrfxConfig, store: Store, path: Path, name: str,
+                   claim: dict, month: str | None = None) -> str | None:
+    """Review 11 item 1.1: the inbox had no content check at all — the same
+    bytes under a second name (the browser's "file (1).json.gz", a copy, or
+    the file a link already loaded) were loaded again and every raw count
+    doubled. Claim these bytes for `name` the way a link's queue row does
+    (Store.claim_inbox_content, under the same lock as the link path's
+    claim). Returns None to go ahead (claim['sha'] holds the claim, released
+    by ingest_file), or the name of the loaded twin this file duplicates.
+    A twin being loaded RIGHT NOW is waited for: when it finishes this file
+    is its duplicate; when it fails this file loads."""
+    from .identity import LOCAL_HASH_MAX_BYTES
+    if cfg.downloads_dir in path.parents:
+        return None          # a link's download: claimed by its queue row
+    if (store.rates_dir / f"{file_key(name)}.parquet").exists():
+        return None          # a re-load of a loaded name replaces its own part
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    if size > LOCAL_HASH_MAX_BYTES:
+        return _big_local_twin(cfg, store, path, name)
+
+    def note(text):
+        try:
+            store.upsert_file(name, error=text)
+        except Exception:  # noqa: BLE001 — cosmetic tier
+            pass
+    ident = _identity_of(path, cfg.early_dedup_mb, note=note)
+    sha, csha = ident["sha"], ident.get("csha")
+    told = False
+    while True:
+        got = store.claim_inbox_content(sha, name, csha, month)
+        if got is None:
+            claim["sha"] = sha
+            claim["csha"] = csha
+            return None
+        twin, status = got
+        if status == "done":
+            return twin
+        if not told:
+            log.info("%s: the same bytes are being loaded right now (%s) — waiting for "
+                     "that load instead of loading them twice", name, twin)
+            told = True
+        # the wait ends when the twin ends (Store.claim_inbox_content counts
+        # only a load THIS process runs), when the user presses stop on this
+        # file, or when the program is shutting down (review 12 item 1.3)
+        if store.is_parse_stopped(name):
+            store.clear_parse_stop(name)
+            raise ParseStopped()
+        pool = get_parse_pool()
+        if pool is not None and getattr(pool, "shutting_down", False):
+            raise PoolRestarted("the program is stopping — this file loads at the next start")
+        time.sleep(2.0)
+
+
+def _record_duplicate(cfg: MrfxConfig, store: Store, path: Path, name: str,
+                      pf: Preflight, twin: str) -> dict:
+    msg = (f"identical to {twin}, which is already loaded — not loaded twice (the same "
+           "file under another name: a second download, a copy, or the file a link "
+           "already brought in)")
+    sha = None
+    size = None
+    try:
+        st = path.stat()
+        size = st.st_size
+        sha = (_IDENT_SEEN.get((str(path), st.st_size, st.st_mtime_ns)) or {}).get("sha")
+    except OSError:
+        pass
+    try:
+        twin_sha = (store.loaded_identity(twin) or {}).get("full_sha")
+    except Exception:  # noqa: BLE001
+        twin_sha = None
+    if sha and twin_sha and twin_sha != sha:
+        # the same CONTENT, other bytes (review 13 item 5.2.1)
+        msg = (f"the same content as {twin}, which is already loaded — the same document "
+               "compressed differently or saved decompressed; not loaded twice")
+    drop = _twin_kept_in_processed(cfg, store, path, twin, sha, size)
+    if drop:
+        # the original is already kept in data/processed: a second copy of a
+        # 20 GB file there is 20 GB kept for nothing (review 12 item 2.8)
+        msg += f" — this copy was deleted; the original is kept in data/processed as {twin}"
+    store.upsert_file(name, payer=pf.payer, file_type=pf.file_type, status="skipped",
+                      rows_emitted=0, error=msg, finished_at=_now(),
+                      qa={"duplicate_of": twin, "duplicate_sha": sha})
+    log.info("%s: %s", name, msg)
+    _INGEST_STAT.pop(str(path), None)
+    if drop:
+        try:
+            path.unlink()
+        except OSError:          # a Windows lock: housekeeping, move it instead
+            _finish_file(cfg, path, ok=True)
+    else:
+        _finish_file(cfg, path, ok=True)
+    return {"status": "skipped", "duplicate_of": twin, "error": msg}
+
+
+def _twin_kept_in_processed(cfg: MrfxConfig, store: Store, path: Path, twin: str,
+                            sha: str | None, size: int | None) -> bool:
+    """Is the loaded twin's own file in data/processed, unchanged since it was
+    loaded, and provably these same bytes? Then the copy need not be kept.
+    Same bytes = the same full sha256 (≤ 4 GB), or over that the proof the
+    link path trusts (same size, beginning, end with its whole-content CRC and
+    8 samples — fetch._proves). Anything less keeps today's move."""
+    if cfg.inbox_dir not in path.parents or not cfg.move_processed or size is None:
+        return False
+    kept = cfg.processed_dir / twin
+    try:
+        kst = kept.stat()
+        if kept.resolve() == path.resolve():
+            return False
+    except OSError:
+        return False
+    ident = store.loaded_identity(twin) or {}
+    if kst.st_size != size or ident.get("size") != size \
+            or ident.get("mtime_ns") not in (None, kst.st_mtime_ns):
+        return False
+    if sha:
+        return ident.get("full_sha") == sha
+    try:
+        from .fetch import _proves, file_fingerprint
+        fp = file_fingerprint(path, cfg.early_dedup_mb)
+        loaded = store.loaded_fingerprint(twin)
+        return bool(fp and loaded and fp.get("head_sha") == loaded.get("head_sha")
+                    and _proves(fp, {**loaded, "trailer_proves": ident.get("trailer_proves")}))
+    except Exception:  # noqa: BLE001 — housekeeping: when unsure, keep the copy
+        return False
+
+
+def _month_of(payer_month: tuple) -> tuple:
+    payer, month = payer_month
+    return (str(payer or "").strip().casefold(), str(month or "")[:7])
+
+
+def same_name_verdict(cfg: MrfxConfig, store: Store, path: Path, name: str,
+                      prior: dict, pf: Preflight | None = None) -> tuple[str, str | None]:
+    """A file arrives under `name`, which the store already holds (`prior`).
+    Returns (verdict, sha256 or None):
+
+    'same'    — these exact bytes are already loaded (under this name or any
+                other): the size + mtime recorded when the file was read are
+                unchanged (the very file left in place), or the full sha256
+                equals a loaded file's. Never by size or samples alone: a
+                corrected file of the same size is a different file, and the
+                same file must always be recognised (review 9 item 1.2: a
+                floored MiB count reloaded a 2.3 MiB file on every scan).
+    'replace' — different bytes for the same payer and month (or for a file
+                still being loaded): a corrected re-publication. The user
+                chooses Replace or Keep both — two versions of one file are
+                never blended into every number silently (review 9 4.5).
+    'new'     — different bytes for another month / payer: loaded beside it.
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return "same", None
+    ident = store.loaded_identity(name)
+    if ident and ident.get("mtime_ns") is not None and \
+            (ident.get("size"), ident["mtime_ns"]) == (st.st_size, st.st_mtime_ns):
+        return "same", ident.get("full_sha")
+    sha = _sha_of(path)
+    if sha and store.done_file_with_sha(sha):
+        return "same", sha
+    if not (ident and ident.get("full_sha")):
+        # loaded by a build that recorded no sha: the loaded copy may still be
+        # on disk (processed/, or in place) — compare with it
+        for twin in (cfg.processed_dir / name, cfg.inbox_dir / name,
+                     cfg.inbox_dir / REPLACING_DIR / name):
+            try:
+                if twin.exists() and twin.resolve() != path.resolve():
+                    tsha = _sha_of(twin)
+                    if sha and tsha:
+                        if tsha == sha:
+                            return "same", sha
+                        break
+            except OSError:
+                continue
+        # nothing to compare with (a file loaded before identities were kept,
+        # its copy gone): NOT "same" on size and age — a corrected file of the
+        # same size copied with an older date was silently ignored (review 13
+        # item 5.2.6). It falls through to the held choice below: one click.
+    if prior.get("status") in ("processing", "queued"):
+        return "replace", sha
+    if pf is None:
+        try:
+            pf = preflight(path, cfg, store)
+        except Exception:  # noqa: BLE001 — an unreadable newcomer is loaded and fails there
+            return "new", sha
+    from .parser import file_month_for
+    now_month = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m")
+    mine = _month_of((pf.payer, file_month_for(pf.last_updated_on, name, now_month)[0]))
+    theirs = _month_of((prior.get("payer"), prior.get("file_month") or prior.get("last_updated_on")))
+    if not theirs[0] or not theirs[1] or mine == theirs:
+        return "replace", sha
+    return "new", sha
+
+
+def backfill_identities(cfg: MrfxConfig, store: Store, limit: int = 500, stop=None) -> int:
+    """Files loaded before identities were kept (audit 8) whose copy is still
+    in data/processed: name them from their bytes now, so a later drop under
+    the name is compared by content, not guessed (review 13 item 5.2.6) —
+    and then every file loaded before 0.7.7 by its CONTENT too (review 14
+    item 2.2, `backfill_content_identities`). Best-effort, background, one
+    file at a time; returns how many were named."""
+    n = _backfill_raw_identities(cfg, store, limit)
+    return n + backfill_content_identities(cfg, store, stop)
+
+
+def _backfill_raw_identities(cfg: MrfxConfig, store: Store, limit: int = 500) -> int:
+    n = 0
+    try:
+        with store.connect() as con:
+            rows = con.execute(
+                "SELECT f.filename, f.size_bytes FROM files f LEFT JOIN content_fingerprints c "
+                "USING (filename) WHERE f.status = 'done' AND (c.filename IS NULL OR "
+                "c.full_sha IS NULL) ORDER BY f.filename LIMIT ?", [limit]).fetchall()
+    except Exception:  # noqa: BLE001
+        return 0
+    for name, size in rows:
+        p = cfg.processed_dir / name
+        try:
+            if not p.exists() or (size and p.stat().st_size != size):
+                continue      # not the loaded bytes (or gone): leave it unnamed
+            ident = _identity_of(p, cfg.early_dedup_mb, keep=False)
+            from .fetch import trailer_proves_for
+            st = p.stat()
+            store.record_identity(name, st.st_size, st.st_mtime_ns, ident["sha"],
+                                  trailer_proves_for(p, ident.get("gz_members")),
+                                  ident.get("csha"), ident.get("csize"))
+            n += 1
+        except Exception:  # noqa: BLE001 — the next start tries again
+            continue
+    if n:
+        log.info("named %d file(s) loaded before identities were kept, from their copies "
+                 "in data/processed", n)
+    return n
+
+
+# the Files-tab line of the content backfill (review 14 item 2.2)
+CONTENT_BACKFILL: dict = {"running": False, "done": 0, "total": 0, "no_copy": 0,
+                          "started": None}
+
+
+def backfill_content_identities(cfg: MrfxConfig, store: Store, stop=None) -> int:
+    """Review 14 item 2.2 (P0): every file loaded before 0.7.7 has its raw
+    sha and NO content sha, so round 13's "the same document compressed
+    differently" check protected none of them — a re-encoded copy of an old
+    file loaded twice. Name each of them by content now, from its kept copy
+    (data/processed, else the kept download), ONE file at a time in the
+    background: the copy is read once (raw sha + content sha in the same
+    pass), and the content sha is recorded only when the raw sha equals the
+    one recorded at load (the copy really is what was loaded). Resumable: a
+    restart continues with the files still unnamed. A file with no copy is
+    listed (meta `content_backfill_no_copy`) so the Files tab can say so —
+    its re-encoded twin cannot be recognised. Returns how many were named."""
+    n = 0
+    try:
+        with store.connect() as con:
+            rows = con.execute(
+                "SELECT f.filename, c.full_sha, c.size FROM files f JOIN content_fingerprints c "
+                "USING (filename) WHERE f.status = 'done' AND c.full_sha IS NOT NULL "
+                "AND c.content_sha IS NULL ORDER BY f.filename").fetchall()
+            raw = store._meta_get(con, "content_backfill_no_copy")
+        no_copy = set(json.loads(raw)) if raw else set()
+    except Exception:  # noqa: BLE001
+        return 0
+    todo = [r for r in rows if r[0] not in no_copy]
+    CONTENT_BACKFILL.update(running=bool(todo), done=0, total=len(todo),
+                            no_copy=len(no_copy & {r[0] for r in rows}),
+                            started=time.time())
+    if not todo:
+        CONTENT_BACKFILL["running"] = False
+        return 0
+    log.info("naming %d older file(s) by content (loaded before 0.7.7), one at a time "
+             "in the background", len(todo))
+    newly_missing = []
+    try:
+        for name, full_sha, size in todo:
+            if stop is not None and stop.is_set():
+                break
+            cands = [cfg.processed_dir / name, cfg.downloads_dir / name]
+            p = next((c for c in cands if c.exists() and (not size or c.stat().st_size == size)),
+                     None)
+            if p is None:
+                newly_missing.append(name)
+                CONTENT_BACKFILL["no_copy"] += 1
+                CONTENT_BACKFILL["done"] += 1
+                continue
+            try:
+                ident = _identity_of(p, cfg.early_dedup_mb, keep=False)
+                if ident.get("sha") == full_sha and ident.get("csha"):
+                    with store.write_lock, store.connect() as con:
+                        con.execute("UPDATE content_fingerprints SET content_sha = ?, "
+                                    "content_size = ? WHERE filename = ? AND full_sha = ? "
+                                    "AND content_sha IS NULL",
+                                    [ident["csha"], ident.get("csize"), name, full_sha])
+                    n += 1
+                else:
+                    newly_missing.append(name)      # the copy is not what was loaded
+                    CONTENT_BACKFILL["no_copy"] += 1
+            except Exception:  # noqa: BLE001 — the next start tries again
+                log.debug("content backfill skipped %s", name, exc_info=True)
+            CONTENT_BACKFILL["done"] += 1
+    finally:
+        if newly_missing:
+            try:
+                with store.write_lock, store.connect() as con:
+                    con.execute("INSERT OR REPLACE INTO meta VALUES "
+                                "('content_backfill_no_copy', ?)",
+                                [json.dumps(sorted(no_copy | set(newly_missing)))])
+            except Exception:  # noqa: BLE001
+                pass
+        CONTENT_BACKFILL["running"] = False
+    took = time.time() - (CONTENT_BACKFILL.get("started") or time.time())
+    log.info("named %d older file(s) by content in %.0f s (%d had no kept copy)",
+             n, took, len(newly_missing))
+    return n
+
+
+def unique_inbox_name(directory: Path, name: str, store: Store, tag: str) -> str:
+    """`name` with `-<tag>` before its TRAILING known extensions (.json.gz
+    stays .json.gz; a ".json" in the middle of a name is part of the name —
+    "rates.json.2026-05.json" lost its date before), made unique against the
+    directory and the store's files table."""
+    known = (".json", ".gz", ".zip", ".csv", ".jsonl", ".bz2", ".xz", ".zst")
+    sfx = ""
+    rest = name
+    while True:
+        dot = rest.rfind(".")
+        if dot <= 0 or rest[dot:].lower() not in known:
+            break
+        sfx = rest[dot:] + sfx
+        rest = rest[:dot]
+    i = 0
+    while True:
+        cand = f"{rest}-{tag}{'' if not i else f'-{i}'}{sfx}"
+        if not (directory / cand).exists() and store.file_status(cand) is None:
+            return cand
+        i += 1
+
+
+def hold_for_choice(cfg: MrfxConfig, store: Store, src: Path, orig: str,
+                    sha: str | None, move: bool = True) -> str:
+    """Park a different file that arrived under `orig` until the user picks
+    Replace or Keep both (Files tab). It waits in inbox/.held/, which the
+    scan never classifies, under a name tagged with its content."""
+    import hashlib
+    held = cfg.inbox_dir / HELD_DIR
+    held.mkdir(parents=True, exist_ok=True)
+    st = src.stat()
+    tag = (sha or hashlib.sha256(f"{st.st_size}:{st.st_mtime_ns}".encode()).hexdigest())[:8]
+    new = unique_inbox_name(held, orig, store, tag)
+    dest = held / new
+    if move:
+        src.replace(dest)
+    prior = store.file_status(orig) or {}
+    store.upsert_file(
+        new, status=NEEDS_CHOICE, size_bytes=st.st_size, payer=prior.get("payer"),
+        qa={"replaces": orig},
+        error=(f"A different file with the same name as {orig} (the same payer and month). "
+               f"Replace {orig} with it, or keep both — then both count toward every number."))
+    log.info("%s: a different file with the same name as a loaded file — held as %s until "
+             "you choose Replace or Keep both on the Files tab", orig, new)
+    return new
+
+
+def resolve_choice(cfg: MrfxConfig, store: Store, name: str, action: str) -> dict:
+    """The user's answer for a held file: 'replace' re-loads `replaces`
+    from it (the part is swapped atomically); 'keep' loads it under its own
+    name beside the original."""
+    st = store.file_status(name)
+    if not st or st.get("status") != NEEDS_CHOICE:
+        raise ValueError("this file is not waiting for a choice")
+    held = cfg.inbox_dir / HELD_DIR / name
+    if not held.exists():
+        raise ValueError("the held file is no longer there — drop it in again")
+    qa = st.get("qa")
+    if isinstance(qa, str):
+        try:
+            qa = json.loads(qa)
+        except ValueError:
+            qa = {}
+    orig = (qa or {}).get("replaces")
+    if action == "replace":
+        if not orig:
+            raise ValueError("this file does not say which file it replaces")
+        rdir = cfg.inbox_dir / REPLACING_DIR
+        rdir.mkdir(parents=True, exist_ok=True)
+        target = rdir / orig
+        held.replace(target)
+        store.drop_file_row(name)
+        store.upsert_file(orig, status="queued", error=None)
+        return {"action": "replace", "path": target, "filename": orig}
+    if action == "keep":
+        store.upsert_file(name, status="queued", error=None)
+        return {"action": "keep", "path": held, "filename": name}
+    raise ValueError("choose replace or keep")
+
+
+def _qa_of(row: dict) -> dict:
+    qa = row.get("qa")
+    if isinstance(qa, str):
+        try:
+            qa = json.loads(qa)
+        except ValueError:
+            qa = None
+    return qa if isinstance(qa, dict) else {}
+
+
+def _same_duplicate(p: Path, prior: dict) -> bool:
+    """A file left in the inbox (move_processed: false) that an earlier scan
+    already recognised as a copy of a loaded file: the same bytes still."""
+    want = _qa_of(prior).get("duplicate_sha")
+    return bool(want) and _sha_of(p) == want
 
 
 def scan_inbox(cfg: MrfxConfig, store: Store, force: bool = False, progress_bar=None) -> list[dict]:
@@ -945,10 +2341,72 @@ def scan_inbox(cfg: MrfxConfig, store: Store, force: bool = False, progress_bar=
             except OSError:
                 continue
     flights = []
+    # a replacement the user chose that a restart interrupted: load it now
+    for p in sorted((cfg.inbox_dir / REPLACING_DIR).glob("*")) \
+            if (cfg.inbox_dir / REPLACING_DIR).is_dir() else []:
+        if p.is_file() and (store.file_status(p.name) or {}).get("status") != "processing":
+            try:
+                flights.append((p, preflight(p, cfg, store)))
+            except Exception as e:  # noqa: BLE001
+                log.warning("%s: could not read the chosen replacement (%s)", p.name, e)
+    # "Keep both" was chosen for a held file but its load never ran (a restart,
+    # or the choice's thread died): the row sat 'queued' forever with no button
+    # that worked (review 11 item 1.3). Load it now, like a replacement.
+    for p in sorted((cfg.inbox_dir / HELD_DIR).glob("*")) \
+            if (cfg.inbox_dir / HELD_DIR).is_dir() else []:
+        if not p.is_file():
+            continue
+        st_held = (store.file_status(p.name) or {}).get("status")
+        if st_held in ("queued", "failed") and not ingest_in_progress(p.name):
+            try:
+                flights.append((p, preflight(p, cfg, store)))
+            except Exception as e:  # noqa: BLE001
+                log.warning("%s: could not read the file you chose to keep (%s)", p.name, e)
     for p in paths:
         prior = store.file_status(p.name)
-        if prior and prior.get("status") in ("done", "processing") and not force:
+        if prior and prior.get("status") == NEEDS_CHOICE:
             continue
+        if prior and prior.get("status") == "processing" and not force:
+            continue          # being loaded right now: this IS that file
+        orig = p.name
+        if prior and prior.get("status") == "skipped" and not force:
+            if _same_duplicate(p, prior):
+                # already recognised as a copy of a loaded file
+                if cfg.move_processed:
+                    _finish_file(cfg, p, ok=True)
+                continue
+            alias = _qa_of(prior).get("duplicate_of")
+            twin_row = store.file_status(alias) if alias else None
+            if twin_row and twin_row.get("status") == "done":
+                # this name only ever named a copy of `alias`: different bytes
+                # under it are judged against what IS loaded — a corrected file
+                # for the same payer and month is held for the user's choice
+                orig, prior = alias, twin_row
+        if prior and prior.get("status") == "done" and not force:
+            # a file under a name the store already holds (review 9 1.2 / 4.5)
+            verdict, sha = same_name_verdict(cfg, store, p, orig, prior)
+            if verdict == "same":
+                if cfg.move_processed:
+                    _finish_file(cfg, p, ok=True)
+                continue
+            try:
+                if verdict == "replace":
+                    hold_for_choice(cfg, store, p, orig, sha)
+                    results.append({"file": p.name, "status": NEEDS_CHOICE})
+                    continue
+                import hashlib
+                st = p.stat()
+                tag = (sha or hashlib.sha256(f"{st.st_size}:{st.st_mtime_ns}".encode()
+                                             ).hexdigest())[:8]
+                new = unique_inbox_name(p.parent, p.name, store, tag)
+                p = p.rename(p.with_name(new))
+            except OSError as e:
+                log.warning("%s: a different file with this name was dropped in, but it "
+                            "could not be set aside (%s) — it was NOT loaded", p.name, e)
+                continue
+            log.info("%s: a different file (another month or payer) under an already-loaded "
+                     "name — loading it as %s", prior["filename"], p.name)
+            prior = None
         try:
             flights.append((p, preflight(p, cfg, store)))
         except Exception as e:  # noqa: BLE001 — one unreadable neighbor (e.g.

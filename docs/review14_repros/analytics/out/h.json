@@ -1,0 +1,227 @@
+{
+ "setup": {
+  "pip_e": [
+   0,
+   "\n[notice] A new release of pip is available: 26.2.2 -> 26.3\n[notice] To update, run: /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/H/install/Claudevideo/.venv/bin/python -m pip install --upgrade pip\n"
+  ],
+  "version": "0.7.6 /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/H/install/Claudevideo/mrfx/__init__.py"
+ },
+ "076_after_first": {
+  "files_done": 3,
+  "payers": 3,
+  "rates": 555202,
+  "tins": 8864
+ },
+ "076_payers_first": {
+  "payers": [
+   "Highmark WV",
+   "Moda",
+   "Tufts Health Public Plans, Inc."
+  ]
+ },
+ "076_queue": {
+  "done": 5
+ },
+ "076_payers_end": {
+  "payers": [
+   "Highmark WV",
+   "Moda",
+   "Tufts Health Public Plans, Inc."
+  ]
+ },
+ "076_stats_end": {
+  "files_done": 8,
+  "payers": 7,
+  "rates": 6768604
+ },
+ "076_log": [
+  "08:32:39 WARNING mrfx.config: /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/H/install/Claudevideo/config/mrfx.yaml: unknown setting(s) ignored: monthly_recheck \u2014 check for typos",
+  "08:32:40 INFO    mrfx.cli: opening the store at /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/H/install/Claudevideo/data/mrfx_store \u2026",
+  "08:32:40 INFO    mrfx.store: analytics memory budget: 2 GB (1.9 GiB, as DuckDB reports it) \u2014 set by duckdb_memory_gb; raise duckdb_memory_gb in config/mrfx.yaml if rebuilds run out",
+  "08:32:40 INFO    mrfx.cli: watching /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/H/install/Claudevideo/data/inbox",
+  "  store: /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/H/install/Claudevideo/data/mrfx_store  (0 file(s) ingested)",
+  "  inbox: /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/H/install/Claudevideo/data/inbox  (drop .json / .json.gz / .zip here)",
+  "  if the app ever freezes: open /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/H/install/Claudevideo/data/mrfx_store/diagnostics/stacks_latest.txt",
+  "08:32:46 INFO    mrfx.ingest: inbox scan: first analytics build of this store \u2014 building them in full",
+  "08:32:46 INFO    mrfx.store: full analytics rebuild: the slow whole-store pass (one-time after an upgrade, or when a shortcut wasn't safe). Extraction continues but shares the disk; once this completes, updates are payer-sized and fast.",
+  "08:32:46 INFO    mrfx.store: rollup: preparing (counting source rows)\u2026",
+  "08:33:10 INFO    mrfx.fetch: updating analytics rollups (5 newly ingested file(s))...",
+  "08:33:10 INFO    mrfx.fetch: incremental analytics update unavailable (Out of Memory Error: failed to pin block (audit injected, 0.7.6)) \u2014 running a full rebuild",
+  "08:33:10 ERROR   mrfx.fetch: rollup rebuild failed; will retry after the next file",
+  "  File \"/tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/H/install/Claudevideo/mrfx/fetch.py\", line 3556, in rebuild_now",
+  "    r = store.update_rollups_incremental(skip_if_busy=True)",
+  "  File \"/tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/hooks076/sitecustomize.py\", line 20, in inc",
+  "  File \"/tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/hooks076/sitecustomize.py\", line 17, in boom",
+  "  File \"/tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/H/install/Claudevideo/mrfx/fetch.py\", line 3563, in rebuild_now",
+  "    r = store.rebuild_rollups(skip_if_busy=True)",
+  "  File \"/tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/hooks076/sitecustomize.py\", line 25, in full",
+  "  File \"/tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/hooks076/sitecustomize.py\", line 17, in boom",
+  "08:33:13 INFO    mrfx.fetch: updating analytics rollups (5 newly ingested file(s))...",
+  "08:33:13 INFO    mrfx.fetch: incremental analytics update unavailable (Out of Memory Error: failed to pin block (audit injected, 0.7.6)) \u2014 running a full rebuild",
+  "08:33:13 ERROR   mrfx.fetch: rollup rebuild failed; will retry after the next file",
+  "  File \"/tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/H/install/Claudevideo/mrfx/fetch.py\", line 3556, in rebuild_now",
+  "    r = store.update_rollups_incremental(skip_if_busy=True)",
+  "  File \"/tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/hooks076/sitecustomize.py\", line 20, in inc",
+  "  File \"/tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/hooks076/sitecustomize.py\", line 17, in boom",
+  "  File \"/tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/H/install/Claudevideo/mrfx/fetch.py\", line 3563, in rebuild_now",
+  "    r = store.rebuild_rollups(skip_if_busy=True)",
+  "  File \"/tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/hooks076/sitecustomize.py\", line 25, in full",
+  "  File \"/tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/hooks076/sitecustomize.py\", line 17, in boom",
+  "08:33:16 INFO    mrfx.fetch: updating analytics rollups (5 newly ingested file(s))...",
+  "08:33:16 INFO    mrfx.fetch: incremental analytics update unavailable (Out of Memory Error: failed to pin block (audit injected, 0.7.6)) \u2014 running a full rebuild",
+  "08:33:16 ERROR   mrfx.fetch: rollup rebuild failed 3 times \u2014 giving up for this run; raw data is safe, analytics will refresh on the next successful rebuild"
+ ],
+ "076_truth": {
+  "done_files": 8,
+  "raw_rows": 6768604,
+  "spine_rows": 190445,
+  "expected_rows": 444992,
+  "missing": 254547,
+  "extra": 0,
+  "files_fully_in_spine": 3,
+  "files_rowcount_mismatch": [],
+  "spine_payers": [
+   "Highmark WV",
+   "Moda",
+   "Tufts Health Public Plans, Inc."
+  ],
+  "raw_payers": [
+   "Blue Cross Blue Shield of North Dakota",
+   "Blue Cross Blue Shield of Wyoming",
+   "HEALTHSCOPE BENEFITS",
+   "Highmark WV",
+   "Moda",
+   "Security Health Plan of Wisconsin, Inc,",
+   "Tufts Health Public Plans, Inc."
+  ],
+  "hash_spine": null,
+  "hash_dir": null,
+  "meta": {
+   "rollup_schema_version": "2",
+   "rollup_covered_through": "2026-11-12 08:32:46.699771",
+   "rollup_covered_names": "[\"wv_hmhs_2026-10-27_000000647_in-network-rates_01_of_02.json.gz\"]"
+  }
+ },
+ "update": {
+  "rc": 0,
+  "out": "updating MRF Explorer in /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/H/install/Claudevideo\n  from /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/mrfx_project.zip\ninstalling the new version's components (pip) \u2014 usually a few seconds\u2026\nsaved the 32 program file(s) being replaced to /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/H/install/Claudevideo/data/update_backups/before_update_20261112_083338.zip\nupdated 110 file(s) (version 0.7.6 -> 0.7.7); your data folder and settings were not touched\n  your settings were kept; the new version's copy is saved as config/mrfx.yaml.new (only needed if you want to see new options)\npointing this folder's environment at the new version (pip)\u2026\n\nDone. Start MRF Explorer again as usual, then press Ctrl+Shift+R once in the dashboard tab so your browser loads the new screens.\n(If anything looks wrong, the previous program files are saved in /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/H/install/Claudevideo/data/update_backups/before_update_20261112_083338.zip.)\n08:33:37 WARNING mrfx.config: config/mrfx.yaml: unknown setting(s) ignored: monthly_recheck \u2014 check for typos\n\n[notice] A new release of pip is available: 26.2.2 -> 26.3\n[notice] To update, run: /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/H/install/Claudevideo/.venv/bin/python -m pip install --upgrade pip\n\n[notice] A new release of pip is available: 26.2.2 -> 26.3\n[notice] To update, run: /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/H/install/Claudevideo/.venv/bin/python -m pip install --upgrade pip\n",
+  "s": 3.1
+ },
+ "version_after": "0.7.7 /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/H/install/Claudevideo/mrfx/__init__.py",
+ "077_first_answer": {
+  "dt": 4.0,
+  "analytics": {
+   "state": "building",
+   "reason": "Adding the newly loaded files to the analytics",
+   "pct": 0,
+   "eta_text": "",
+   "covered_files": 3,
+   "done_files": 8,
+   "covered_payers": 3,
+   "loaded_payers": 7,
+   "covered_rows": 555202,
+   "loaded_rows": 6768604,
+   "sentence": "Analytics cover 3 of 7 payers (3 of 8 files). Adding the newly loaded files to the analytics"
+  }
+ },
+ "077_timeline": [
+  {
+   "dt": 4.0,
+   "state": "building",
+   "files": "3/8",
+   "payers": "3/7",
+   "sentence": "Analytics cover 3 of 7 payers (3 of 8 files). Adding the newly loaded files to the analytics",
+   "err": null
+  },
+  {
+   "dt": 28.9,
+   "state": "current",
+   "files": "8/8",
+   "payers": "7/7",
+   "sentence": "",
+   "err": null
+  }
+ ],
+ "077_payers": {
+  "payers": [
+   "Blue Cross Blue Shield of North Dakota",
+   "Blue Cross Blue Shield of Wyoming",
+   "HEALTHSCOPE BENEFITS",
+   "Highmark WV",
+   "Moda",
+   "Security Health Plan of Wisconsin, Inc,",
+   "Tufts Health Public Plans, Inc."
+  ],
+  "covered": [
+   "Blue Cross Blue Shield of North Dakota",
+   "Blue Cross Blue Shield of Wyoming",
+   "HEALTHSCOPE BENEFITS",
+   "Highmark WV",
+   "Moda",
+   "Security Health Plan of Wisconsin, Inc,",
+   "Tufts Health Public Plans, Inc."
+  ]
+ },
+ "077_code_97110": {
+  "Security Health Plan of Wisconsin, Inc,": 82.7,
+  "Highmark WV": 28.21,
+  "Moda": 26.17,
+  "Tufts Health Public Plans, Inc.": 22.51
+ },
+ "077_to_current_s": 31.6,
+ "077_log": [
+  "08:33:41 INFO    mrfx.cli: opening the store at /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/H/install/Claudevideo/data/mrfx_store \u2026",
+  "08:33:41 INFO    mrfx.store: analytics memory budget: 2 GB (1.9 GiB, as DuckDB reports it) \u2014 set by duckdb_memory_gb; raise duckdb_memory_gb in config/mrfx.yaml if rebuilds run out",
+  "08:33:41 INFO    mrfx.cli: analytics are behind the ingested files \u2014 catching up in the background. Reason: 5 newly ingested file(s) not yet rolled up (incremental)",
+  "08:33:41 INFO    mrfx.cli: watching /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/H/install/Claudevideo/data/inbox",
+  "08:33:41 INFO    mrfx.store: analytics update: 5 new file(s), 0 queued slice(s) \u2014 recomputing 4 payer slice(s) instead of the whole store",
+  "  store: /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/H/install/Claudevideo/data/mrfx_store  (8 file(s) ingested)",
+  "  inbox: /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/H/install/Claudevideo/data/inbox  (drop .json / .json.gz / .zip here)",
+  "  if the app ever freezes: open /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/H/install/Claudevideo/data/mrfx_store/diagnostics/stacks_latest.txt",
+  "08:33:42 INFO    mrfx.store: analytics update rates_by_tin_tbl: partition 1/7",
+  "08:33:46 INFO    mrfx.store: analytics update rates_by_tin_tbl: partition 2/7",
+  "08:33:48 INFO    mrfx.store: analytics update rates_by_tin_tbl: partition 3/7",
+  "08:33:51 INFO    mrfx.store: analytics update rates_by_tin_tbl: partition 4/7",
+  "08:33:54 INFO    mrfx.store: analytics update rates_by_tin_tbl: partition 5/7",
+  "08:33:57 INFO    mrfx.store: analytics update rates_by_tin_tbl: partition 6/7",
+  "08:34:00 INFO    mrfx.store: analytics update rates_by_tin_tbl: partition 7/7",
+  "08:34:04 INFO    mrfx.store: analytics update tin_directory_tbl: partition 1/7",
+  "08:34:05 INFO    mrfx.store: analytics update tin_directory_tbl: partition 2/7",
+  "08:34:05 INFO    mrfx.store: analytics update tin_directory_tbl: partition 3/7",
+  "08:34:06 INFO    mrfx.store: analytics update tin_directory_tbl: partition 4/7",
+  "08:34:06 INFO    mrfx.store: analytics update tin_directory_tbl: partition 5/7",
+  "08:34:07 INFO    mrfx.store: analytics update tin_directory_tbl: partition 6/7",
+  "08:34:08 INFO    mrfx.store: analytics update tin_directory_tbl: partition 7/7",
+  "08:34:09 INFO    mrfx.store: analytics update finished in 28s (payer slice, not a full rebuild)"
+ ],
+ "077_truth": {
+  "done_files": 8,
+  "raw_rows": 6768604,
+  "spine_rows": 444992,
+  "expected_rows": 444992,
+  "missing": 0,
+  "extra": 0,
+  "files_fully_in_spine": 8,
+  "files_rowcount_mismatch": [],
+  "spine_payers": [
+   "Blue Cross Blue Shield of North Dakota",
+   "Blue Cross Blue Shield of Wyoming",
+   "HEALTHSCOPE BENEFITS",
+   "Highmark WV",
+   "Moda",
+   "Security Health Plan of Wisconsin, Inc,",
+   "Tufts Health Public Plans, Inc."
+  ],
+  "raw_payers": [
+   "Blue Cross Blue Shield of North Dakota",
+   "Blue Cross Blue Shield of Wyoming",
+   "HEALTHSCOPE BENEFITS",
+   "Highmark WV",
+   "Moda",
+   "Security Health Plan of Wisconsin, Inc,",
+   "Tufts Health Public Plans, Inc."
+  ],
+  "hash_spine": null,
+  "hash_dir": null
+ }
+}

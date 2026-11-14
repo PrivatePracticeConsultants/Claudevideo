@@ -125,7 +125,13 @@ def test_watchlist_digest_composes_the_tabs(cfg, store, tmp_path):
     _seed(store)
     assert watchlist(store) == []
     add_client(store, "Gateway Therapy")
-    add_client(store, "No Such Practice LLC")
+    # a name that matches nothing is refused at add time (review 10 group 4);
+    # a client whose practice STOPPED matching (a reset) still gets its own
+    # error cell in the digest — planted directly
+    with pytest.raises(BenchmarkError, match="no practice in the store matches"):
+        add_client(store, "No Such Practice LLC")
+    from mrfx.clients import _save_client
+    _save_client(store, "No Such Practice LLC")
     assert watchlist(store) == ["Gateway Therapy", "No Such Practice LLC"]
     with pytest.raises(BenchmarkError):
         add_client(store, "   ")
@@ -151,7 +157,11 @@ def test_watchlist_digest_composes_the_tabs(cfg, store, tmp_path):
     import_shared_patients(store, hop)
 
     d = client_digest(store)
-    assert d["can_diff"] and d["month"] == "2026-06" and d["have_medicare"]
+    # each payer's own newest file vs its previous one (round 6 P0.1): the
+    # digest is "latest", and says which months each payer was compared on
+    assert d["can_diff"] and d["month"] == "latest" and d["have_medicare"]
+    assert {(p["payer"], p["new_month"], p["prev_month"]) for p in d["payer_months"]} \
+        >= {("Aetna", "2026-06", "2026-05")}
     by = {c["subject"]: c for c in d["clients"]}
     gw = by["Gateway Therapy"]
     assert gw["error"] is None

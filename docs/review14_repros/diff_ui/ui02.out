@@ -1,0 +1,18 @@
+== attempt 1
+roster: #ro-run disabled after both runs ended = True | rows shown: 500
+medicare: #md-run disabled after both runs ended = False
+clients: #cl-refresh disabled after both digests ended = False
+after reload: #ro-run disabled = False
+--- ui02 console: []
+--- ui02 pageerrors: []
+--- ui02 requestfailed: []
+--- ui02 http>=400: []
+== attempt 2
+roster: #ro-run disabled after both runs ended = True | rows shown: 500
+medicare: #md-run disabled after both runs ended = True
+clients: #cl-refresh disabled after both digests ended = False
+after reload: #ro-run disabled = False
+--- ui02 console: []
+--- ui02 pageerrors: []
+--- ui02 requestfailed: []
+--- ui02 http>=400: []

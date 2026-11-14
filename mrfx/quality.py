@@ -29,7 +29,8 @@ import datetime as dt
 import logging
 
 from .catalog import code_info
-from .store import Store
+from .store import Store, generation_cached
+from .rounding import half_up
 
 log = logging.getLogger(__name__)
 
@@ -82,6 +83,7 @@ def _band(n: int | None) -> str | None:
     return None
 
 
+@generation_cached('quality.rate_type_mix')
 def rate_type_mix(store: Store, market: dict | None = None) -> dict:
     """What KINDS of rate the scoped market is built from.
 
@@ -111,10 +113,10 @@ def rate_type_mix(store: Store, market: dict | None = None) -> dict:
                 for cur in [con.execute(sql, params)] for r in cur.fetchall()]
     total = sum(r["n_rows"] for r in rows) or 0
     for r in rows:
-        r["pct"] = round(100.0 * r["n_rows"] / total, 1) if total else None
+        r["pct"] = half_up(100.0 * r["n_rows"] / total, 1) if total else None
         r["contracted"] = r["rate_type"] in CONTRACTED_TYPES
     derived = [r for r in rows if not r["contracted"] and r["rate_type"] != "(unstated)"]
-    derived_pct = round(sum(r["pct"] or 0 for r in derived), 1)
+    derived_pct = half_up(sum(r["pct"] or 0 for r in derived), 1)
 
     # per payer, because the mix is a PAYER's publishing choice
     psql = f"""
@@ -129,7 +131,7 @@ def rate_type_mix(store: Store, market: dict | None = None) -> dict:
     """
     with store.connect() as con:
         payers = [{"payer": p, "n_rows": n,
-                   "pct_contracted": round(100.0 * c / n, 1) if n else None}
+                   "pct_contracted": half_up(100.0 * c / n, 1) if n else None}
                   for p, n, c in con.execute(psql, params).fetchall()]
     return {
         "rows": rows, "total_rows": total, "by_payer": payers,
@@ -145,6 +147,69 @@ def rate_type_mix(store: Store, market: dict | None = None) -> dict:
     }
 
 
+POOLED_FILES_NOTE = (
+    "Several files of one payer for one month are POOLED, not superseded: a "
+    "practice priced in two of them gets the median of the rates they give. "
+    "Payers publish one file per plan book (measured: Tufts' subsidized and "
+    "non-subsidized books of 2026-11 price 43,810 of 46,149 contract lines in "
+    "both, 1,350 of them at different rates) and split national books into "
+    "numbered files, all stamped with the same date — no file is \"newer\". "
+    "A payer that republishes a CORRECTED file under a new name in the same "
+    "month is pooled with the file it corrects: remove the old one on the "
+    "Files tab.")
+
+
+def pooled_month_files(store: Store) -> list[dict]:
+    """Payer x month cells loaded from more than one file, with how many
+    practices and contract lines appear in more than one of them and how many
+    of those lines carry different rates (review 12 item 2.5: the rule is
+    pooling, and the Files tab and every methodology say so with the numbers).
+    The file list is read each call (the small files table); the aggregate
+    over the spine is kept per SPINE generation (review 13 item 1.4 — keyed
+    on the data generation it ran again after every enrichment name refresh,
+    5-6 s per 99M rows on the Files poll, for an identical answer)."""
+    with store.connect() as con:
+        files = con.execute("""
+            SELECT payer, file_month, count(*) FROM files
+            WHERE status = 'done' AND file_type = 'in_network'
+              AND coalesce(rows_emitted, 0) > 0 AND payer IS NOT NULL
+            GROUP BY 1, 2 HAVING count(*) > 1""").fetchall()
+    if not files:
+        return []
+
+    def spine_cells():
+        with store.connect() as con:
+            return [list(r) for r in con.execute("""
+                SELECT payer, file_month,
+                       count(DISTINCT tin_value) FILTER (WHERE source_count > 1),
+                       count(*) FILTER (WHERE source_count > 1),
+                       count(*) FILTER (WHERE source_count > 1 AND rate_variants > 1)
+                FROM rates_by_tin GROUP BY 1, 2""").fetchall()]
+    spine = {(p, m): (pr, ln, df)
+             for p, m, pr, ln, df in store.spine_cached("quality.pooled_spine", None, spine_cells)}
+    out = []
+    for payer, month, n in files:
+        pr, ln, df = spine.get((payer, month), (0, 0, 0))
+        out.append({"payer": payer, "file_month": month, "files": int(n),
+                    "practices_in_several": int(pr or 0), "lines_in_several": int(ln or 0),
+                    "lines_differing": int(df or 0)})
+    out.sort(key=lambda r: (-r["lines_differing"], r["payer"], r["file_month"] or ""))
+    return out
+
+
+def pooled_files_sentence(rows: list[dict]) -> str | None:
+    """One line for a methodology sidecar / the Files tab, or None."""
+    if not rows:
+        return None
+    cells = "; ".join(
+        f"{r['payer']} {r['file_month']}: {r['files']} files, {r['practices_in_several']:,} "
+        f"practices priced in more than one ({r['lines_differing']:,} lines at different rates)"
+        for r in rows[:8])
+    more = f"; and {len(rows) - 8} more" if len(rows) > 8 else ""
+    return f"Pooled months — {cells}{more}. {POOLED_FILES_NOTE}"
+
+
+@generation_cached('quality.payer_freshness', daily=True)
 def payer_freshness(store: Store, *, stale_days: int = 270) -> dict:
     """How recently each payer re-published, by its own last_updated_on."""
     with store.connect() as con:
@@ -156,6 +221,10 @@ def payer_freshness(store: Store, *, stale_days: int = 270) -> dict:
                    max(finished_at)                AS last_ingested
             FROM files
             WHERE status = 'done' AND file_type = 'in_network' AND payer IS NOT NULL
+              -- a 0-row file publishes no rate: it is not the payer's newest
+              -- publication of the rates on screen (review 10 item 3.6 — BCBS
+              -- ND "27 days" while its 2.66M rates were from two months earlier)
+              AND coalesce(rows_emitted, 0) > 0
             GROUP BY payer ORDER BY published DESC NULLS LAST, payer
         """).fetchall()
         months = dict(con.execute(
@@ -175,6 +244,8 @@ def payer_freshness(store: Store, *, stale_days: int = 270) -> dict:
             # a date we cannot read must not pass as fresh, and must not be
             # called stale either — it is unknown, and says so
             "stale": (age is not None and age > stale_days),
+            # a header dated after today: say so, never "-21 days"
+            "future_dated": age is not None and age < 0,
             "date_unreadable": bool(published) and d is None,
             "newest_file_month": months.get(payer),
             "n_files": n_files,
@@ -207,6 +278,7 @@ def _as_date(s) -> dt.date | None:
     return None
 
 
+@generation_cached('quality.size_premium')
 def size_premium(store: Store, market: dict | None = None, *,
                  subject: str | None = None, min_practices: int = 5) -> dict:
     """Does a bigger practice get paid more, in this market?
@@ -217,43 +289,52 @@ def size_premium(store: Store, market: dict | None = None, *,
     then compared on those scores.
     """
     from .benchmark import (BenchmarkError, _market_where, _rates_relation,
-                            normalize_market, resolve_plan_scope,
-                            resolve_subject_tins)
+                            normalize_market, practice_base_sql, resolve_plan_scope)
 
     # a band below ONE practice cannot exist; a hostile 0/negative walked
     # straight into indexing an empty percentile list (found by audit)
     min_practices = max(1, int(min_practices))
     m = resolve_plan_scope(store, normalize_market(market or {}))
-    where, params = _market_where(m, bool(m.get("include_assistant")),
-                                  bool(m.get("include_non_dollar")))
-    rel = _rates_relation(m)
-    subject_tins = resolve_subject_tins(store, subject) if subject else []
+    base_q, params = practice_base_sql(store, m, per_payer=True)
+    where, wparams = _market_where(m, bool(m.get("include_assistant")),
+                                   bool(m.get("include_non_dollar")))
+    # the subject: its own TINs and rows under the ONE subject rule, ranked
+    # against the market's peers — an out-of-state subject answered "no rates
+    # under this market scope" beside a Benchmark that priced it (review 9 4.4)
+    from .benchmark import subject_market, subject_tins_for_market
+    subject_tins = subject_tins_for_market(store, subject, m) if subject else []
     if subject and not subject_tins:
         raise BenchmarkError(f"no practice matches {subject!r}")
+    s_m = subject_market(m)
+    where, wparams = _market_where(s_m, bool(m.get("include_assistant")),
+                                   bool(m.get("include_non_dollar")))
+    rel = _rates_relation(s_m)
 
-    # percent_rank within (payer, code): strictly-below share, so the metric is
-    # a POSITION and comparable across codes with very different dollar levels
+    # the house MID-RANK within (payer, code) (leads.MIDRANK_PCT), so the
+    # metric is a POSITION comparable across codes with very different dollar
+    # levels. percent_rank scored every tie 0: a payer's flat schedule across
+    # five practices put all five at "p0" while Benchmark said p50 (audit 8
+    # P1-5)
+    from .leads import midrank_pct_sql
     sql = f"""
-        WITH per_tin AS (
-            SELECT t.payer, t.billing_code, t.tin_value,
-                   median(t.negotiated_rate) AS rate
-            FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
-            WHERE {where}
-            GROUP BY t.payer, t.billing_code, t.tin_value
-        ),
+        WITH per_tin AS ({base_q}),
         cells AS (
             SELECT *, count(*) OVER (PARTITION BY payer, billing_code) AS n_in_cell,
-                   percent_rank() OVER (PARTITION BY payer, billing_code
-                                        ORDER BY rate) AS pr
+                   count(DISTINCT round(rate, 2)) OVER (PARTITION BY payer, billing_code)
+                                            AS n_rates,
+                   {midrank_pct_sql("payer, billing_code")} AS pct
             FROM per_tin
         )
         SELECT c.tin_value,
-               round(100.0 * avg(c.pr), 1)  AS avg_percentile,
+               -- p50 when every cell it is in pays everyone the same
+               coalesce(avg(c.pct) FILTER (WHERE c.n_rates >= 2), 50.0) AS avg_percentile,
                count(*)                     AS n_cells,
                round(median(c.rate), 2)     AS median_rate,
                any_value(d.npi_count)       AS npi_count
         FROM cells c LEFT JOIN tin_directory d USING (tin_value)
-        -- a one- or two-practice cell has no meaningful percentile
+        -- a one- or two-practice cell has no meaningful percentile, and a
+        -- cell where everyone is paid the same ranks no one (the one
+        -- overall-position code set; review 9 item 4.3)
         WHERE c.n_in_cell >= 3
         GROUP BY c.tin_value
     """
@@ -282,20 +363,51 @@ def size_premium(store: Store, market: dict | None = None, *,
         mid = len(pct) // 2
         out.append({
             "band": label, "n_practices": len(group),
-            "avg_percentile": round(
+            "avg_percentile": half_up(
                 pct[mid] if len(pct) % 2 else (pct[mid - 1] + pct[mid]) / 2, 1),
-            "median_rate": (round(rates[len(rates) // 2], 2) if rates else None),
+            "median_rate": (half_up(rates[len(rates) // 2], 2) if rates else None),
             "thin": False,
         })
 
     usable = [b for b in out if not b["thin"]]
     spread = None
     if len(usable) >= 2:
-        spread = round(usable[-1]["avg_percentile"] - usable[0]["avg_percentile"], 1)
+        spread = half_up(usable[-1]["avg_percentile"] - usable[0]["avg_percentile"], 1)
 
     subj = None
     if subject_tins:
-        mine = [r for r in rows if r["tin_value"] in set(subject_tins)]
+        # the subject's position in each (payer, code) cell: mid-rank among
+        # the OTHER practices of the market (identical to the cell rank above
+        # for a subject inside the market; defined for one outside it)
+        subj_q, subj_params = practice_base_sql(
+            store, s_m, per_payer=True,
+            extra=" AND t.tin_value IN (SELECT unnest(?::VARCHAR[]))",
+            extra_params=[subject_tins])
+        with store.connect() as con:
+            cur = con.execute(f"""
+                WITH per_tin AS ({base_q}),
+                subj AS ({subj_q}),
+                peers AS (SELECT * FROM per_tin
+                          WHERE tin_value NOT IN (SELECT unnest(?::VARCHAR[]))),
+                scored AS (
+                    SELECT s.tin_value, s.rate,
+                           100.0 * (count(*) FILTER (WHERE round(p.rate, 2) < round(s.rate, 2))
+                                    + 0.5 * count(*) FILTER (WHERE round(p.rate, 2) = round(s.rate, 2)))
+                           / count(*) AS pct,
+                           NOT (min(round(p.rate, 2)) = round(s.rate, 2)
+                                AND max(round(p.rate, 2)) = round(s.rate, 2)) AS ranks
+                    FROM subj s JOIN peers p USING (payer, billing_code)
+                    GROUP BY s.tin_value, s.payer, s.billing_code, s.rate
+                    HAVING count(*) >= 2
+                )
+                SELECT c.tin_value,
+                       coalesce(avg(c.pct) FILTER (WHERE c.ranks), 50.0) AS avg_percentile,
+                       count(*) AS n_cells, round(median(c.rate), 2) AS median_rate,
+                       any_value(d.npi_count) AS npi_count
+                FROM scored c LEFT JOIN tin_directory d USING (tin_value)
+                GROUP BY c.tin_value
+            """, [*params, *subj_params, subject_tins])
+            mine = [dict(zip([x[0] for x in cur.description], r)) for r in cur.fetchall()]
         if not mine:
             # Two very different reasons for no rows, and they must not be
             # conflated. resolve_subject_tins falls through to the RAW STRING
@@ -308,7 +420,7 @@ def size_premium(store: Store, market: dict | None = None, *,
                 present = con.execute(
                     f"SELECT 1 FROM {rel} t LEFT JOIN tin_directory td USING (tin_value) "
                     f"WHERE {where} AND t.tin_value IN (SELECT unnest(?::VARCHAR[])) "
-                    "LIMIT 1", [*params, subject_tins]).fetchone()
+                    "LIMIT 1", [*wparams, subject_tins]).fetchone()
             if not present:
                 raise BenchmarkError(
                     f"no rates under this market scope for {subject!r} — check "
@@ -321,18 +433,33 @@ def size_premium(store: Store, market: dict | None = None, *,
                                "it is priced on has fewer than 3 practices to rank "
                                "against — too thin to place it by size")}
         if mine:
-            n = max((r.get("npi_count") or 0) for r in mine)
+            # a mapped group's size is its member TINs' providers together (it
+            # was the biggest single member's: BIG GROUP read "solo" while its
+            # dossier said 2 NPIs — review 10 item 2.8)
+            n = sum((r.get("npi_count") or 0) for r in mine)
             pcts = sorted(r["avg_percentile"] for r in mine)
             mid = len(pcts) // 2
             band = _band(n)
             peer = next((b for b in usable if b["band"] == band), None)
-            mypct = round(pcts[mid] if len(pcts) % 2
+            mypct = half_up(pcts[mid] if len(pcts) % 2
                           else (pcts[mid - 1] + pcts[mid]) / 2, 1)
+            # the practice's ONE overall position (benchmark.overall_position
+            # — Leads, leaderboard, roster, Negotiate, dossier) travels with the
+            # band statistic, which is a different number: the mean of its
+            # positions within each payer x code cell. Printed as "is at p37.5"
+            # it contradicted every other screen's p13 (review 10 item 2.8)
+            overall = None
+            try:
+                from .benchmark import compute_benchmark, overall_position
+                overall = overall_position(compute_benchmark(store, subject, market or {})["rows"])
+            except Exception:  # noqa: BLE001 — the band comparison stands alone
+                overall = None
             subj = {
                 "subject": subject, "npi_count": n, "band": band,
+                "position": None if overall is None else float(overall),
                 "avg_percentile": mypct,
                 "band_avg_percentile": peer["avg_percentile"] if peer else None,
-                "vs_band": (round(mypct - peer["avg_percentile"], 1)
+                "vs_band": (half_up(mypct - peer["avg_percentile"], 1)
                             if peer else None),
             }
 
@@ -350,9 +477,12 @@ def size_premium(store: Store, market: dict | None = None, *,
                 f"{direction} the smallest in this market.")
     if subj and subj["vs_band"] is not None:
         headline += (
-            f" This practice ({subj['npi_count']} provider(s), {subj['band']}) "
-            f"is at p{subj['avg_percentile']:g} — {abs(subj['vs_band']):g} points "
-            f"{'above' if subj['vs_band'] > 0 else 'below'} others its size.")
+            f" This practice ({subj['npi_count']} provider(s), {subj['band']}"
+            + (f"; overall position p{subj['position']:g}" if subj.get("position") is not None
+               else "")
+            + f") averages p{subj['avg_percentile']:g} within each payer — "
+            f"{abs(subj['vs_band']):g} points "
+            f"{'above' if subj['vs_band'] > 0 else 'below'} others its size on the same measure.")
 
     return {
         "bands": out, "n_practices": len(rows), "spread_points": spread,
@@ -362,16 +492,19 @@ def size_premium(store: Store, market: dict | None = None, *,
     }
 
 
+@generation_cached('quality.code_type_flag')
 def code_type_flag(store: Store, market: dict | None, subject: str) -> dict:
     """What kind of rate the SUBJECT's own rows are — the version of the
     rate-type question that belongs in a client's own report."""
     from .benchmark import (_market_where, _rates_relation, normalize_market,
-                            resolve_plan_scope, resolve_subject_tins)
+                            resolve_plan_scope)
 
+    from .benchmark import subject_market, subject_tins_for_market
     m = resolve_plan_scope(store, normalize_market(market or {}))
-    tins = resolve_subject_tins(store, subject)
+    tins = subject_tins_for_market(store, subject, m)
     if not tins:
         return {"rows": [], "derived_pct": None, "flag": False, "note": TYPE_NOTE}
+    m = subject_market(m)            # the subject's OWN rows (review 9 4.4)
     where, params = _market_where(m, bool(m.get("include_assistant")),
                                   bool(m.get("include_non_dollar")))
     rel = _rates_relation(m)
@@ -381,7 +514,7 @@ def code_type_flag(store: Store, market: dict | None, subject: str) -> dict:
                count(*) AS n
         FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
         WHERE {where} AND t.tin_value IN (SELECT unnest(?::VARCHAR[]))
-        GROUP BY 1, 2, 3 ORDER BY 1, 2
+        GROUP BY 1, 2, 3 ORDER BY 1, 2, 3
     """
     with store.connect() as con:
         raw = [dict(zip(["payer", "billing_code", "rate_type", "n"], r))
@@ -392,7 +525,7 @@ def code_type_flag(store: Store, market: dict | None, subject: str) -> dict:
     for r in raw:
         r["description"] = code_info(r["billing_code"])[0]
         r["contracted"] = r["rate_type"] in CONTRACTED_TYPES
-    pct = round(100.0 * sum(r["n"] for r in not_contracted) / total, 1) if total else None
+    pct = half_up(100.0 * sum(r["n"] for r in not_contracted) / total, 1) if total else None
     return {
         "rows": [r for r in raw if not r["contracted"]][:200],
         "all_rows": len(raw), "derived_pct": pct,
@@ -427,6 +560,7 @@ POSTURE_NOTE = (
 )
 
 
+@generation_cached('quality.payer_posture')
 def payer_posture(store: Store, market: dict | None = None,
                   *, min_codes: int = 3) -> dict:
     """Per payer: does it negotiate, or publish one schedule for everyone?
@@ -487,10 +621,10 @@ def payer_posture(store: Store, market: dict | None = None,
     out = []
     for r in raw:
         n = r["n_rows"] or 0
-        pct_neg = round(100.0 * r["n_negotiated"] / n, 1) if n else None
-        pct_fee = round(100.0 * r["n_fee_schedule"] / n, 1) if n else None
+        pct_neg = half_up(100.0 * r["n_negotiated"] / n, 1) if n else None
+        pct_fee = half_up(100.0 * r["n_fee_schedule"] / n, 1) if n else None
         rankable = r["n_codes_rankable"] or 0
-        pct_var = (round(100.0 * r["n_codes_varying"] / rankable, 1)
+        pct_var = (half_up(100.0 * r["n_codes_varying"] / rankable, 1)
                    if rankable else None)
         # the payer's CLAIM
         claim = ("negotiates" if (pct_neg or 0) >= 60
@@ -538,10 +672,12 @@ def payer_posture(store: Store, market: dict | None = None,
         "payers": out, "count": len(out), "min_codes": min_codes,
         "n_winnable": len(winnable),
         "headline": (
-            f"{len(winnable)} of {len(out)} payer(s) demonstrably price "
-            "practices differently — those are the negotiations with room. "
-            + (f"{', '.join(p['payer'] for p in winnable[:4])}."
-               if winnable else "")
+            (f"{len(winnable)} of {len(out)} payer(s) demonstrably price "
+             "practices differently — those are the negotiations with room: "
+             f"{', '.join(p['payer'] for p in winnable[:4])}."
+             if winnable else
+             f"None of the {len(out)} payer(s) demonstrably prices practices "
+             "differently here — no negotiation shows room on this evidence.")
             if out else "No rates match this market."),
         "note": POSTURE_NOTE,
     }

@@ -1,0 +1,21 @@
+# Round-12 audit — my own checks of the shipped 0.7.5 zip (head 68d9bc7)
+
+## Held (verified live)
+- Zip == committed tree, file for file (mrfx/, docs, tests/mrfx/test_review11.py, CLAUDE.md, slow_tests.txt). Version 0.7.5. pip-audit: no known vulnerabilities. .bat files CRLF.
+- Fresh install from the zip (own venv): `mrfx` 0.7.5; 1164 collected / 562 quick (CLAUDE.md counts right); ruff 0; test_review11 49/49 pass; quick tier 562 pass 4:50 (on the repo head).
+- Update path 0.7.4 → 0.7.5 (`update_path.py`): 0.7.4 install with 3 real files loaded (1,130,194 rows); `mrfx update <zip>` 3.0 s, 121 files, config kept byte-identical + `.new`, backup zip written, no `.updating` left; `mrfx status` identical; `mrfx export` sorted-rows sha identical (139,600 lines); serve on the updated store: `/`, `/api/files`, `/api/urls`, `/api/rates` 200, no tracebacks. One-time row-rule migration ran at the next open ("1 file checked, 0 rewritten").
+- Inbox twin under a second name on a real file (`moda … (1).json.gz`): skipped — "identical to …, which is already loaded — not loaded twice (…)". Store rows unchanged.
+- Live link (`live_link.py`): UHC HEALTHSCOPE 2 MB pasted via POST /api/urls → done in 4 s, 252 rows (== 0.7.4 inbox load of the same bytes); same link again → skipped 1; same bytes dropped in the inbox → skipped "identical to fae9e2b1_…"; downloads dir empty afterwards.
+- My round-11 seam scripts on 0.7.5: stale_reuse → one 1-byte probe (`Range: bytes=0-0`) + one GET, June/80 rows (was 0 requests); refresh_static_children → child refetched, 2026-06 (was never); setaside_order → a, b, a, b (was a, a, b, b); dest_no_sidecar → 0 requests (accepted).
+- First start, empty store (`fresh_serve.py`): dashboard up < 1 s; a SIGTERM during the NPPES cache build leaves `nppes_cache.parquet.tmp`; the second start rebuilds it (1:10) and reuses the 1.1 GB bulk zip (no second download).
+- Browser walk (`ui_walk.py`, Chromium) over all 14 views with one real file loaded: 0 console errors, 0 failed requests, 0 responses ≥ 400, ~1.0 s per view (networkidle), no server-side error lines.
+- `mrfx sources --check` live from this box: 106 OK · 9 NEEDS-BROWSER · 30 PORTAL · 0 CHANGED · 5 DEAD (BCBS SC 403, Western Health Advantage 429, Mass General Brigham 404, Jefferson 502 via proxy, Midlands Choice SSL chain).
+
+## Found (candidates for the prompt)
+- P2 **A skipped twin keeps its bytes.** The byte-identical inbox file is moved to `data/processed/` next to the original (`ingest.py` `_finish_file(ok=True)` from the skipped branch, ~1955). For a 20 GB twin that is 20 GB kept for nothing; `data/processed` is never pruned. Either delete the twin's bytes when the original is already in processed/ (same sha, so nothing is lost) or say in the skipped sentence where the copy went.
+- P3 **`mrfx status` opens the store four times** (code coverage / medicare / reference printers each open their own Store; `cmd_status` a fourth): the "analytics memory budget" INFO line prints 3× after the table and a big store pays 3 extra opens. `cli.py:740-747`, 695, 725.
+- P3 **dest-without-sidecar is accepted with no server check and 0/0 bytes shown**: `dest_no_sidecar.py` → fetched, requests [], bytes_done 0, bytes_total 0. Correct by construction (dest only exists after a validated complete download) but the Files row shows 0 of 0 bytes for that file; the sidecar should be rebuilt from the file (size, sha) at that moment.
+- P3 **First-build log wording**: "incremental analytics update unavailable (first analytics build of this store) — running a full rebuild" still prints on a fresh store, though 3.10 now goes straight to the full build.
+- P3 **Shutdown warning on POSIX**: "resource_tracker: There appear to be 5 leaked semaphore objects" on every serve stop (Linux only; Windows has no resource_tracker). The 5 semaphores are the parse pool's / progress queues' — close them on shutdown.
+- P3 **Catalog**: Mass General Brigham Health Plan entry 404s (URL moved); Midlands Choice serves an incomplete certificate chain (DEAD here; never weaken TLS — note it in the catalog's detail so the user is told to open it in a browser).
+- Carry-overs from round 11's own "left open": 3.1 single-pass rollup (~85 s tail per 32 M rows), 3.6 segment map, 4.3 one rollup per idle gap, 4.4(h) monotonic clock through sleep, 4.4(c) filename cap.

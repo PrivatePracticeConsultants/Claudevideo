@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import html
 import math
+from .rounding import half_up, signed_pct
 
 
 def _fmt(v) -> str:
@@ -72,9 +73,11 @@ def sparkline(points, *, width: int = 84, height: int = 22,
     # colour by direction, but only when there IS a direction
     stroke = "#667085" if last == first else ("#d92d20" if last < first else "#12805c")
     end_x, end_y = x(n - 1), y(last)
-    tip = (f"{label + ': ' if label else ''}"
+    tip = (f"{label + ' — ' if label else ''}median contract: "
            + " → ".join(f"{m} {_fmt(v)}" for m, v in pts))
-    pct = (f" ({(last - first) / first * 100:+.1f}%)" if first else "")
+    # half-up like every printed number: $80.00 -> $81.00 is +1.25 %, which
+    # Python's format printed "+1.2%" beside "+1.3" in Rate changes (4.9)
+    pct = (f" ({signed_pct((last - first) / first * 100)})" if first else "")
     return (
         f'<svg class="spark" width="{width}" height="{height}" '
         f'viewBox="0 0 {width} {height}" role="img" '
@@ -93,11 +96,49 @@ SPARK_CSS = """
 """
 
 SPARK_NOTE = (
-    "Trend columns draw the same monthly values printed in the table, oldest "
-    "to newest, from the months this store actually has. A month a payer did "
-    "not publish is a gap, not a flat segment, and a single month draws no "
-    "line at all."
+    "Trend lines follow the SAME contracts in every month they show: a code's "
+    "line is the median of this practice's rates with the payers it has in the "
+    "newest month, back as far as all of them published (if that is only one "
+    "month, it follows those that did publish earlier). A payer joining or "
+    "leaving never moves the line; only a published rate change does. A single "
+    "month draws no line. The line is the median CONTRACT (one payer x one tax "
+    "ID), so its last point can differ from a rate printed beside it that pools "
+    "a practice's payers first. It ends at the document's as-of month."
 )
+
+
+def _panel_series(cells: dict, months: list[str]) -> list[tuple[str, float]]:
+    """[(month, median over a FIXED panel)] for one code.
+
+    `cells` maps (payer, tin) -> {month: rate}. The panel is every contract
+    present in the newest month, and the line goes back while ALL of them are
+    present — so a payer's real move shows. The last point is the median
+    CONTRACT in the newest month walked, NOT the practice rate a table prints
+    beside it (which pools a TIN's payers first): re-pooling per practice
+    would let a payer joining move the line again — so the line is labelled
+    a contract trend (SPARK_NOTE) instead of claiming to be the printed
+    number (audit 8 P1-7). If that leaves one month, the panel narrows
+    month by month instead (the contracts present in every month walked).
+    Either way the panel is constant along the line, so a payer entering or
+    leaving can never make it move (round 7 P0.3: payer B appearing at $50
+    next to A's unchanged $40 read as a +12.5% raise)."""
+    import statistics
+
+    def walk(narrow: bool):
+        window: list[str] = []
+        panel: set = {k for k in cells if months and months[-1] in cells[k]}
+        for m in reversed(months):
+            keep = {k for k in panel if m in cells[k]}
+            if not keep or (not narrow and keep != panel):
+                break
+            panel = keep
+            window.append(m)
+        window.reverse()
+        return [(m, half_up(statistics.median(cells[k][m] for k in sorted(panel)), 2))
+                for m in window]
+
+    full = walk(narrow=False)
+    return full if len(full) >= 2 else walk(narrow=True)
 
 
 def series_by_code(store, subject_tins: list[str], market: dict,
@@ -107,14 +148,18 @@ def series_by_code(store, subject_tins: list[str], market: dict,
 
     Reads the same TIN-grain spine every other number does, with the market's
     basis filters applied, but WITHOUT pinning a month — the series is the
-    point. Returns {} rather than raising: a sparkline is decoration, and
-    decoration must never cost a deliverable (invariant 3).
+    point. A pinned as-of month is its LAST month: a report dated 2026-05
+    never shows a June point (audit 8 P1-7). Each code's line is a fixed panel of (payer, TIN) contracts (see
+    _panel_series). Returns {} rather than raising: a sparkline is
+    decoration, and decoration must never cost a deliverable (invariant 3).
     """
     from .benchmark import _market_where, normalize_market, spine_relation
 
     if not subject_tins:
         return {}
     try:
+        pinned = (market or {}).get("month")
+        pinned = pinned if pinned and str(pinned).lower() != "latest" else None
         m = normalize_market({**(market or {}), "month": "latest"})
         where, params = _market_where(m, bool(m.get("include_assistant")),
                                       bool(m.get("include_non_dollar")))
@@ -123,26 +168,34 @@ def series_by_code(store, subject_tins: list[str], market: dict,
         if codes:
             clause = f" AND t.billing_code IN ({', '.join('?' for _ in codes)})"
             extra = list(codes)
+        if pinned:
+            clause += " AND t.file_month <= ?"
+            extra.append(str(pinned))
         sql = f"""
-            WITH per_tin AS (
-                SELECT t.billing_code, t.file_month, t.tin_value,
-                       median(t.negotiated_rate) AS rate
-                FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
-                WHERE {where}{clause}
-                  AND t.tin_value IN (SELECT unnest(?::VARCHAR[]))
-                GROUP BY t.billing_code, t.file_month, t.tin_value
-            )
-            SELECT billing_code, file_month, round(median(rate), 2) AS rate
-            FROM per_tin
-            WHERE file_month IS NOT NULL
-            GROUP BY billing_code, file_month
-            ORDER BY billing_code, file_month
+            SELECT t.billing_code, t.file_month, t.payer, t.tin_value,
+                   median(t.negotiated_rate) AS rate
+            FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
+            WHERE {where}{clause}
+              AND t.tin_value IN (SELECT unnest(?::VARCHAR[]))
+              AND t.file_month IS NOT NULL
+            GROUP BY t.billing_code, t.file_month, t.payer, t.tin_value
+            ORDER BY t.billing_code, t.file_month, t.payer, t.tin_value
         """
         with store.connect() as con:
             rows = con.execute(sql, [*params, *extra, subject_tins]).fetchall()
     except Exception:  # noqa: BLE001 — cosmetic tier: never fail the report
         return {}
+    by_code: dict[str, dict] = {}
+    months_of: dict[str, set] = {}
+    for code, month, payer, tin, rate in rows:
+        if rate is None:
+            continue
+        by_code.setdefault(code, {}).setdefault((payer, tin), {})[month] = float(rate)
+        months_of.setdefault(code, set()).add(month)
     out: dict[str, list] = {}
-    for code, month, rate in rows:
-        out.setdefault(code, []).append((month, rate))
-    return {c: pts[-max_months:] for c, pts in out.items()}
+    for code, cells in by_code.items():
+        months = sorted(months_of[code])[-max_months:]
+        pts = _panel_series(cells, months)
+        if pts:
+            out[code] = pts
+    return out

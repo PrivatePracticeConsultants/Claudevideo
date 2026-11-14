@@ -1,0 +1,151 @@
+result,name,states,queueable,http,detail,url
+OK,Highmark BCBS West Virginia,WV,True,200,JSON with reporting_structure,https://mrfdata.hmhs.com/files/443/wv/inbound/local/2026-11-01_Highmark_Blue_Cross_Blue_Shield_of_West_Virginia_index.json
+OK,Blue Cross Blue Shield of Wyoming,WY,True,200,JSON with reporting_structure,https://mrfdata.hmhs.com/files/460/wy/inbound/local/2026-11-01_Blue_Cross_Blue_Shield_of_Wyoming_index.json
+OK,Highmark Blue Shield of Western New York,NY,True,200,JSON with reporting_structure,https://mrfdata.hmhs.com/files/301/wny/inbound/local/2026-11-01_Highmark_Blue_Shield_of_Western_New_York_index.json
+OK,Highmark BCBS Delaware,DE,True,200,JSON with reporting_structure,https://mrfdata.hmhs.com/files/070/del/inbound/local/2026-11-01_Highmark_Blue_Cross_Blue_Shield_of_Delaware_index.json
+OK,Blue Cross Blue Shield of North Dakota,ND,True,200,JSON with reporting_structure,https://mrfdata.hmhs.com/files/320/nd/inbound/local/2026-11-01_BlueCrossBlueShieldND_index.json
+OK,Highmark BCBS Pennsylvania,PA,True,200,JSON with reporting_structure,https://mrfdata.hmhs.com/files/363/pa/inbound/local/2026-11-01_Highmark_Blue_Cross_Blue_Shield_of_Pennsylvania_index.json
+OK,Blue Cross of Idaho,ID,True,200,1 file link(s) in the response,https://bci.sapphiremrfhub.com/
+OK,Florida Blue (Blue Cross and Blue Shield of Florida),FL,False,200,2 file link(s) in the response,https://www.floridablue.com/members/tools-resources/transparency/machine-readable-files
+OK,BCBS Nebraska (own book),NE,True,200,38 file link(s) in the response,https://mrf.healthsparq.com/bcbsne-egress.nophi.kyruushsq.com/prd/mrf/BCBSNE_I/BCBSNE/latest_metadata.json
+OK,BCBS Arizona (own book),AZ,True,200,511 file link(s) in the response,https://mrf.healthsparq.com/bcbsaz-egress.nophi.kyruushsq.com/prd/mrf/BCBSAZ_I/BCBSAZ/latest_metadata.json
+OK,Highmark Blue Shield of Pennsylvania,PA,True,200,JSON with reporting_structure,https://mrfdata.hmhs.com/files/378/pa/inbound/local/2026-11-01_Highmark_Blue_Shield_of_Pennsylvania_index.json
+OK,Highmark Blue Shield of Northeastern New York,NY,True,200,JSON with reporting_structure,https://mrfdata.hmhs.com/files/800/nny/inbound/local/2026-11-01_Highmark_Blue_Shield_of_Northeastern_New_York_index.json
+OK,Blue Cross & Blue Shield of Mississippi,MS,True,200,JSON with reporting_structure,https://tcr.bcbsms.com/Table_of_Contents/Local_TOC.json
+OK,Anthem / Elevance national master index (14 states),CA CO CT GA IN KY ME MO NH NV NY OH VA WI,True,200,JSON with reporting_structure,https://antm-pt-prod-dataz-nogbd-nophi-us-east1.s3.amazonaws.com/anthem/2026-11-01_anthem_index.json.gz
+OK,Blue Cross and Blue Shield of Kansas City (Blue KC),MO KS,True,200,2 file link(s) in the response,https://bcbskc.sapphiremrfhub.com
+OK,Blue Cross Blue Shield of Michigan,MI,True,200,1 file link(s) in the response,https://bcbsm.sapphiremrfhub.com
+OK,Blue Cross Blue Shield of Louisiana,LA,True,200,2 file link(s) in the response,https://bcbsla.sapphiremrfhub.com
+OK,"Centene / Ambetter (all states, one page)",US,True,200,11 file link(s) in the response,https://www.centene.com/price-transparency-files.html
+OK,UnitedHealthcare (national),US,True,200,1+ file link(s) via the portal's file API,https://transparency-in-coverage.uhc.com/
+OK,SelectHealth (Intermountain — Utah / Idaho / Nevada),UT ID NV,True,200,125 file link(s) in the response,https://ebu.intermountainhealthcare.org/selecthealth/transparencyincoverage/
+OK,Moda Health (Oregon / Alaska / Texas),OR AK TX,True,200,JSON with reporting_structure,https://mrf.modahealth.com/mrf/Moda/2026-11-01_moda_ModaSelect_index.json
+OK,First Health PPO via Healthgram (national rental network),US,True,200,JSON with reporting_structure,https://mrf.healthgram.com/mrfiles/FRST/FirstHealth_index.json
+OK,Tufts Health Public Plans (Point32Health — Massachusetts),MA,True,200,JSON with reporting_structure,https://eusprdtransparencymrfp32.blob.core.windows.net/thp/2026-11-01_TuftsHealthPublicPlansInc_index.json
+OK,Security Health Plan (Wisconsin),WI,True,200,38 file link(s) in the response,https://www.securityhealth.org/insurance-resources/json
+OK,Optum Health (transparency portal),US,False,200,1+ file link(s) via the portal's file API,https://transparency-in-coverage.optum.com/
+OK,Cigna,US,True,200,2 file link(s) in the response,https://www.cigna.com/legal/compliance/machine-readable-files
+NEEDS-BROWSER,Aetna / CVS Health,US,True,200,the page answers but shows its file links only when run in a browser — open it in a browser to confirm,https://health1.aetna.com/app/public/#/one/insurerCode=AETNACVS_I&brandCode=ALICFI/machine-readable-transparency-in-coverage
+PORTAL,Humana,US,False,200,answers (HTTP 200); the page answers but shows its file links only when run in a browser — open it in a browser to confirm,https://developers.humana.com/cost-transparency
+PORTAL,HCSC (BCBS Illinois / Texas / New Mexico / Oklahoma / Montana),IL TX NM OK MT,False,200,answers (HTTP 200); the page answers but shows its file links only when run in a browser — open it in a browser to confirm,https://www.bcbsil.com/provider/standards/standard-requirements/caa/caa-tic
+OK,CareFirst (Maryland / DC / N. Virginia),MD DC VA,True,200,7 file link(s) in the response,https://individual.carefirst.com/individuals-families/mandates-policies/machine-readable-file.page
+OK,BCBS Tennessee,TN,True,200,2 file link(s) in the response,https://www.bcbst.com/tcr
+PORTAL,Universal Health Services (UHS — hospital system employer plan),US,False,200,answers (HTTP 200); the page answers but shows its file links only when run in a browser — open it in a browser to confirm,https://uhs.com/transparency-in-coverage-machine-readable-files/
+OK,Wellmark BCBS (Iowa / South Dakota),IA SD,True,200,26 file link(s) in the response,https://mrf.healthsparq.com/wmrk-egress.nophi.kyruushsq.com/prd/mrf/WMRK_I/WELLMARK/latest_metadata.json
+OK,Horizon BCBS New Jersey,NJ,True,200,2 file link(s) in the response,https://horizonblue.sapphiremrfhub.com/
+OK,Premera Blue Cross (Washington / Alaska),WA AK,True,200,599 file link(s) in the response,https://mrf.healthsparq.com/premera-egress.nophi.kyruushsq.com/prd/mrf/PREMERA_I/PREMERA/latest_metadata.json
+NEEDS-BROWSER,Regence (Cambia — OR / WA / UT / ID),OR WA UT ID,True,200,the page answers but shows its file links only when run in a browser — open it in a browser to confirm,https://www.regence.com/transparency-in-coverage/
+NEEDS-BROWSER,Kaiser Permanente (all regions),CA CO GA HI MD VA DC OR WA,True,200,the page answers but shows its file links only when run in a browser — open it in a browser to confirm,https://healthy.kaiserpermanente.org/southern-california/front-door/machine-readable
+NEEDS-BROWSER,Oscar Health,US,True,200,the page answers but shows its file links only when run in a browser — open it in a browser to confirm,https://www.hioscar.com/transparency-in-coverage-files/oscar
+NEEDS-BROWSER,Harvard Pilgrim / Point32Health (MA / NH / ME / CT),MA NH ME CT,True,200,the page answers but shows its file links only when run in a browser — open it in a browser to confirm,https://www.harvardpilgrim.org/public/machine-readable-files
+PORTAL,Molina Healthcare (all states),US,False,200,answers (HTTP 200); the page answers but shows its file links only when run in a browser — open it in a browser to confirm,https://www.molinahealthcare.com/
+OK,BCBS North Carolina,NC,True,200,1 file link(s) in the response,https://www.bluecrossnc.com/policies-best-practices/machine-readable-files
+DEAD,BCBS South Carolina,SC,True,403,HTTP 403,https://www.southcarolinablues.com/web/public/brands/universal/transparency-in-coverage/?branding=sc
+OK,Priority Health (Michigan),MI,True,200,18 file link(s) in the response,https://priorityhealthtransparencymrfs.s3.us-east-1.amazonaws.com/CompleteList.html
+PORTAL,BCBS Alabama,AL,False,200,answers (HTTP 200); the page answers but shows its file links only when run in a browser — open it in a browser to confirm,https://www.bcbsal.org/web/transparency-in-coverage
+PORTAL,BCBS Massachusetts,MA,False,200,answers (HTTP 200); the page answers but shows its file links only when run in a browser — open it in a browser to confirm,https://transparency-in-coverage.bluecrossma.com/
+PORTAL,BCBS Rhode Island,RI,False,200,answers (HTTP 200); the page answers but shows its file links only when run in a browser — open it in a browser to confirm,https://www.bcbsri.com/developers
+OK,BCBS Vermont,VT,True,200,JSON with reporting_structure,https://www.bluecrossvt.org/documents/toc-json
+PORTAL,BCBS Kansas,KS,False,200,answers (HTTP 200); the page answers but shows its file links only when run in a browser — open it in a browser to confirm,https://www.bcbsks.com/transparency-in-coverage
+PORTAL,Arkansas BCBS,AR,False,200,answers (HTTP 200); the page answers but shows its file links only when run in a browser — open it in a browser to confirm,https://www.arkansasbluecross.com/members/tools-resources/rights/transparency-in-coverage
+PORTAL,HMSA (BCBS Hawaii),HI,False,200,answers (HTTP 200); the page answers but shows its file links only when run in a browser — open it in a browser to confirm,https://hmsa.com/help-center/transparency-in-coverage-machine-readable-files/
+OK,Blue Shield of California,CA,True,200,996 file link(s) in the response,https://mrf.healthsparq.com/bsca-egress.nophi.kyruushsq.com/prd/mrf/BSCA_I/BSCA/latest_metadata.json
+OK,Excellus BCBS (upstate New York),NY,True,200,119 file link(s) in the response,https://mrf.healthsparq.com/exc-egress.nophi.kyruushsq.com/prd/mrf/EXC_I/EXC/latest_metadata.json
+OK,Capital Blue Cross (central Pennsylvania),PA,True,200,7 file link(s) in the response,https://mrf.healthsparq.com/capbc-egress.nophi.kyruushsq.com/prd/mrf/CAPBC_I/CAPBC/latest_metadata.json
+PORTAL,Independence Blue Cross (Philadelphia),PA,False,200,answers (HTTP 200); the page answers but shows its file links only when run in a browser — open it in a browser to confirm,https://www.ibx.com/resources/for-members/transparency-in-coverage
+PORTAL,BCBS Minnesota (own book),MN,False,200,answers (HTTP 200); the page answers but shows its file links only when run in a browser — open it in a browser to confirm,https://www.bluecrossmn.com/about-us/transparency-coverage-regulations
+PORTAL,Christus Health Plan (TX/LA/NM),TX LA NM,False,200,answers (HTTP 200); the page answers but shows its file links only when run in a browser — open it in a browser to confirm,https://christushealthplan.healthsparq.com/healthsparq/public/#/one/insurerCode=CHRISTUS_I&brandCode=CHRISTUS/machine-readable-transparency-in-coverage
+PORTAL,HAP — Health Alliance Plan (Michigan),MI,False,200,answers (HTTP 200); the page answers but shows its file links only when run in a browser — open it in a browser to confirm,https://www.hap.org/readable
+OK,Health New England (Massachusetts),MA,True,200,12 file link(s) in the response,https://mrf.healthsparq.com/hne-egress.nophi.kyruushsq.com/prd/mrf/HNE_I/HNE/latest_metadata.json
+OK,SummaCare (Ohio),OH,True,200,11 file link(s) in the response,https://files.myplancentral.com/TIC/TOC/
+OK,Univera Healthcare (western New York),NY,True,200,1862 file link(s) in the response,https://mrf.healthsparq.com/unvra-egress.nophi.kyruushsq.com/prd/mrf/UNVRA_I/UNVRA/latest_metadata.json
+PORTAL,ConnectiCare (Connecticut),CT,False,200,answers (HTTP 200); the page answers but shows its file links only when run in a browser — open it in a browser to confirm,https://transparency.connecticare.com/
+PORTAL,CommunityCare (Oklahoma),OK,False,200,answers (HTTP 200); a bot-check / access-denied page (open it in a browser),https://www.ccok.com/Price-Transparency/Machine-Readable/
+OK,Network Health (Wisconsin),WI,False,200,4 file link(s) in the response,https://networkhealth.com/employer/transparency
+OK,Optima Health / Sentara (Virginia),VA,True,200,1 file link(s) in the response,https://mrfproddestinationdata.blob.core.windows.net/sentara-mrf-output/Sentara-Health-Plans-INN_index.html
+OK,UPMC Health Plan (Pennsylvania),PA,True,200,JSON with reporting_structure,https://content.upmchp.com/publicweb/table-of-contents/2026-11-01_UPMC-Health-Plan_index.json
+PORTAL,Viva Health (Alabama),AL,False,200,answers (HTTP 200); the page answers but shows its file links only when run in a browser — open it in a browser to confirm,https://www.vivahealth.com/mrf
+PORTAL,Capital Health Plan (Florida),FL,False,200,answers (HTTP 200); the page answers but shows its file links only when run in a browser — open it in a browser to confirm,https://capitalhealth.com/legal/transparency-in-coverage/
+DEAD,Western Health Advantage (California),CA,False,429,HTTP 429,https://www.westernhealth.com/
+PORTAL,EmblemHealth (New York),NY,False,200,answers (HTTP 200); the page answers but shows its file links only when run in a browser — open it in a browser to confirm,https://transparency.emblemhealth.com/
+OK,Healthfirst (New York),NY,True,200,6 file link(s) in the response,https://healthfirst.org/health-data
+OK,Fallon Health (Massachusetts),MA,True,200,1 file link(s) in the response,https://fallon.sapphiremrfhub.com/
+OK,Neighborhood Health Plan of Rhode Island,RI,True,200,2 file link(s) in the response,https://files.nhpri.org/mrf/nhp/TOC/
+DEAD,Mass General Brigham Health Plan (formerly AllWays),MA,True,404,HTTP 404,https://massgeneralbrighamhealthplan.org/pricetransparency/MRF/Base
+OK,CDPHP (New York),NY,True,200,6 file link(s) in the response,https://www.cdphp.com/interoperability/machine-readable-pricing-data-files
+OK,Geisinger Health Plan (Pennsylvania),PA,True,200,a zip archive (read in full when queued),https://mrf.thehealthplan.com/content/MRF/toc.zip
+NEEDS-BROWSER,AmeriHealth New Jersey (PPO),NJ,True,200,the page answers but shows its file links only when run in a browser — open it in a browser to confirm,https://www.amerihealthnj.com/cmstic/?brand=ahnj
+NEEDS-BROWSER,AmeriHealth New Jersey (HMO),NJ,True,200,the page answers but shows its file links only when run in a browser — open it in a browser to confirm,https://www.amerihealthnj.com/cmstic/?brand=ahnjhmo
+NEEDS-BROWSER,AmeriHealth Pennsylvania,PA,True,200,the page answers but shows its file links only when run in a browser — open it in a browser to confirm,https://www.amerihealth.com/cmstic/?brand=ahpa
+OK,Independent Health (western New York),NY,True,200,9 file link(s) in the response,https://mrf.healthsparq.com/ihny-egress.nophi.kyruushsq.com/prd/mrf/IHNY_I/IHNY/latest_metadata.json
+OK,MVP Health Care (New York / Vermont),NY VT,True,200,759 file link(s) in the response,https://mrf.healthsparq.com/mvp-egress.nophi.kyruushsq.com/prd/mrf/MVP_I/MVP/latest_metadata.json
+OK,AvMed (Florida),FL,True,200,1 file link(s) in the response,https://mrfproddestinationdata.blob.core.windows.net/avmed-mrf-output/AvMed-Health-Plans_INN_index.html
+OK,Health First Health Plans (Florida),FL,True,200,JSON with reporting_structure,https://apps.hf.org/applications/dn/cms_json/files/tic/index.json
+OK,Alliant Health Plans (Georgia / Tennessee),GA TN,True,200,1 file link(s) in the response,https://alliantplans.com/json/pt/latestpt_nlc.html
+OK,AmeriHealth Caritas Next (FL / NC / LA / DE marketplace),FL NC LA DE,True,200,69 file link(s) in the response,https://www.amerihealthcaritasnext.com/json
+OK,First Choice Next (South Carolina marketplace),SC,True,200,20 file link(s) in the response,https://www.firstchoicenext.com/json
+OK,The Health Plan (West Virginia / eastern Ohio),WV OH,True,200,3 file link(s) in the response,https://www.healthplan.org/thp_mrfs
+OK,MedCost (rental network — NC / SC / VA),NC SC VA,True,200,4685 file link(s) in the response,https://mrf.mmsanalytics.com/medcost/
+OK,Health Advantage HMO (Arkansas Blue Cross family — individual),AR,True,200,JSON with reporting_structure,https://mrf.arkansasbluecross.com/mrf/hmo_ha_hii_arkbluecross_index
+OK,Health Advantage Octave (Arkansas Blue Cross family — individual),AR,True,200,JSON with reporting_structure,https://mrf.arkansasbluecross.com/mrf/hmo_octave_hii_arkbluecross_index
+OK,Health Advantage HMO (Arkansas Blue Cross family — TPA),AR,True,200,JSON with reporting_structure,https://mrf.arkansasbluecross.com/mrf/hmo_ha_tpa_arkbluecross_index
+OK,HealthPartners (MN / WI / IA / ND / SD),MN WI IA ND SD,True,200,1 file link(s) in the response,https://mrfproddestinationdata.blob.core.windows.net/mrf-output/HealthPartners_In-Network_MRF_Index.html
+OK,Medical Mutual of Ohio,OH,True,200,48 file link(s) in the response,https://mrf.healthsparq.com/mmo-egress.nophi.kyruushsq.com/prd/mrf/MMO_I/MMO/latest_metadata.json
+OK,Paramount Health Care (Ohio / Michigan),OH MI,True,200,5 file link(s) in the response,https://mrf.healthsparq.com/paramount-egress.nophi.kyruushsq.com/prd/mrf/PARAMOUNT_I/PARAMOUNT/latest_metadata.json
+OK,Quartz Health Solutions (WI / IL / MN),WI IL MN,True,200,1330 file link(s) in the response,https://mrf.healthsparq.com/quartz-egress.nophi.kyruushsq.com/prd/mrf/QUARTZ_I/QUARTZ/latest_metadata.json
+OK,Aspirus Health Plan (Wisconsin / Michigan),WI MI,True,200,24 file link(s) in the response,https://mrf.healthsparq.com/preferredone-egress.nophi.kyruushsq.com/prd/mrf/ASPIRUS_I/ASPIRUS/latest_metadata.json
+OK,McLaren Health Plan — HealthAdvantage (Michigan),MI,True,200,JSON with reporting_structure,https://www.mclarenhealthplan.org/Uploads/Public/Documents/HealthPlan/documents/no-surprise-bill-mhp-mrf/McLarenHealthPlan_HealthAdvantage_in-network-rates_table_of_content.json
+OK,McLaren Health Plan — Community Individual (Michigan),MI,True,200,JSON with reporting_structure,https://www.mclarenhealthplan.org/Uploads/Public/Documents/HealthPlan/documents/no-surprise-bill-mhp-mrf/McLarenHealthPlan_Community_Individual_in-network-rates_table_of_content.json
+OK,Sanford Health Plan (ND / SD / MN / IA),ND SD MN IA,True,200,14 file link(s) in the response,https://www.sanfordhealthplan.com/transparency-in-coverage-rule
+OK,Avera Health Plans (SD / IA / NE / MN),SD IA NE MN,True,200,18 file link(s) in the response,https://portaldocs.avera.org/machinereadablefiles
+OK,AultCare (Ohio),OH,True,200,5 file link(s) in the response,https://www.aultcare.com/notices/pricetransparency/aultcare-mrf-2
+OK,Ohio Health Choice / Ohio PPO Connect (AultCare network),OH,True,200,4 file link(s) in the response,https://www.aultcare.com/notices/pricetransparency/ohio-ppo-connect-ohc
+OK,Physicians Health Plan of Northern Indiana,IN,True,200,5 file link(s) in the response,https://services.phpni.com/machine-readable-files/files/phpni/phpni
+OK,Group Health Cooperative of South Central Wisconsin,WI,True,200,579 file link(s) in the response,https://ghcmrf.azureedge.net/public?restype=container&comp=list
+OK,WPS Health Insurance (Wisconsin),WI,True,200,1 file link(s) in the response,https://transparency.healthcare/wps/mrf/table-of-contents/
+OK,PacificSource (ID / MT / OR / WA),ID MT OR WA,True,200,1 file link(s) in the response,https://w2bipdmrfsa.blob.core.windows.net/$web?restype=container&comp=list&prefix=20
+OK,Mountain Health CO-OP (MT / ID / WY),MT ID WY,True,200,1 file link(s) in the response,https://mrf.mmsanalytics.com/talon-mrf-generation/tocs/spyglass/mountain-health-co-op/toclist.json
+OK,UHA Health Insurance (Hawaii),HI,True,200,JSON with reporting_structure,https://app.uhahealth.com/mrf
+OK,Sutter Health Plan (California),CA,True,200,JSON with reporting_structure,https://xmc-sutterhealt962c-sutterhealt8fce-production57cc.sitecorecloud.io/-/media/Project/SutterHealth/SutterHealthPlan/PDF/2026-11-01_sutter-health-plus_index
+OK,University of Utah Health Plans,UT,True,200,JSON with reporting_structure,https://doc.uhealthplan.utah.edu/machine-readable-data/TIC_MRF/u-of-u-health-plans_index.json
+OK,Hometown Health (Nevada),NV,True,200,50 file link(s) in the response,https://www.hometownhealth.com/about-us/transparency-in-coverage/
+OK,Community Health Plan of Washington (Cascade Select),WA,True,200,2 file link(s) in the response,https://api-mkt.chpw.org/blob
+OK,Sharp Health Plan (California),CA,True,200,4 file link(s) in the response,https://www.sharphealthplan.com/api-access-for-developers
+OK,Baylor Scott & White Health Plan (Texas),TX,True,200,19 file link(s) in the response,https://www.bswhealthplan.com/transparency
+OK,HMAA (Hawaii),HI,True,200,a zip archive (read in full when queued),https://hmaa.com/NSA/MRF
+OK,Presbyterian Health Plan (New Mexico),NM,True,200,JSON with in_network,https://onbaseext.phs.org/PEL/DisplayDocument?ContentID=OB_000000007649
+OK,Meritain Health (Aetna's TPA),US,True,200,4173 file link(s) in the response,https://mrf.healthsparq.com/aetnacvs-egress.nophi.kyruushsq.com/prd/mrf/MERITAIN_I/MERITAINOVER/latest_metadata.json
+OK,Allied Benefit Systems (TPA),US,True,200,1 file link(s) in the response,https://alliedbenefit.sapphiremrfhub.com/
+OK,HealthComp / Personify Health (TPA),US,True,200,50+ file link(s) via a Gatsby file hub,https://healthcomp.sapphiremrfhub.com/
+OK,ACS Benefit Services (TPA),US,True,200,50+ file link(s) via a Gatsby file hub,https://acsbenefitservices.sapphiremrfhub.com/
+OK,Zenith American Solutions (TPA),US,True,200,42+ file link(s) via a Gatsby file hub,https://zenith-american.sapphiremrfhub.com/
+OK,QuikTrip employee plan,US,True,200,1+ file link(s) via a Gatsby file hub,https://quiktrip.sapphiremrfhub.com/
+OK,Healthcare Highways (network),TX OK,True,200,82 file link(s) in the response,https://hchmrfblob.blob.core.windows.net/clearcost?restype=container&comp=list
+OK,Luminare Health (formerly Trustmark) — via Valenz Bluebook,US,True,200,32 file link(s) in the response,https://mrf.healthcarebluebook.com/luminarehealth
+OK,MultiPlan / PHCS network (via SISCO's mirror),US,True,200,1 file link(s) in the response,https://sisconosurprise.com/ppo/phcs/index.html
+OK,Curative,TX OK GA,True,200,JSON with reporting_structure,https://static.curative.com/transparency_in_coverage/table-of-contents.json
+OK,Gravie,US,True,200,3 file link(s) in the response,https://www.gravie.com/compliance/transparency-in-coverage/
+NEEDS-BROWSER,Preferred Health Professionals (network — KC region),MO KS,True,200,the page answers but shows its file links only when run in a browser — open it in a browser to confirm,https://phpmrffiles.phpkc.com/
+OK,CareSource (marketplace — OH / IN / MI / WI / GA / KY / WV / NC),OH IN MI WI GA KY WV NC,False,200,JSON with reporting_structure,https://www.caresource.com/vendor/tic/tic-data-index.json
+PORTAL,MercyCare Health Plans (Wisconsin / Illinois),WI IL,False,200,answers (HTTP 200); the page answers but shows its file links only when run in a browser — open it in a browser to confirm,https://stmercycaremrf.z14.web.core.windows.net/in_network.html
+OK,UCare (Minnesota individual plans),MN,False,200,JSON with reporting_structure,https://ucm-p-001.sitecorecontenthub.cloud/api/public/content/ucare_toc.json?download=true
+OK,1199SEIU Benefit Funds (NY / NJ / MA / MD / DC),NY NJ MA MD DC,False,200,1 file link(s) in the response,https://www.1199seiubenefits.org/price-transparency
+PORTAL,Johns Hopkins Employer Health Programs (MD / DC),MD DC,False,200,answers (HTTP 200); the page answers but shows its file links only when run in a browser — open it in a browser to confirm,https://ehptransparency.org/
+DEAD,Jefferson Health Plans (PA / NJ),PA NJ,False,,ProxyError: 502 Bad Gateway,https://jhp.blob.core.windows.net/jhp/mrf/Jefferson-Health-Plans_index.json
+OK,WellSense Health Plan (Massachusetts),MA,False,200,1 file link(s) in the response,https://www.wellsense.org/about-us/interoperability
+DEAD,Midlands Choice (rental network — NE / IA / SD / KS),NE IA SD KS,False,,ConnectError: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1035),https://api.midlandschoice.com/mrf
+OK,GlobalHealth (Oklahoma),OK,False,200,5 file link(s) in the response,https://www.globalhealth.com/oklahoma/providers/forms-and-resources/
+PORTAL,Community Health Options (Maine),ME,False,200,answers (HTTP 200); the page answers but shows its file links only when run in a browser — open it in a browser to confirm,https://index.opynhealth.com/Community-Health-Options/Community-Health-Options
+PORTAL,Collective Health,US,False,200,answers (HTTP 200); unrecognized content (application/xml),https://mrfhost.serifhealth.com/?list-type=2&prefix=current/&delimiter=/
+PORTAL,L.A. Care Covered California,CA,False,200,answers (HTTP 200); the page answers but shows its file links only when run in a browser — open it in a browser to confirm,https://transparency.lacare.org/
+PORTAL,WebTPA (TPA),US,False,200,"answers (HTTP 200); JSON, but no index keys or file links in its first 2 MB",https://price-transparency.webtpa.com/machinereadablefile/plans
+PORTAL,Imagine360 (TPA — employer groups),US,False,200,answers (HTTP 200); the page answers but shows its file links only when run in a browser — open it in a browser to confirm,https://caa.imagine360.com/
+PORTAL,Providence Health Plan (Oregon / Washington),OR WA,False,200,answers (HTTP 200); the page answers but shows its file links only when run in a browser — open it in a browser to confirm,https://mrfhub.providencehealthplan.com/
+PORTAL,Sendero Health Plans — IdealCare (Texas),TX,False,200,answers (HTTP 200); the page answers but shows its file links only when run in a browser — open it in a browser to confirm,https://www.mymedicalshopper.com/mrf/idealcare-by-sendero-sendero-health-plans-inc-idealcare
+PORTAL,Community Health Choice (Texas marketplace),TX,False,200,answers (HTTP 200); the page answers but shows its file links only when run in a browser — open it in a browser to confirm,https://www.communityhealthchoice.org/health-insurance-marketplace/transparency-in-coverage-2026/
+PORTAL,Medica (incl. Dean / WellFirst — MN / WI / IA / NE / KS / MO / ND / SD / OK),MN WI IA NE KS MO ND SD OK,False,200,answers (HTTP 200); the page answers but shows its file links only when run in a browser — open it in a browser to confirm,https://www.medica.com/price-transparency
+OK,Aetna — fully insured (ALICFI) direct listing,US,True,200,1983 file link(s) in the response,https://mrf.healthsparq.com/aetnacvs-egress.nophi.kyruushsq.com/prd/mrf/AETNACVS_I/ALICFI/latest_metadata.json
+OK,Aetna — self-insured employer plans (ALICSI) direct listing,US,True,200,8243 file link(s) in the response,https://mrf.healthsparq.com/aetnacvs-egress.nophi.kyruushsq.com/prd/mrf/AETNACVS_I/ALICSI/latest_metadata.json
+OK,Aetna — self-insured small groups under 100 (ALICUNDER100) direct listing,US,True,200,19 file link(s) in the response,https://mrf.healthsparq.com/aetnacvs-egress.nophi.kyruushsq.com/prd/mrf/AETNACVS_I/ALICUNDER100/latest_metadata.json
+OK,Aetna Signature Administrators (ASA) direct listing,US,True,200,29 file link(s) in the response,https://mrf.healthsparq.com/aetnacvs-egress.nophi.kyruushsq.com/prd/mrf/AETNACVS_I/ASA/latest_metadata.json
+OK,Aetna Federal Employees Health Benefits (AFEHBPFI) direct listing,US,True,200,78 file link(s) in the response,https://mrf.healthsparq.com/aetnacvs-egress.nophi.kyruushsq.com/prd/mrf/AETNACVS_I/AFEHBPFI/latest_metadata.json

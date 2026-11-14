@@ -1,0 +1,90 @@
+raw 3,723,171 B, stored-gzip 3,723,479 B; sampled windows for that size: [(0, 1048576), (2674903, 3723479), (380951, 446487), (794671, 860207), (1208391, 1273927), (1622111, 1687647), (2035831, 2101367), (2449551, 2515087), (2863271, 2928807), (3276991, 3342527)]
+
+== A_twin_gz true twin, single-member gz
+   sizes: first 3,723,479 B, second 3,723,479 B; server sent for the second: 5,296,343 B
+   row 1: done/in_network dup_of=None err='None'
+   row 2: skipped/duplicate dup_of=13ca7647_a.json.gz err='checksum-equal to http://127.0.0.1:41963/p1/a.json.gz, already loaded — same size, same first 1 MB, same last 1 MB and 8 samples between, and compress'
+   files: [('13ca7647_a.json.gz', 'done', 1500)]
+   fingerprints (magic, trailer_proves, has_sha): [('13ca7647_a.json.gz', 'gz', 1, True)]
+   rates loaded: 1500; distinct rate values: [40.0]
+
+B: byte ranges that differ: [(1601063, 1601064), (3723471, 3723475)]; overlap with sampled ranges: [((3723471, 3723475), (2674903, 3723479))]
+
+== B_same_size_mid_change same size, one rate changed at 1600908; the trailer CRC is in the tail
+   sizes: first 3,723,479 B, second 3,723,479 B; server sent for the second: 5,296,343 B
+   row 1: done/in_network dup_of=None err='None'
+   row 2: done/in_network dup_of=None err='None'
+   files: [('1daa3a3d_b.json.gz', 'done', 1500), ('1e999642_b.json.gz', 'done', 1500)]
+   fingerprints (magic, trailer_proves, has_sha): [('1daa3a3d_b.json.gz', 'gz', 1, True), ('1e999642_b.json.gz', 'gz', 1, True)]
+   rates loaded: 3000; distinct rate values: [40.0, 47.0]
+
+C: multi-member; split at 1620908; differing ranges [(1601063, 1601064), (1621048, 1621052)]; overlap with sampled: []
+
+== C_multimember two-member gz; copy differs in member 1 only (same size, same tail)
+   sizes: first 3,723,507 B, second 3,723,507 B; server sent for the second: 5,296,371 B
+   row 1: done/in_network dup_of=None err='None'
+   row 2: done/in_network dup_of=None err='None'
+   files: [('7ee0996b_c.json.gz', 'done', 1500), ('d2aba54c_c.json.gz', 'done', 1500)]
+   fingerprints (magic, trailer_proves, has_sha): [('7ee0996b_c.json.gz', 'gz', 0, True), ('d2aba54c_c.json.gz', 'gz', 0, True)]
+   rates loaded: 3000; distinct rate values: [40.0, 47.0]
+
+== C2_multimember_true_twin two-member gz; TRUE twin — is it still skipped early, or downloaded in full?
+   sizes: first 3,723,507 B, second 3,723,507 B; server sent for the second: 5,296,371 B
+   row 1: done/in_network dup_of=None err='None'
+   row 2: skipped/duplicate dup_of=None err="identical to a file already ingested (payers host copies of each other's files) — skipped as duplicate of http://127.0.0.1:45183/p1/c2.json.gz"
+   files: [('e05eb575_c2.json.gz', 'done', 1500)]
+   fingerprints (magic, trailer_proves, has_sha): [('e05eb575_c2.json.gz', 'gz', 0, True)]
+   rates loaded: 1500; distinct rate values: [40.0]
+
+D: plain json differing ranges [(1600928, 1600929)]; overlap with sampled: []
+
+== D_plain_json plain json: must never skip early
+   sizes: first 3,723,171 B, second 3,723,171 B; server sent for the second: 3,723,171 B
+   row 1: done/in_network dup_of=None err='None'
+   row 2: done/in_network dup_of=None err='None'
+   files: [('acf38f4c_d.json', 'done', 1500), ('b40603db_d.json', 'done', 1500)]
+   fingerprints (magic, trailer_proves, has_sha): [('acf38f4c_d.json', 'other', None, True), ('b40603db_d.json', 'other', None, True)]
+   rates loaded: 3000; distinct rate values: [40.0, 47.0]
+
+== D2_plain_json_true_twin plain json true twin: full download then sha
+   sizes: first 3,723,171 B, second 3,723,171 B; server sent for the second: 3,723,171 B
+   row 1: done/in_network dup_of=None err='None'
+   row 2: skipped/duplicate dup_of=None err="identical to a file already ingested (payers host copies of each other's files) — skipped as duplicate of http://127.0.0.1:45169/p1/d2.json"
+   files: [('d02baeb6_d2.json', 'done', 1500)]
+   fingerprints (magic, trailer_proves, has_sha): [('d02baeb6_d2.json', 'other', None, True)]
+   rates loaded: 1500; distinct rate values: [40.0]
+
+== E_content_encoding_gzip first served as Content-Encoding: gzip under a .json name
+   sizes: first 3,723,479 B, second 3,723,479 B; server sent for the second: 5,296,343 B
+   row 1: done/in_network dup_of=None err='None'
+   row 2: skipped/duplicate dup_of=ce12f062_e.json err='checksum-equal to http://127.0.0.1:41447/p1/e.json, already loaded — same size, same first 1 MB, same last 1 MB and 8 samples between, and compressed '
+   files: [('ce12f062_e.json', 'done', 1500)]
+   fingerprints (magic, trailer_proves, has_sha): [('ce12f062_e.json', 'gz', 1, True)]
+   rates loaded: 1500; distinct rate values: [40.0]
+
+== F_transparent_decode second host serves the SAME content inflated (plain JSON body) — different bytes
+   sizes: first 3,723,479 B, second 3,723,171 B; server sent for the second: 3,723,171 B
+   row 1: done/in_network dup_of=None err='None'
+   row 2: done/in_network dup_of=None err='None'
+   files: [('85aa4c0f_f.json.gz', 'done', 1500), ('fb8731dd_f.json.gz', 'done', 1500)]
+   fingerprints (magic, trailer_proves, has_sha): [('85aa4c0f_f.json.gz', 'gz', 1, True), ('fb8731dd_f.json.gz', 'other', None, True)]
+   rates loaded: 3000; distinct rate values: [40.0]
+
+== G_zip_two_members zip, 2 members, true twin
+   sizes: first 3,723,403 B, second 3,723,403 B; server sent for the second: 5,296,267 B
+   row 1: done/in_network dup_of=None err='None'
+   row 2: skipped/duplicate dup_of=fa95146a_g.zip err='checksum-equal to http://127.0.0.1:38523/p1/g.zip, already loaded — same size, same first 1 MB, same last 1 MB and 8 samples between, and compressed ('
+   files: [('fa95146a_g.zip', 'done', 1500)]
+   fingerprints (magic, trailer_proves, has_sha): [('fa95146a_g.zip', 'zip', 1, True)]
+   rates loaded: 1500; distinct rate values: [40.0]
+
+G2: zip sizes 3723403 vs 3723403; diff ranges [(10, 11), (65, 66), (69, 73)]…
+
+== G2_zip_mid_change zip, one rate changed
+   sizes: first 3,723,403 B, second 3,723,403 B; server sent for the second: 3,723,403 B
+   row 1: done/in_network dup_of=None err='None'
+   row 2: done/in_network dup_of=None err='None'
+   files: [('044b237c_g2.zip', 'done', 1500), ('d0ede7b0_g2.zip', 'done', 1500)]
+   fingerprints (magic, trailer_proves, has_sha): [('044b237c_g2.zip', 'zip', 1, True), ('d0ede7b0_g2.zip', 'zip', 1, True)]
+   rates loaded: 3000; distinct rate values: [40.0, 47.0]
+exit 0

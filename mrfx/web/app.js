@@ -39,7 +39,7 @@ const state = {
   grain: "tin",
   filters: {
     payers: [], cpts: [], disciplines: [], modifier: "", mod_has: "", mod_not: "",
-    billing_class: "", pos: "", state: "", city: "", month: "", q: "",
+    billing_class: "", pos: "", state: "", city: "", month: "latest", q: "",
     dollar: true, hide_tin_npi: false, hide_outliers: false, therapy_only: false,
     rate_min: "", rate_max: "",
   },
@@ -56,8 +56,13 @@ const state = {
   lastNamed: null,   // last NPPES "named" count seen, to refresh views as names land
 };
 
+// cents the way the server (rounding.half_up) and DuckDB round: half away from
+// zero on the DOUBLE x*100. toLocaleString rounds the shortest decimal string
+// instead — 70.695 printed $70.70 here and $70.69 on Markets, the same median
+// one cent apart (review 10 item 3.2)
+const roundCents = (x) => Math.sign(x) * Math.round(Math.abs(x) * 100) / 100;
 const fmtMoney = (v) =>
-  v == null ? "–" : Number(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  v == null ? "–" : roundCents(Number(v)).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 // dollar-prefixed money that degrades to a bare en-dash for null — a plain
 // `"$" + fmtMoney(v)` rendered "$–" for a missing value (a code with no peers,
 // an unfilled opportunity cell), which reads as a glitch. Negatives render as
@@ -67,6 +72,12 @@ const fmtMoney = (v) =>
 const money = (v) =>
   v == null ? "–" : v < 0 ? "-$" + fmtMoney(-v) : "$" + fmtMoney(v);
 const fmtInt = (v) => (v == null ? "–" : Number(v).toLocaleString("en-US"));
+// stored times are UTC ("2026-11-06 04:30:00.123"); show them on this PC's clock
+const localTime = (s) => {
+  if (!s) return "";
+  const d = new Date(String(s).slice(0, 19).replace(" ", "T") + "Z");
+  return isNaN(d) ? String(s).slice(0, 19) : d.toLocaleString();
+};
 const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 // client twin of the server's SSN-pattern TIN mask — for the few places that
@@ -78,17 +89,177 @@ const maskTin = (t) => {
   return /^[0-9]{9}$/.test(s) && SSN_PREFIXES.has(s.slice(0, 2)) ? "MASKED-SSN" : s;
 };
 
+/* ---------- progress bars (review 13 Group 2) ----------
+   Every output keeps its request; with a bar it carries a per-run token
+   (X-Mrfx-Progress, or ?progress= on an iframe download) and the page polls
+   GET /api/progress/<token> while the request is pending. The percentage is
+   the SERVER's (stage weights + DuckDB's own progress inside a stage) — the
+   page never advances it on a clock; 100 % only once the result is in hand. */
+const newToken = () => {
+  const r = (globalThis.crypto && crypto.randomUUID) ? crypto.randomUUID()
+    : Math.random().toString(36).slice(2) + Date.now().toString(36) + Math.random().toString(36).slice(2);
+  return r.replace(/-/g, "").slice(0, 32).padEnd(16, "0");
+};
+function jobHost(bar) {
+  const id = `jobbar-${bar.view}`;
+  let host = document.getElementById(id);
+  if (host) return host;
+  host = document.createElement("div");
+  host.className = "jobbar-host";
+  host.id = id;
+  const a = bar.anchor ? (typeof bar.anchor === "string" ? document.querySelector(bar.anchor) : bar.anchor) : null;
+  const row = a ? a.parentElement : null;
+  if (row && row.parentElement) row.parentElement.insertBefore(host, row.nextSibling);
+  else (document.getElementById(`view-${bar.view}`) || document.querySelector("main") || document.body).prepend(host);
+  return host;
+}
+const _btnRuns = new WeakMap();
+function mountJobbar(bar, token) {
+  const host = jobHost(bar);
+  const el = document.createElement("div");
+  el.className = "jobbar";
+  el.innerHTML = `<div class="progress"><div class="progress-fill" style="width:0%"></div>` +
+    `<div class="progress-label"></div></div><a href="#" class="jobbar-stop" title="stop this run — nothing half-built is delivered">Stop</a>`;
+  host.appendChild(el);
+  const fill = el.querySelector(".progress-fill"), lab = el.querySelector(".progress-label");
+  lab.title = "weighted by how long each step typically takes on a store this size; the bar moves as DuckDB reports its progress";
+  const btn = bar.anchor ? (typeof bar.anchor === "string" ? document.querySelector(bar.anchor) : bar.anchor) : null;
+  // runs are COUNTED per button (review 14 item 2.10): a second run started
+  // while the first was in flight (Enter twice) recorded "disabled" as the
+  // state to restore, and the button stayed dead until a reload
+  if (btn) {
+    const rec = _btnRuns.get(btn) || { n: 0, was: btn.disabled };
+    rec.n += 1;
+    _btnRuns.set(btn, rec);
+    btn.disabled = true;
+  }
+  let pct = 0, ended = false;
+  // a cached answer arrives in a blink: no flicker under 250 ms
+  const showTimer = setTimeout(() => el.classList.add("on"), 250);
+  const say = (t) => { lab.textContent = t; if (bar.tab) { try { bar.tab.document.body.textContent = t; } catch (_) { /* cosmetic */ } } };
+  say(`${bar.label} · starting…`);
+  el.querySelector(".jobbar-stop").onclick = (ev) => {
+    ev.preventDefault();
+    if (ended) return;
+    fetch(`/api/progress/${token}`, { method: "DELETE" }).catch(() => {});
+    say(`${bar.label} · stopping…`);
+  };
+  const finish = (cls, text, keepMs) => {
+    if (ended) return;
+    ended = true;
+    clearTimeout(showTimer);
+    if (btn) {
+      const rec = _btnRuns.get(btn);
+      if (rec) {
+        rec.n -= 1;
+        if (rec.n <= 0) { btn.disabled = rec.was; _btnRuns.delete(btn); }
+      } else btn.disabled = false;
+    }
+    el.classList.add(cls);
+    if (text) say(text);
+    if (cls === "done") { fill.style.width = "100%"; el.classList.add("on"); }
+    setTimeout(() => el.remove(), keepMs);
+  };
+  return {
+    update(s) {
+      if (ended || !s) return;
+      pct = Math.max(pct, Math.min(99, Number(s.pct) || 0));    // never backwards, never 100 here
+      fill.style.width = pct + "%";
+      el.classList.toggle("indeterminate", !!s.indeterminate);
+      const where = s.stage_count ? ` (${s.stage_index} of ${s.stage_count})` : "";
+      if (s.state === "waiting") say(`${bar.label} · ${s.stage || "waiting"} · ${Math.round((s.elapsed_ms || 0) / 1000)} s`);
+      else say(`${bar.label} · ${s.stage || "working"}${where} · ${s.indeterminate ? "at least " : "about "}${pct} %`);
+    },
+    built() { finish("done", `${bar.label} · built — your browser is downloading it`, 4000); },
+    done() { finish("done", `${bar.label} · done`, bar.keepMs || 600); },
+    stopped() { finish("stopped", `${bar.label} · stopped`, 2500); },
+    failed(msg) { finish("failed", `${bar.label} · ${msg || "failed"}`, 5000); },
+  };
+}
+function startPoll(token, jb, bar, onTerminal) {
+  let stopped = false, timer = null, seenOk = false, misses = 0;
+  const tick = async () => {
+    if (stopped) return;
+    try {
+      const r = await fetch(`/api/progress/${token}`);
+      if (r.ok) {
+        seenOk = true; misses = 0;
+        const s = await r.json();
+        jb.update(s);
+        if (onTerminal && ["done", "failed", "stopped"].includes(s.state)) { onTerminal(s); return; }
+      } else if (r.status === 404 && (seenOk || ++misses >= 25)) {
+        // the server no longer knows this run: it restarted (review 14
+        // Group 3 — an iframe download's bar stuck and Export stayed
+        // disabled for 6 h). The bar ends and the button comes back.
+        jb.failed("the app restarted — run it again");
+        if (onTerminal) onTerminal({ state: "failed", error: "the app restarted — run it again" });
+        return;
+      }
+    } catch (_) { /* the request's own outcome decides */ }
+    const slow = document.hidden || (bar.view && state.view && bar.view !== state.view);
+    timer = setTimeout(tick, slow ? 1500 : 400);
+  };
+  timer = setTimeout(tick, 400);
+  return { stop() { stopped = true; clearTimeout(timer); } };
+}
+// run `work(opts)` (a fetch carrying the token in opts.headers) with a bar
+async function withBar(bar, work) {
+  const token = newToken();
+  const jb = mountJobbar(bar, token);
+  const poll = startPoll(token, jb, bar);
+  try {
+    const res = await work({ "X-Mrfx-Progress": token });
+    poll.stop();
+    jb.done();
+    return res;
+  } catch (e) {
+    poll.stop();
+    if (e && e.status === 409) jb.stopped();
+    else if (e && e.name === "AbortError") jb.stopped();
+    else jb.failed(e && e.message && /Failed to fetch|NetworkError/.test(e.message)
+      ? "the server restarted — run it again" : (e && e.message) || "failed");
+    throw e;
+  }
+}
+
 async function api(path, opts) {
+  if (opts && opts.bar) {
+    const { bar, ...rest } = opts;
+    return withBar(bar, (h) => api(path, { ...rest, headers: { ...(rest.headers || {}), ...h } }));
+  }
   const r = await fetch(path, opts);
   if (!r.ok) {
     let msg = `HTTP ${r.status}`;
     try { const d = await r.json(); msg = d.detail || d.error || msg; } catch { /* keep */ }
-    throw new Error(msg);
+    const err = new Error(msg);
+    err.status = r.status;          // "busy" (503) is told apart from a refusal (422)
+    throw err;
   }
   return r.json();
 }
-const postJson = (path, body) =>
-  api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+
+// One ticket per view: a slow answer to an OLDER request must never paint over
+// the newer one (change a filter twice quickly and the first reply can land
+// last). `const fresh = ticket("rates")` before the fetch; `if (!fresh()) return`
+// after every await.
+const _tickets = {};
+function ticket(view) {
+  const n = (_tickets[view] = (_tickets[view] || 0) + 1);
+  return () => _tickets[view] === n;
+}
+// one in-flight request per view (review 10 1.1). A newer one ABORTS the older in the
+// browser and tells the server which page view it belongs to, so the server
+// interrupts the superseded scan instead of finishing it for nobody.
+const VIEW_ID = Math.random().toString(36).slice(2) + Date.now().toString(36);
+const _viewCtl = {};
+function supersede(view) {
+  if (_viewCtl[view]) _viewCtl[view].abort();
+  const c = (_viewCtl[view] = new AbortController());
+  return { signal: c.signal, headers: { "X-Mrfx-View": `${VIEW_ID}:${view}` } };
+}
+const postJson = (path, body, bar) =>
+  api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+              ...(bar ? { bar } : {}) });
 
 function debounce(fn, ms) {
   let t;
@@ -109,15 +280,57 @@ function moveTip(ev) {
 function hideTip() { tip.style.display = "none"; }
 
 /* ---------- nav ---------- */
-$$("nav button").forEach((b) => b.addEventListener("click", () => switchView(b.dataset.view)));
+// Two menu entries each gather screens that answer one question (0.8.6):
+// "My rates" (your rate card; how you sit against the market) and "Market
+// rates" (browse every rate; one code; a code's market; a payer's clinics).
+// Each member keeps its own screen; a tab strip moves between them.
+const VIEW_GROUPS = {
+  myrates: { label: "My rates", views: [["ratecard", "Rate card & visit value"], ["benchmark", "Benchmark vs the market"]] },
+  market: { label: "Market rates", views: [["explorer", "Browse rates"], ["cpt", "By code"],
+                                           ["markets", "A code's market"], ["roster", "A payer's clinics"]] },
+};
+const groupOf = (view) => Object.keys(VIEW_GROUPS).find((g) => VIEW_GROUPS[g].views.some(([v]) => v === view));
+function renderSubtabs(view) {
+  $$(".subtabs").forEach((el) => el.remove());
+  const g = groupOf(view);
+  if (!g) return;
+  const sec = $(`#view-${view}`);
+  if (!sec) return;
+  const bar = document.createElement("div");
+  bar.className = "subtabs";
+  bar.innerHTML = VIEW_GROUPS[g].views.map(([v, label]) =>
+    `<button data-subview="${v}" class="${v === view ? "active" : ""}">${esc(label)}</button>`).join("");
+  bar.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-subview]");
+    if (b && b.dataset.subview !== state.view) switchView(b.dataset.subview);
+  });
+  sec.prepend(bar);
+}
+$$("nav button").forEach((b) => b.addEventListener("click", () => {
+  // a group's entry reopens the member last used
+  const g = b.dataset.group;
+  switchView(g && state.lastInGroup && state.lastInGroup[g] ? state.lastInGroup[g] : b.dataset.view);
+}));
+renderSubtabs(state.view);   // the screen the page opens on (no switchView ran)
 function switchView(view) {
   state.view = view;
-  $$("nav button").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
+  // the address bar follows the screen (review 13 6.4); a link's own
+  // subject/state stay while that link is being opened
+  if (!_openingHash && parseHash().view !== view) setHash(view, undefined, true);
+  const g = groupOf(view);
+  if (g) (state.lastInGroup = state.lastInGroup || {})[g] = view;
+  $$("nav button").forEach((b) => b.classList.toggle("active",
+    b.dataset.view === view || (g && b.dataset.group === g)));
   $$(".view").forEach((v) => v.classList.toggle("active", v.id === `view-${view}`));
-  const active = $$("nav button").find((b) => b.dataset.view === view);
+  renderSubtabs(view);
+  const active = $$("nav button").find((b) => b.dataset.view === view || (g && b.dataset.group === g));
   const tt = $("#topbar-title");
-  if (active && tt) tt.textContent = active.textContent;
+  if (active && tt) {
+    const member = g && VIEW_GROUPS[g].views.find(([v]) => v === view);
+    tt.textContent = member ? `${VIEW_GROUPS[g].label} — ${member[1]}` : active.textContent;
+  }
   clearInterval(state.filesTimer);
+  if (view !== "files") stopAnalyticsPoll();
   // the tracker-import poll belongs to the Medicare tab; leaving it stops it
   if (view !== "medicare" && state.trackerPoll) {
     clearInterval(state.trackerPoll); state.trackerPoll = null;
@@ -130,9 +343,15 @@ function switchView(view) {
     state.filesTimer = setInterval(() => { loadFiles(); loadUrlQueue(); }, 4000);
   }
   if (view === "cpt" && !state.cptSelected) {
-    const first = Object.keys(state.catalog)[0];
+    // open on the first code that HAS rates (the summary strip's per-code
+    // rows), not the catalog's first code — 90912 is priced in almost no
+    // store, so the page opened empty (review 13 item 3.5)
+    const withData = (state.lastByCode || []).map((r) => r.billing_code).filter((c) => state.catalog[c]);
+    const first = withData.sort()[0] || Object.keys(state.catalog)[0];
     if (first) selectCpt(first);
   }
+  // data landed while this view was closed: reload it now (P1.20)
+  if (view === "explorer" || view === "cpt") reloadIfStale(view);
   if (view === "markets") initMarkets();
   if (view === "roster") initRoster();
   if (view === "benchmark") initBenchmark();
@@ -148,13 +367,340 @@ function switchView(view) {
   if (view === "overview") initOverview();
 }
 
-/* ---------- header stats ---------- */
-async function loadStats() {
+/* ---------- bookmarkable links + the header search box (review 13 Group 6.4) ---------- */
+// The address bar names the screen and, on the client screens, the practice
+// and state: #benchmark?subject=ACME%20REHAB&state=MO opens the Benchmark
+// with both filled and run — bookmark it, or send it to yourself. No new
+// numbers: the link only fills the same boxes the user would.
+const DEEP = {
+  benchmark: { subject: "#b-subject", state: "#b-state", ready: "#b-month", run: () => runBenchmark() },
+  negotiate: { subject: "#ng-subject", state: "#ng-state", payer: "#ng-payer", ready: "#ng-month", run: () => runNegotiate() },
+  ratecard: { subject: "#rc-subject", state: "#rc-state", ready: "#rc-month", run: () => buildRatecard() },
+  changes: { subject: "#ch-subject", ready: "#ch-month", run: () => runChanges() },
+  medicare: { subject: "#md-subject", run: () => runMedicareOrg() },
+};
+function viewExists(v) { return !!groupOf(v) || $$("nav button").some((b) => b.dataset.view === v); }
+function parseHash(h) {
+  const raw = (h == null ? location.hash : h).replace(/^#/, "");
+  const i = raw.indexOf("?");
+  const view = decodeURIComponent(i < 0 ? raw : raw.slice(0, i));
+  const params = {};
+  new URLSearchParams(i < 0 ? "" : raw.slice(i + 1)).forEach((v, k) => { params[k] = v; });
+  return { view, params };
+}
+// an SSN-pattern tax ID never goes into the address bar (review 14 item 2.5):
+// the link is made to be bookmarked and sent
+const ssnShaped = (v) => {
+  const d = String(v ?? "").replace(/[\s-]/g, "");
+  return /^[0-9]{9}$/.test(d) && SSN_PREFIXES.has(d.slice(0, 2));
+};
+function hashFor(view, params) {
+  const q = new URLSearchParams();
+  for (const [k, v] of Object.entries(params || {})) if (v && !ssnShaped(v)) q.set(k, v);
+  const qs = q.toString();
+  return "#" + view + (qs ? "?" + qs : "");
+}
+function setHash(view, params, push) {
+  const h = hashFor(view, params);
+  // a tab switch the user made is a history entry, so Back returns to the
+  // previous tab instead of leaving the app (review 14 Group 3, P3); filling
+  // a screen's boxes replaces its own entry
+  if (location.hash !== h) (push ? history.pushState : history.replaceState).call(history, null, "", h);
+}
+// the screen's current boxes -> the address bar (on Run)
+function hashFromInputs(view) {
+  const d = DEEP[view];
+  if (!d) { setHash(view); return; }
+  const val = (sel) => (sel && $(sel) ? String($(sel).value || "").trim() : "");
+  setHash(view, { subject: val(d.subject), state: val(d.state).toUpperCase(), payer: val(d.payer) });
+}
+let _openingHash = false;
+async function openFromHash() {
+  const { view, params } = parseHash();
+  if (view === "analytics") { openAnalytics(); return; }
+  if (!view || !viewExists(view)) return;
+  _openingHash = true;
   try {
-    const s = await api("/api/stats");
+    switchView(view);
+    const d = DEEP[view];
+    if (!d || !params.subject) return;
+    for (let i = 0; i < 40; i++) {           // the tab's pickers load on first visit
+      const ok = (!d.ready || ($(d.ready) && $(d.ready).options.length > 0)) &&
+                 (!d.payer || !params.payer || ($(d.payer) && $(d.payer).options.length > 0));
+      if (ok) break;
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    if (d.state && params.state && $(d.state)) $(d.state).value = params.state;
+    if (d.payer && params.payer && $(d.payer)) $(d.payer).value = params.payer;
+    $(d.subject).value = params.subject;
+    d.run();
+  } finally { _openingHash = false; }
+}
+function initDeepLinks() {
+  // the Run buttons write the link (the jump-throughs do it in clientJump)
+  [["#b-run", "benchmark"], ["#ng-run", "negotiate"], ["#rc-run", "ratecard"]].forEach(([sel, v]) => {
+    const b = $(sel);
+    if (b) b.addEventListener("click", () => hashFromInputs(v));
+  });
+  // Back / Forward fire popstate (and hashchange); a pasted link fires
+  // hashchange — follow each new address once
+  const follow = () => {
+    const { view } = parseHash();
+    if (location.hash === state.lastFollowed) return;
+    state.lastFollowed = location.hash;
+    if (!_openingHash && view && (viewExists(view) || view === "analytics")) openFromHash();
+  };
+  window.addEventListener("hashchange", follow);
+  window.addEventListener("popstate", follow);
+}
+
+// "Find a practice": a TIN, an NPI or a name -> the practice's drawer
+async function findPractice(raw) {
+  const v = String(raw || "").trim();
+  const msg = $("#find-msg");
+  if (msg) msg.textContent = "";
+  if (!v) return;
+  const digits = v.replace(/[\s-]/g, "");
+  if (/^\d{9}$/.test(digits)) return openEntity("tin", digits);
+  if (/^\d{10}$/.test(digits)) return openEntity("npi", digits);
+  let d;
+  try { d = await api(`/api/benchmark/subjects?q=${encodeURIComponent(v)}&limit=50`); }
+  catch (e) { if (msg) msg.textContent = e.message; return; }
+  const lc = v.toLowerCase();
+  const ents = d.entities || [], tins = d.tins || [];
+  const ent = ents.find((e) => e.toLowerCase() === lc);
+  if (ent) return openEntity("entity", ent);
+  const exact = tins.filter((t) => (t.display_name || "").toLowerCase() === lc);
+  if (exact.length === 1) return openEntity("tin", exact[0].tin_value);
+  if (exact.length > 1) return openEntity("entity", exact[0].display_name);
+  const n = ents.length + tins.length;
+  if (n === 1) return ents.length ? openEntity("entity", ents[0]) : openEntity("tin", tins[0].tin_value);
+  if (msg) msg.textContent = n ? `${n}${n >= 50 ? "+" : ""} practices match — pick one from the list` : "no practice matches";
+}
+function initFindBox() {
+  const input = $("#find-practice");
+  if (!input) return;
+  wireSubjectSearch("#find-practice", "#find-list");
+  input.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); findPractice(input.value); } });
+}
+
+/* ---------- header stats ---------- */
+// Review 13 item 1.2: the counts above are what was LOADED; every screen reads
+// the analytics, which can be behind (a billion-row rollup takes hours). When
+// they are, the same line says how far: "Analytics cover 3 of 49 payers (3 of
+// 615 files). Rolling up the rest — 41 %, about 2 h left", in the warn colour.
+function coverageHtml(a) {
+  if (!a || !a.state || a.state === "current") return "";
+  const head = `Analytics cover <b>${fmtInt(a.covered_payers)}</b> of <b>${fmtInt(a.loaded_payers)}</b> ` +
+    `payer${a.loaded_payers === 1 ? "" : "s"} (${fmtInt(a.covered_files)} of ${fmtInt(a.done_files)} files).`;
+  const tail = esc(a.reason || "");
+  return ` <span class="cov-line cov-${esc(a.state)}" id="coverage-line" title="Every screen, report and export answers from the analytics. Payers and files not in them yet are loaded and safe; they appear as the analytics catch up. Click to watch it happen.">${head} ${tail} <a href="#analytics" class="cov-files">details</a></span>`;
+}
+function wireCoverageLink() {
+  const line = $("#coverage-line");
+  if (line) line.onclick = (ev) => { ev.preventDefault(); openAnalytics(); };
+  scheduleCoverageRefresh();
+}
+
+/* ---------- the Analytics activity panel (review 14 item 1.2) ---------- */
+// Watch the newly loaded files go into the numbers every screen reads. Polls
+// the async /api/analytics/activity every 2 s while open (it never waits
+// behind a busy server); every number on it comes from the server's own
+// state — nothing here is computed.
+function stopAnalyticsPoll() {
+  if (state.anTimer) { clearInterval(state.anTimer); state.anTimer = null; }
+}
+function openAnalytics() {
+  if (state.view !== "files") switchView("files");
+  const p = $("#analytics-panel");
+  if (!p) return;
+  p.style.display = "";
+  if (parseHash().view !== "analytics") history.replaceState(null, "", "#analytics");
+  refreshAnalytics();
+  stopAnalyticsPoll();
+  state.anTimer = setInterval(refreshAnalytics, 2000);
+}
+function closeAnalytics() {
+  const p = $("#analytics-panel");
+  if (p) p.style.display = "none";
+  stopAnalyticsPoll();
+  if (parseHash().view === "analytics") history.replaceState(null, "", "#files");
+}
+async function refreshAnalytics() {
+  let d;
+  try { d = await api("/api/analytics/activity"); }
+  catch (e) {
+    const b = $("#an-body");
+    const down = /Failed to fetch|NetworkError|Load failed/.test(String(e && e.message));
+    if (b) b.insertAdjacentHTML("afterbegin", `<p class="warn-text" id="an-down">${down
+      ? "The app is not answering right now (restarting?) — this panel tries again every 2 seconds; nothing is lost."
+      : esc(e.message)}</p>`);
+    const old = document.querySelectorAll("#an-down");
+    for (let i = 1; i < old.length; i++) old[i].remove();
+    return;
+  }
+  state.anLast = d;
+  renderAnalytics(d);
+  // the header line follows the panel's answer (one source)
+  if (d && d.analytics) updateCoverageLine(d.analytics);
+}
+function anTable(cols, rows) {
+  if (!rows.length) return `<p class="muted">none</p>`;
+  return `<table><thead><tr>${cols.map((c) => `<th class="${c.num ? "num" : ""}">${esc(c.h)}</th>`).join("")}</tr></thead><tbody>` +
+    rows.map((r) => `<tr>${cols.map((c) => `<td class="${c.num ? "num" : ""}">${c.f(r)}</td>`).join("")}</tr>`).join("") +
+    `</tbody></table>`;
+}
+function renderAnalytics(d) {
+  const body = $("#an-body");
+  if (!body || !d) return;
+  const a = d.analytics || {};
+  const pb = $("#an-pause");
+  if (pb) pb.textContent = d.paused ? "Resume analytics" : "Pause analytics";
+  let html = "";
+  if (d.error) html += `<p class="warn-text">${esc(d.error)}</p>`;
+  const head = `Analytics cover <b>${fmtInt(a.covered_payers)}</b> of <b>${fmtInt(a.loaded_payers)}</b> payers ` +
+    `(${fmtInt(a.covered_files)} of ${fmtInt(a.done_files)} files).`;
+  if (d.paused) html += `<p class="an-paused">Analytics paused — files keep loading, but nothing new reaches the numbers until you press Resume.</p>`;
+  if (d.bar) {
+    const pct = Math.max(0, Math.min(100, d.bar.pct || 0));
+    html += `<div class="an-bar" title="${pct} %"><span style="width:${pct}%"></span></div>` +
+      `<div class="an-words"><b>${pct} %</b> · ${esc(d.bar.words || "")}</div>`;
+  } else if (a.state === "current") {
+    html += `<p class="an-idle an-ok">✓ Every loaded file is in the analytics. ${head}</p>`;
+  } else {
+    const nxt = d.scheduler && d.scheduler.why && d.scheduler.code !== "next" && d.scheduler.code !== "settle"
+      ? ` Next: ${esc(d.scheduler.why)}.` : "";
+    // (the header's pointer "— Files tab" means this panel: not repeated here)
+    const why = String(a.reason || "").replace(/ — Files tab$/, "");
+    html += `<p class="an-idle">${head} ${esc(why)}${why && !/[.!]$/.test(why) ? "." : ""}${nxt}</p>`;
+  }
+  if (d.bar) html += `<p class="muted" style="margin:0">${head}</p>`;
+  const w = d.waiting || { count: 0, rows: 0, files: [] };
+  html += `<div class="an-sec"><h4>Waiting to be added: ${fmtInt(w.count)} file${w.count === 1 ? "" : "s"}, ${fmtInt(w.rows)} rows</h4>` +
+    anTable([
+      { h: "File", f: (r) => esc(r.file) },
+      { h: "Payer", f: (r) => esc(r.payer || "") },
+      { h: "Rows", num: true, f: (r) => fmtInt(r.rows) },
+      { h: "Loaded", f: (r) => esc(r.loaded_text || "") },
+      { h: "Why it is waiting", f: (r) => esc(r.why || "") },
+    ], (w.files || []).slice(0, 200)) + `</div>`;
+  html += `<div class="an-sec"><h4>Added recently</h4>` +
+    anTable([
+      { h: "File", f: (r) => esc(r.file) },
+      { h: "Payer", f: (r) => esc(r.payer || "") },
+      { h: "Rows", num: true, f: (r) => fmtInt(r.rows) },
+      { h: "On screen since", f: (r) => esc(r.added_text || "") },
+      { h: "Waited", f: (r) => esc(r.waited_text || "") },
+      { h: "By", f: (r) => esc(r.kind || "") },
+    ], d.added || []) + `</div>`;
+  html += `<div class="an-sec"><h4>Per payer</h4>` +
+    anTable([
+      { h: "Payer", f: (r) => esc(r.payer) },
+      { h: "In the analytics?", f: (r) => r.status === "covered" ? `<span class="an-ok">✓</span> ${esc(r.words)}` : esc(r.words) },
+      { h: "Rows in the analytics", num: true, f: (r) => fmtInt(r.rows_in) },
+      { h: "Rows loaded", num: true, f: (r) => fmtInt(r.rows_loaded) },
+      { h: "Last added", f: (r) => esc(r.last_added || "") },
+    ], d.payers || []) + `</div>`;
+  if (d.problems) {
+    const p = d.problems;
+    html += `<div class="an-sec"><h4>Problem</h4><p class="warn-text">${esc(p.sentence || "")}` +
+      `${p.at ? ` (at ${esc(p.at)})` : ""}${p.retry_at ? ` — it tries again at ${esc(p.retry_at)}` : ""}.</p>` +
+      `${p.advice ? `<p>${esc(p.advice)}</p>` : ""}</div>`;
+  }
+  html += `<div class="an-mean"><b>What this means.</b> ${esc(d.what_this_means || "")}</div>`;
+  body.innerHTML = html;
+}
+// the header's coverage line: refreshed from the cheap activity route every
+// 5 s while the analytics are behind (the full header stats stay on 15 s)
+function updateCoverageLine(a) {
+  const wasBehind = state.analytics && state.analytics.state && state.analytics.state !== "current";
+  state.analytics = Object.assign({}, state.analytics || {}, a);
+  const el = $("#coverage-line");
+  if (a.state === "current") {
+    if (el) el.remove();
+    if (wasBehind) loadStats();
+    return;
+  }
+  const html = coverageHtml(a);
+  if (el) el.outerHTML = html;
+  else { const st = $("#dataset-stats"); if (st && !/loading/.test(st.textContent)) st.insertAdjacentHTML("beforeend", html); }
+  const line = $("#coverage-line");
+  if (line) line.onclick = (ev) => { ev.preventDefault(); openAnalytics(); };
+}
+function scheduleCoverageRefresh() {
+  const behind = state.analytics && state.analytics.state && state.analytics.state !== "current";
+  if (behind && !state.covTimer) {
+    state.covTimer = setInterval(async () => {
+      if (state.anTimer) return;          // the open panel already refreshes it
+      try { const d = await api("/api/analytics/activity"); if (d && d.analytics) updateCoverageLine(d.analytics); }
+      catch (e) { /* the 15 s header poll keeps going */ }
+      if (!(state.analytics && state.analytics.state && state.analytics.state !== "current")) {
+        clearInterval(state.covTimer); state.covTimer = null;
+      }
+    }, 5000);
+  }
+}
+function initAnalyticsPanel() {
+  const open = $("#btn-analytics");
+  if (open) open.onclick = () => (($("#analytics-panel") || {}).style || {}).display === "none" ? openAnalytics() : closeAnalytics();
+  const close = $("#an-close");
+  if (close) close.onclick = closeAnalytics;
+  const run = $("#an-run");
+  if (run) run.onclick = async () => {
+    run.disabled = true;
+    try { await postJson("/api/analytics/run-now", {}); } catch (e) { alert(e.message); }
+    finally { run.disabled = false; }
+    refreshAnalytics();
+  };
+  const pause = $("#an-pause");
+  if (pause) pause.onclick = async () => {
+    const paused = !(state.anLast && state.anLast.paused);
+    pause.disabled = true;
+    try { await postJson("/api/analytics/pause", { paused }); } catch (e) { alert(e.message); }
+    finally { pause.disabled = false; }
+    refreshAnalytics();
+  };
+}
+// one renderer for every payer chip list: a loaded payer the analytics do not
+// hold yet is greyed, titled, and still pickable (it answers "no rows" plus why)
+function payerChipsHtml(resp, on) {
+  const payers = (resp && resp.payers) || [];
+  const cov = resp && Array.isArray(resp.covered) ? new Set(resp.covered) : null;
+  if (cov) state.coveredPayers = cov;
+  const sel = on || new Set();
+  return payers.map((p) => {
+    const un = cov && !cov.has(p);
+    return `<button class="chip${sel.has(p) ? " on" : ""}${un ? " uncovered" : ""}" data-payer="${esc(p)}"` +
+      `${un ? ` title="loaded, not yet in analytics"` : ""}>${esc(p)}</button>`;
+  }).join("");
+}
+function payerOptionsHtml(resp) {
+  const cov = resp && Array.isArray(resp.covered) ? new Set(resp.covered) : null;
+  return ((resp && resp.payers) || []).map((p) =>
+    `<option value="${esc(p)}"${cov && !cov.has(p) ? ` label="${esc(p)} — loaded, not yet in analytics"` : ""}>`).join("");
+}
+function monthOptionsHtml(resp) {
+  const cov = resp && Array.isArray(resp.covered) ? new Set(resp.covered) : null;
+  return ((resp && resp.months) || []).map((m) => cov && !cov.has(m)
+    ? `<option value="${esc(m)}" class="uncovered" title="loaded, not yet in analytics">${esc(m)} — loaded, not yet in analytics</option>`
+    : `<option>${esc(m)}</option>`).join("");
+}
+// "no rows" for a picked payer the analytics do not hold yet says why
+function uncoveredNote(payers) {
+  if (!state.coveredPayers || !payers || !payers.length) return "";
+  const un = payers.filter((p) => !state.coveredPayers.has(p));
+  if (!un.length) return "";
+  return `<p class="warn-text">${un.map(esc).join(", ")} ${un.length === 1 ? "is" : "are"} loaded but not in the analytics yet — ` +
+    `${esc((state.analytics && state.analytics.sentence) || "they appear as the analytics catch up.")}</p>`;
+}
+async function loadStats(given) {
+  try {
+    const s = given || await api("/api/stats");
     let html =
       `<b>${fmtInt(s.rates)}</b> rate rows · <b>${fmtInt(s.tins)}</b> TINs · ` +
       `<b>${s.payers}</b> payer${s.payers === 1 ? "" : "s"} · <b>${fmtInt(s.files_done)}</b> files`;
+    state.analytics = s.analytics || null;
+    html += coverageHtml(s.analytics);
     const e = s.enrichment;
     if (e && e.total > 0) {
       // names + states come from NPPES enrichment, which runs in the
@@ -186,7 +732,16 @@ async function loadStats() {
       if (state.lastNamed != null && e.named > state.lastNamed) onNamesUpdated();
       state.lastNamed = e.named;
     }
+    // new data landed (an ingest's rollup): every payer/month picker and the
+    // open Explorer/Code view were filled once at boot and went stale — a
+    // new payer was missing from every chip list and the Explorer strip said
+    // 51 rows while the store held 73 (round 7 P1.20)
+    if (s.data_generation != null) {
+      if (state.dataGen != null && s.data_generation !== state.dataGen) onDataUpdated();
+      state.dataGen = s.data_generation;
+    }
     $("#dataset-stats").innerHTML = html;
+    wireCoverageLink();
   } catch { $("#dataset-stats").textContent = "API unreachable"; }
 }
 
@@ -195,9 +750,64 @@ async function loadStats() {
 // whichever view is open so freshly-identified names/geo appear live.
 function onNamesUpdated() {
   loadStateOptions();
+  // at most once a minute: the 15 s poll re-ran the open view on every batch
+  // of names for as long as enrichment ran (hours on a big book)
+  const now = Date.now();
+  if (state.namesRefreshedAt && now - state.namesRefreshedAt < 60000) return;
+  state.namesRefreshedAt = now;
   const v = state.view;
-  if (v === "explorer") { loadRates(); loadSummary(); }
-  else if (v === "cpt" && state.cptSelected) selectCpt(state.cptSelected);
+  // the table shows the names; the strip's numbers do not depend on them
+  if (v === "explorer") loadRates();
+  // never abort a Code-page request still running to restart the same one
+  else if (v === "cpt" && state.cptSelected && !cptCtl) selectCpt(state.cptSelected);
+}
+
+// Called when /api/stats reports a new data generation. Refills the pickers
+// that were filled once (payer chips, months, the Markets/Roster datalists),
+// keeping what the user picked, and reloads the open Explorer/Code view; a
+// view not open now reloads when it is next opened.
+async function onDataUpdated() {
+  loadStateOptions();
+  try {
+    const [payersResp, monthsResp] = await Promise.all([
+      api("/api/payers").catch(() => ({ payers: null })),
+      api("/api/months").catch(() => ({ months: null })),
+    ]);
+    const { payers } = payersResp, { months } = monthsResp;
+    if (payers) {
+      const chips = $("#f-payer-chips");
+      const on = new Set(state.filters.payers || []);
+      if (chips) chips.innerHTML = payers.length
+        ? payerChipsHtml(payersResp, on)
+        : `<span class="muted">none ingested yet</span>`;
+      const opts = payerOptionsHtml(payersResp);
+      for (const id of ["#mk-payer-opts", "#ro-payer-opts"]) { const dl = $(id); if (dl) dl.innerHTML = opts; }
+      // the other tabs' chip lists keep what is picked and refresh their greying
+      for (const id of ["#b-payer-chips", "#rc-payer-chips", "#ld-payer-chips", "#ch-payer-chips"]) {
+        const el = $(id);
+        if (!el || !el.children.length) continue;
+        const keep = new Set($$(".chip.on", el).map((c) => c.dataset.payer));
+        el.innerHTML = payerChipsHtml(payersResp, keep);
+      }
+    }
+    if (months) {
+      const sel = $("#f-month");
+      if (sel) {
+        const keep = sel.value;
+        sel.innerHTML = `<option value="latest">latest — each contract's newest file</option><option value="">all months (pooled)</option>` +
+          monthOptionsHtml(monthsResp);
+        sel.value = months.includes(keep) || keep === "" ? keep : "latest";
+      }
+    }
+  } catch { /* the next generation retries */ }
+  state.staleViews = new Set(["explorer", "cpt"]);
+  reloadIfStale(state.view);
+}
+
+function reloadIfStale(v) {
+  if (!state.staleViews || !state.staleViews.has(v)) return;
+  if (v === "explorer") { state.staleViews.delete(v); loadRates(); loadSummary(); }
+  else if (v === "cpt" && state.cptSelected && !cptCtl) { state.staleViews.delete(v); selectCpt(state.cptSelected); }
 }
 
 async function loadStateOptions() {
@@ -217,8 +827,18 @@ let overviewWired = false;
 async function initOverview() {
   if (!overviewWired) {
     overviewWired = true;
-    $("#ov-refresh").addEventListener("click", () => loadOverview($("#ov-state").value.trim()));
-    $("#ov-state").addEventListener("change", () => loadOverview($("#ov-state").value.trim()));
+    // one request per action: clicking Refresh after typing a state fired the
+    // box's "change" (blur) AND the click — the same overview twice
+    let ovLast = { v: null, t: 0 };
+    const ovLoad = (force) => {
+      const v = $("#ov-state").value.trim();
+      if (!force && v === ovLast.v) return;
+      if (force && v === ovLast.v && Date.now() - ovLast.t < 1000) return;
+      ovLast = { v, t: Date.now() };
+      loadOverview(v);
+    };
+    $("#ov-refresh").addEventListener("click", () => ovLoad(true));
+    $("#ov-state").addEventListener("change", () => ovLoad(false));
     loadStateOptions();
   }
   loadOverview($("#ov-state").value.trim());
@@ -227,9 +847,23 @@ async function initOverview() {
 async function loadOverview(stateCode = "") {
   const out = $("#ov-out");
   out.innerHTML = `<div class="loading">Loading market overview</div>`;
+  // the first overview after a start reads the whole store (10-20 s on a
+  // 100M-rate store): say so, so a slow first paint is not read as a hang
+  // (review 9 item 2.5)
+  const slow = setTimeout(() => {
+    if (out.querySelector(".loading"))
+      out.innerHTML = `<div class="loading">Loading market overview — the first screen after a start reads the whole store and can take up to a minute on a large one; later screens are fast</div>`;
+  }, 4000);
   let d;
-  try { d = await api(`/api/overview${stateCode ? `?state=${encodeURIComponent(stateCode)}` : ""}`); }
-  catch (e) { out.innerHTML = `<div class="empty">Couldn't load the overview (${esc(e.message)}).</div>`; return; }
+  const isFresh = ticket("overview");
+  try { d = await api(`/api/overview${stateCode ? `?state=${encodeURIComponent(stateCode)}` : ""}`, { bar: { view: "overview", label: "Market overview", anchor: "#ov-refresh" } }); }
+  catch (e) {
+    clearTimeout(slow);
+    if (!isFresh()) return;
+    out.innerHTML = `<div class="empty">Couldn't load the overview (${esc(e.message)}).</div>`; return;
+  }
+  clearTimeout(slow);
+  if (!isFresh()) return;
   if (!d.practices) {
     out.innerHTML = `<div class="empty"><h3>No rates${stateCode ? " in " + esc(stateCode) : ""} yet</h3>Ingest some payer files first, or clear the state filter.</div>`;
     return;
@@ -243,7 +877,7 @@ async function loadOverview(stateCode = "") {
   ].map(([k, v]) => `<div class="stat"><b>${v}</b><span>${k}</span></div>`).join("");
 
   const disc = (d.by_discipline || []).length
-    ? `<div class="ov-block"><h3>Typical rate by discipline</h3><div class="tablewrap"><table>
+    ? `<div class="ov-block"><h3>Typical evaluation rate by discipline</h3><div class="tablewrap"><table>
         <thead><tr><th>Discipline</th><th class="num">Median rate</th><th class="num">Practices</th></tr></thead>
         <tbody>${d.by_discipline.map((x) => `<tr><td>${esc(x.label)}</td><td class="num">${money(x.median)}</td><td class="num muted">${fmtInt(x.practices)}</td></tr>`).join("")}</tbody></table></div></div>`
     : "";
@@ -252,7 +886,7 @@ async function loadOverview(stateCode = "") {
   const idx = (d.payer_index || []);
   const payerBlock = idx.length
     ? `<div class="ov-block"><h3>Which payers pay above vs below market</h3>
-       <div class="muted" style="margin-bottom:6px">Index = this payer's median rate ÷ the market median, across the codes it prices. <b>1.10 = pays ~10% above market</b>; 0.90 = ~10% below. Payers pricing under 3 codes are omitted.</div>
+       <div class="muted" style="margin-bottom:6px">Index = this payer's median rate ÷ the market median (all practices, all payers — the medians under "Best-covered codes"), across the codes it prices for at least 3 practices. <b>1.10 = pays ~10% above market</b>; 0.90 = ~10% below. Payers pricing under 3 such codes are omitted.</div>
        <div class="tablewrap"><table>
         <thead><tr><th>Payer</th><th class="num">Index</th><th>vs market</th><th class="num">Codes</th></tr></thead>
         <tbody>${idx.map((p) => {
@@ -288,17 +922,20 @@ async function renderDataQuality(stateCode) {
   if (!el) return;
   const market = { month: "latest" };
   if (stateCode) market.state = stateCode;
+  const isFresh = ticket("quality");
   const [fresh, types, posture] = await Promise.all([
     api("/api/quality/freshness").catch(() => null),
     postJson("/api/quality/types", { market }).catch(() => null),
     postJson("/api/quality/posture", { market }).catch(() => null),
   ]);
+  if (!isFresh()) return;
   if (!fresh && !types && !posture) return;
   const rows = (fresh?.payers || []).map((p) => `<tr>
       <td>${esc(p.payer)}</td>
       <td class="num">${esc(p.published || "–")}</td>
       <td class="num ${p.stale ? "chg-cut" : ""}">${
         p.age_days == null ? (p.date_unreadable ? "unreadable" : "not stated")
+                           : p.future_dated ? "dated in the future"
                            : p.age_days + " days"}</td>
       <td class="num muted">${esc(p.newest_file_month || "–")}</td>
       <td class="num muted">${fmtInt(p.rows)}</td></tr>`).join("");
@@ -375,7 +1012,7 @@ function marketFromMk() {
   if (st) market.state = st.toUpperCase();
   if ($("#mk-disc").value) market.discipline = $("#mk-disc").value;
   if (payer) market.payers = [payer];
-  if ($("#mk-therapy").checked) market.therapy_only = true;
+  market.peer_group = $("#mk-peer").value;
   return market;
 }
 
@@ -388,12 +1025,14 @@ async function loadMarkets() {
   out.innerHTML = `<div class="loading">Loading market intelligence for ${esc(code)}</div>`;
   // fetch all four views in parallel; each renders (or shows its own error) so
   // one failing section never blanks the others
+  const isFresh = ticket("markets");
   const [geo, neg, mcr, diff] = await Promise.all([
     postJson("/api/market/geography", body).catch((e) => ({ _err: e.message })),
     postJson("/api/market/negotiability", body).catch((e) => ({ _err: e.message })),
     postJson("/api/market/medicare", body).catch((e) => ({ _err: e.message })),
     postJson("/api/market/differential", body).catch((e) => ({ _err: e.message })),
   ]);
+  if (!isFresh()) return;
   const desc = state.catalog[code]?.description || "";
   out.classList.remove("empty");
   out.innerHTML =
@@ -405,7 +1044,7 @@ async function loadMarkets() {
     renderMkDifferential(diff);
   renderMkLocal(code, market);
   renderMkRadius(code, market);
-  renderMkConcentration(market);
+  renderMkConcentration(market, code);
 }
 
 // Inside ONE state, cities differ enough to matter to a client choosing where
@@ -427,7 +1066,7 @@ async function renderMkLocal(code, market) {
     return;
   }
   const rows = d.cities.map((c) => `<tr>
-    <td>${esc(c.city.replace(/\b\w/g, (m) => m.toUpperCase()))}</td>
+    <td>${esc(c.city.toLowerCase().replace(/\b\w/g, (m) => m.toUpperCase()))}</td>
     <td class="num">${money(c.median_rate)}</td>
     <td class="num ${c.vs_state_pct > 0 ? "" : "warn-text"}">${
       c.vs_state_pct == null ? "–" : (c.vs_state_pct > 0 ? "+" : "") + c.vs_state_pct + "%"}</td>
@@ -477,10 +1116,10 @@ async function renderMkRadius(code, market) {
 
 // Who holds the contracts here. The caveat is louder than the number: this is
 // the store's own payer coverage, not market share of covered lives.
-async function renderMkConcentration(market) {
+async function renderMkConcentration(market, code) {
   const el = $("#mk-hhi");
   if (!el) return;
-  const d = await postJson("/api/territory/concentration", { market })
+  const d = await postJson("/api/territory/concentration", { market, code })
     .catch((e) => ({ _err: e.message }));
   if (d._err) { el.innerHTML = mkErr(d, "Payer concentration"); return; }
   if (!d.payers.length) { el.innerHTML = ""; return; }
@@ -494,7 +1133,7 @@ async function renderMkConcentration(market) {
     <div class="muted" style="margin-bottom:6px">${esc(d.headline)}</div>
     <div class="tablewrap"><table><thead><tr><th>Payer</th>
       <th class="num">Share of contracted practices</th><th class="num">Practices</th>
-      <th class="num">Median rate</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <th class="num">${d.median_code ? `Median ${esc(d.median_code)} rate` : "Median rate, all codes"}</th></tr></thead><tbody>${rows}</tbody></table></div>
     <div class="muted" style="font-size:11.5px;margin-top:6px">${esc(d.note)}</div></div>`;
 }
 
@@ -510,8 +1149,8 @@ function renderMkGeography(d) {
   if (!d.states || !d.states.length)
     return mkEmpty("Where it pays best (by state)",
       "No state has ≥5 identified practices for this code yet (geography comes from NPPES enrichment — it fills in as NPIs are identified).");
-  const rows = d.states.map((s) => `<tr>
-    <td>${esc(s.state)}</td>
+  const rows = d.states.map((s) => `<tr${s.state === d.selected_state ? ' class="sel-row" style="font-weight:600;background:var(--hl,#fff7d6)"' : ""}>
+    <td>${esc(s.state)}${s.state === d.selected_state ? " ◂ your state" : ""}</td>
     <td class="num"><b>${money(s.median_rate)}</b></td>
     <td class="num muted">${money(s.p25)}–${money(s.p75)}</td>
     <td class="num muted">${fmtInt(s.n_practices)}</td></tr>`).join("");
@@ -607,7 +1246,7 @@ async function initRoster() {
     } catch { /* free text still works */ }
     $("#ro-run").addEventListener("click", loadRoster);
     $("#ro-payer").addEventListener("keydown", (e) => { if (e.key === "Enter") loadRoster(); });
-    $("#ro-csv").addEventListener("click", () => { if (lastRosterBody) postDownload("/api/roster.csv", lastRosterBody, "payer_roster.csv"); });
+    $("#ro-csv").addEventListener("click", () => { if (lastRosterBody) postDownload("/api/roster.csv", lastRosterBody, "payer_roster.csv", { view: "roster", label: "Roster CSV", anchor: "#ro-csv" }); });
   }
 }
 
@@ -616,7 +1255,7 @@ function rosterBody() {
   const market = { month: "latest" };
   if ($("#ro-state").value.trim()) market.state = $("#ro-state").value.trim().toUpperCase();
   if ($("#ro-disc").value) market.discipline = $("#ro-disc").value;
-  if ($("#ro-therapy").checked) market.therapy_only = true;
+  market.peer_group = $("#ro-peer").value;
   // send an explicit limit so the CSV contains exactly the list on screen —
   // the endpoints' own defaults differ (500 vs 2000), which made the "showing
   // the first 500" note wrong for the export
@@ -632,7 +1271,7 @@ async function loadRoster() {
   if (!body.payer) { out.innerHTML = `<div class="empty">Pick a payer first.</div>`; return; }
   out.innerHTML = `<div class="loading">Finding organizations contracted with ${esc(body.payer)}</div>`;
   let d;
-  try { d = await postJson("/api/roster", body); }
+  try { d = await postJson("/api/roster", body, { view: "roster", label: "Payer roster", anchor: "#ro-run" }); }
   catch (e) { out.innerHTML = `<div class="empty"><h3>Couldn't load the roster</h3>${esc(e.message)}</div>`; return; }
   lastRosterBody = body;
   $("#ro-csv").disabled = false;
@@ -644,7 +1283,7 @@ function renderRoster(out, d) {
   // rendering a real table, or the table inherits placeholder framing
   out.classList.toggle("empty", !d.organizations.length);
   if (!d.organizations.length) {
-    out.innerHTML = `<div class="empty"><h3>No organizations found</h3>No practices publish therapy rates with ${esc(d.payer)} under the current filters. ${$("#ro-therapy").checked ? "\"Therapy only\" is on — uncheck it, or let NPI identification finish, to see more." : "Widen the state/discipline or lower min codes."}</div>`;
+    out.innerHTML = `<div class="empty"><h3>No organizations found</h3>No practices publish therapy rates with ${esc(d.payer)} under the current filters. ${$("#ro-peer").value !== "all" ? "\"Compare against\" is limited to " + $("#ro-peer").selectedOptions[0].textContent + " — choose \"all practices\", or let NPI identification finish, to see more." : "Widen the state/discipline or lower min codes."}</div>`;
     return;
   }
   const rows = d.organizations.map((o, i) => `<tr>
@@ -665,9 +1304,10 @@ function renderRoster(out, d) {
       ? ` <span class="muted">This payer's files state no publication date.</span>`
       : f.stale
         ? ` <span class="warn-text">Last published ${esc(f.published)}${
-            f.age_days != null ? ` — ${fmtInt(f.age_days)} days ago` : ""}; these rates have not been refreshed recently.</span>`
+            f.age_days != null && f.age_days >= 0 ? ` — ${fmtInt(f.age_days)} days ago` : ""}; these rates have not been refreshed recently.</span>`
         : ` <span class="muted">Last published ${esc(f.published)}${
-            f.age_days != null ? ` (${fmtInt(f.age_days)} days ago)` : ""}.</span>`;
+            f.future_dated ? " (dated in the future)"
+            : f.age_days != null ? ` (${fmtInt(f.age_days)} days ago)` : ""}.</span>`;
   out.innerHTML = `<div class="rc-summary"><b>${fmtInt(d.count)}${d.truncated ? "+" : ""}</b> organization${d.count === 1 ? "" : "s"} contracted with <b>${esc(d.payer)}</b>${d.market.state ? " in " + esc(d.market.state) : ""}${d.market.discipline ? " · " + esc(d.market.discipline) : ""}.${cap}${fresh}</div>
     <div class="muted" style="font-size:11.5px;margin:-6px 0 10px">${esc(d.note)}</div>
     <div class="tablewrap" style="max-height:calc(100vh - 220px)"><table>
@@ -696,7 +1336,11 @@ function filterQuery(extra = {}) {
   if (f.pos) p.set("pos", f.pos);
   if (f.state) p.set("state", f.state);
   if (f.city) p.set("city", f.city);
-  if (f.month) p.set("month", f.month);
+  // "latest" = each contract's newest file: the house basis every report tab
+  // uses (review 10 item 2.2 — the Explorer could not show it, and its By-code
+  // table said "the Benchmark's basis" over pooled months)
+  if (f.month === "latest") p.set("latest", "1");
+  else if (f.month) p.set("month", f.month);
   if (f.q) p.set("q", f.q);
   p.set("dollar_only", f.dollar ? "1" : "0");
   if (f.hide_tin_npi) p.set("hide_tin_npi", "1");
@@ -712,14 +1356,32 @@ async function loadRates() {
   const body = $("#rates-body");
   const stateEl = $("#rates-state");
   stateEl.innerHTML = `<div class="loading">Loading rates</div>`;
-  body.innerHTML = "";
+  // the previous rows stay, dimmed, until the new ones land: blanking them on
+  // every search left the user looking at an empty table (review 10 1.9)
+  body.classList.add("stale");
   const q = filterQuery({ sort: state.sort.col, dir: state.sort.dir, page: state.page, page_size: state.pageSize });
+  const fresh = ticket("rates");
   let data;
-  try { data = await api(`/api/rates?${q}`); }
-  catch (e) { stateEl.innerHTML = `<div class="empty"><h3>Could not load rates</h3>${esc(e.message)}</div>`; return; }
+  try { data = await api(`/api/rates?${q}`, { ...supersede("rates"), bar: { view: "explorer", label: "Rates table", keepMs: 300 } }); }
+  catch (e) {
+    if (!fresh()) return;
+    body.innerHTML = "";
+    body.classList.remove("stale");
+    // the pager must not keep describing the previous view (review 10 1.8)
+    $("#pg-label").textContent = "–";
+    $("#pg-prev").disabled = true;
+    $("#pg-next").disabled = true;
+    stateEl.innerHTML = `<div class="empty"><h3>Could not load rates</h3>${esc(e.message)}</div>`; return;
+  }
+  if (!fresh()) return;
   if (!data.total) {
-    stateEl.innerHTML = `<div class="empty"><h3>No rates match</h3>
-      Drop MRF files into <code class="inline">data/inbox/</code> or loosen the filters.</div>`;
+    body.innerHTML = "";
+    body.classList.remove("stale");
+    const why = uncoveredNote(state.filters.payers);
+    stateEl.innerHTML = data.hint
+      ? `<div class="empty"><h3>No rates match</h3>${esc(data.hint)}${why}</div>`
+      : `<div class="empty"><h3>No rates match</h3>${why ||
+      `Drop MRF files into <code class="inline">data/inbox/</code> or loosen the filters.`}</div>`;
     $("#pg-label").textContent = "–";
     $("#pg-prev").disabled = true;   // stale-enabled buttons on the old branch
     $("#pg-next").disabled = true;   // let a click page a nonexistent table
@@ -733,6 +1395,7 @@ async function loadRates() {
     return;
   }
   stateEl.innerHTML = "";
+  body.classList.remove("stale");
   body.innerHTML = data.rows.map(rateRow).join("");
   $$("tr.clickable", body).forEach((tr) =>
     tr.addEventListener("click", () => openEntity(data.grain, tr.dataset.uid)));
@@ -763,7 +1426,7 @@ function rateRow(r) {
   if (r.npi_count) sub.push(`${fmtInt(r.npi_count)} NPI${r.npi_count === 1 ? "" : "s"}`);
   if (r.tin_is_really_npi) sub.push(`<span class="warn-text" title="tin.type == 'npi': the published TIN is really an NPI">TIN=NPI</span>`);
   const variants = (r.rate_variants || 1) > 1
-    ? `<span class="variant-flag" title="this entity shows ${r.rate_variants} different rates for this tuple ($${fmtMoney(r.rate_min)}–$${fmtMoney(r.rate_max)}); the shown rate is their median">${r.rate_variants} ⚠</span>`
+    ? `<span class="variant-flag" title="this entity shows ${r.rate_variants} different rates for this tuple ($${fmtMoney(r.rate_min)}–$${fmtMoney(r.rate_max)})${Number(r.rate_min) <= 0.01 ? " — the low end is a $0/$0.01 placeholder, which the shown rate leaves out" : ""}; the shown rate is their median">${r.rate_variants} ⚠</span>`
     : `<span class="muted">1</span>`;
   return `<tr class="clickable" data-uid="${esc(r.unit_id)}">
     <td>${esc(r.display_name || "(name pending)")}<div class="sub">${sub.join(" · ")}</div></td>
@@ -775,6 +1438,7 @@ function rateRow(r) {
     <td>${esc(r.billing_class || "—")}</td>
     <td class="sub">${esc((r.service_code_set || "").replaceAll("|", ", ") || "—")}</td>
     <td class="num"><span class="rate">${money(r.negotiated_rate)}</span></td>
+    <td class="sub">${esc(r.file_month || "—")}</td>
     <td class="num">${variants}</td>
     <td>${esc(r.negotiated_type)}${r.is_dollar_rate ? "" : ` <span class="warn-text">(non-dollar)</span>`}</td>
     <td class="num">${fmtInt(r.source_count)}</td>
@@ -785,12 +1449,15 @@ function rateRow(r) {
 
 async function loadSummary() {
   const el = $("#summary-strip");
+  const fresh = ticket("summary");
+  const asked = filterQuery().toString();
   try {
-    const s = await api(`/api/summary?${filterQuery()}`);
+    const s = await api(`/api/summary?${asked}`, { ...supersede("summary"), bar: { view: "explorer", label: "Summary strip", keepMs: 300 } });
+    if (!fresh()) return;
     const stat = (k, v) => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`;
     el.innerHTML =
       stat("Rows", fmtInt(s.n)) +
-      stat(state.grain === "npi" ? "NPIs" : "Entities", fmtInt(s.entities)) +
+      stat(state.grain === "npi" ? "NPIs" : state.grain === "tin" ? "Tax IDs" : "Entities", fmtInt(s.entities)) +
       stat("Codes", fmtInt(s.codes)) +
       stat("Min", money(s.min)) +
       stat("P25", money(s.p25)) +
@@ -802,16 +1469,22 @@ async function loadSummary() {
     const note = $("#summary-strip-note");
     if (note) note.textContent =
       "Min · P25 · Median · P75 · Max span every matched code together; per-code medians are in the table below.";
-    renderByCode($("#summary-bycode"), s.by_code, s.mpfs_loaded);
+    if (Array.isArray(s.by_code) && s.by_code.length) state.lastByCode = s.by_code;
+    renderByCode($("#summary-bycode"), s.by_code, s.mpfs_loaded, s.by_code_basis,
+                 s.medicare_anchor, s.medicare_refusal);
   } catch (e) {
-    // Don't blank silently: a 503 here is almost always the summary's exact
-    // aggregates hitting the memory cap on a big unfiltered view. Say so and
-    // what to do — the same guidance loadRates gives — instead of a mystery
-    // empty strip.
-    const busy = !/memory/i.test(e.message || "");
+    if (!fresh()) return;
+    // Say what actually happened. "Busy" is a 503 from the single-flight lock
+    // (the answer is seconds away); a memory refusal needs a filter; any other
+    // refusal (e.g. the 422 "your store is large — pick a payer and a code")
+    // is shown as the server wrote it. Every error used to read "busy".
+    const memory = /memory/i.test(e.message || "");
+    const busy = e.status === 503 && !memory;
     const msg = busy
       ? "Stats are busy — retrying…"
-      : "Stats need more memory than the current limit — add a filter (payer, code, or state), or raise duckdb_memory_gb in config and restart.";
+      : memory
+        ? "Stats need more memory than the current limit — add a filter (payer, code, or state), or raise duckdb_memory_gb in config and restart."
+        : `Summary unavailable: ${e.message}`;
     el.innerHTML = `<div class="stat" style="flex:1"><div class="k">Summary</div><div class="v" style="font-size:0.8rem;font-weight:normal">${esc(msg)}</div></div>`;
     const bc = $("#summary-bycode"); if (bc) bc.innerHTML = "";
     // "busy" means another scan holds the single-flight lock, so the answer is
@@ -819,11 +1492,12 @@ async function loadSummary() {
     // has to poke a filter to clear — but only once, and only if the filter
     // hasn't moved on since (a later refresh supersedes this retry).
     if (busy && !loadSummary._retrying) {
-      const q = filterQuery();
       loadSummary._retrying = true;
       setTimeout(() => {
         loadSummary._retrying = false;
-        if (filterQuery() === q) loadSummary();
+        // compare the query STRINGS: two URLSearchParams objects are never
+        // ===, so this retry never fired and the strip said "retrying…" forever
+        if (filterQuery().toString() === asked) loadSummary();
       }, 1400);
     }
   }
@@ -832,7 +1506,7 @@ async function loadSummary() {
 // Per-code breakdown of the current filter — the strip's one blended median
 // mixes different services (97110 vs 97530), so give a real median + spread PER
 // code, with a below-Medicare flag when an MPFS anchor is loaded.
-function renderByCode(el, rows, mpfs) {
+function renderByCode(el, rows, mpfs, basis, anchor, refusal) {
   if (!el) return;
   if (!rows || rows.length < 2) { el.innerHTML = ""; return; }  // one code: strip is enough
   const body = rows.map((c) => `<tr>
@@ -843,8 +1517,9 @@ function renderByCode(el, rows, mpfs) {
     <td class="num muted">${fmtInt(c.entities)}</td></tr>`).join("");
   el.innerHTML = `<div class="ov-block"><h3>By code${mpfs ? " · ⚠ = below Medicare" : ""}</h3>
     <div class="tablewrap" style="max-height:34vh"><table>
-      <thead><tr><th>Code</th><th class="num">Median</th><th class="num">P25–P75</th>${mpfs ? `<th class="num">% of Medicare</th>` : ""}<th class="num">Practices</th></tr></thead>
-      <tbody>${body}</tbody></table></div></div>`;
+      <thead><tr><th>Code</th><th class="num">Median</th><th class="num">P25–P75</th>${mpfs ? `<th class="num">% of Medicare</th>` : ""}<th class="num">${state.grain === "npi" ? "NPIs" : "Practices"}</th></tr></thead>
+      <tbody>${body}</tbody></table></div>
+    <div class="muted" style="margin-top:4px">Per code: each ${state.grain === "npi" ? "NPI's" : "practice's"} own median first, then the spread across practices${state.filters.month === "latest" ? " — the Benchmark's basis" : state.filters.month ? ` — the published month ${esc(state.filters.month)} only` : " — POOLED over every loaded month (each payer weighted by how many of its months are loaded; pick \u201clatest\u201d for the Benchmark's basis)"}: ${esc(basis || "")}.${anchor ? ` % of Medicare vs ${esc(anchor)}.` : ""}${refusal ? ` <span class="warn-text">${esc(refusal)}</span>` : ""}</div></div>`;
 }
 
 const refresh = () => { loadRates(); loadSummary(); };
@@ -878,10 +1553,13 @@ async function initFilters() {
   // fetch — server mid-restart, transient DB lock — must NOT abort this
   // function before the export/pagination/sort listeners below are wired,
   // which left a filterless, unpaginable Explorer until a manual reload.
-  const payers = (await api("/api/payers").catch(() => null))?.payers ?? [];
+  // both pickers at once (they were fetched one after the other)
+  const monthsP = api("/api/months").catch(() => null);
+  const payersResp = await api("/api/payers").catch(() => null);
+  const payers = payersResp?.payers ?? [];
   const payerChips = $("#f-payer-chips");
   payerChips.innerHTML = payers.length
-    ? payers.map((p) => `<button class="chip" data-payer="${esc(p)}">${esc(p)}</button>`).join("")
+    ? payerChipsHtml(payersResp)
     : `<span class="muted">none ingested yet</span>`;
   payerChips.addEventListener("click", (ev) => {
     const b = ev.target.closest(".chip");
@@ -907,10 +1585,11 @@ async function initFilters() {
     refreshFromFirstPage();
   });
 
-  const months = (await api("/api/months").catch(() => null))?.months ?? [];
-  $("#f-month").innerHTML = `<option value="">all months</option>` +
-    months.map((m) => `<option>${esc(m)}</option>`).join("");
-  $("#f-month").addEventListener("change", (e) => { state.filters.month = e.target.value; refreshFromFirstPage(); });
+  const monthsResp = await monthsP;
+  $("#f-month").innerHTML = `<option value="latest">latest — each contract's newest file</option><option value="">all months (pooled)</option>` +
+    monthOptionsHtml(monthsResp);
+  $("#f-month").value = state.filters.month;
+  $("#f-month").addEventListener("change", (e) => { state.filters.month = e.target.value; state.page = 1; refresh(); });
 
   const chips = $("#f-cpt-chips");
   chips.innerHTML = codeChipsHtml();
@@ -924,8 +1603,15 @@ async function initFilters() {
 
   const bind = (id, key, ev = "change", transform = (v) => v) =>
     $(id).addEventListener(ev, debounce((e) => {
-      state.filters[key] = transform(e.target.type === "checkbox" ? e.target.checked : e.target.value);
-      refreshFromFirstPage();
+      const v = transform(e.target.type === "checkbox" ? e.target.checked : e.target.value);
+      // nothing changed (a 1-letter name, a trailing space): no request at all
+      if (v === state.filters[key] || (v === "" && !state.filters[key])) return;
+      state.filters[key] = v;
+      // review 10 1.2: a typed box already waited 300 ms for the typing to
+      // stop, and one click needs no wait — no second 280 ms timer behind it
+      // (two timers in series held every search 0.58 s before it was sent)
+      state.page = 1;
+      refresh();
     }, ev === "input" ? 300 : 0));
   bind("#f-modifier", "modifier");
   bind("#f-mod-has", "mod_has", "input");
@@ -934,7 +1620,10 @@ async function initFilters() {
   bind("#f-pos", "pos");
   bind("#f-state", "state", "input", (v) => v.trim());
   bind("#f-city", "city", "input", (v) => v.trim());
-  bind("#f-q", "q", "input", (v) => v.trim());
+  bind("#f-q", "q", "input", (v) => {
+    const t = v.trim();
+    return t.length < 2 && !/^\d+$/.test(t) ? "" : t;
+  });
   bind("#f-rate-min", "rate_min", "input");
   bind("#f-rate-max", "rate_max", "input");
   bind("#f-dollar", "dollar");
@@ -944,7 +1633,7 @@ async function initFilters() {
 
   $("#f-clear").addEventListener("click", () => {
     state.filters = { payers: [], cpts: [], disciplines: [], modifier: "", mod_has: "", mod_not: "",
-      billing_class: "", pos: "", state: "", city: "", month: "", q: "",
+      billing_class: "", pos: "", state: "", city: "", month: "latest", q: "",
       dollar: true, hide_tin_npi: false, hide_outliers: false, therapy_only: false,
       rate_min: "", rate_max: "" };
     // Explorer chips ONLY — a document-wide ".chip.on" sweep also wiped the
@@ -953,7 +1642,8 @@ async function initFilters() {
     $$("#f-payer-chips .chip.on, #f-cpt-chips .chip.on, #f-disc-chips .chip.on")
       .forEach((c) => c.classList.remove("on"));
     ["#f-modifier", "#f-mod-has", "#f-mod-not", "#f-class", "#f-pos", "#f-state", "#f-city",
-     "#f-q", "#f-rate-min", "#f-rate-max", "#f-month"].forEach((id) => ($(id).value = ""));
+     "#f-q", "#f-rate-min", "#f-rate-max"].forEach((id) => ($(id).value = ""));
+    $("#f-month").value = "latest";
     $("#f-dollar").checked = true;
     $("#f-hidetinnpi").checked = false;
     $("#f-outliers").checked = false;
@@ -961,15 +1651,15 @@ async function initFilters() {
     refreshFromFirstPage();
   });
   $("#btn-export").addEventListener("click", () => {
-    location.href = `/api/export.csv?${filterQuery({ sort: state.sort.col, dir: state.sort.dir, view: "explorer" })}`;
+    downloadInFrame(`/api/export.csv?${filterQuery({ sort: state.sort.col, dir: state.sort.dir, view: "explorer" })}`, { view: "explorer", label: "Export CSV", anchor: "#btn-export" });
   });
   $("#btn-export-zip").addEventListener("click", () => {
-    location.href = `/api/export.zip?${filterQuery({ sort: state.sort.col, dir: state.sort.dir, view: "explorer" })}`;
+    downloadInFrame(`/api/export.zip?${filterQuery({ sort: state.sort.col, dir: state.sort.dir, view: "explorer" })}`, { view: "explorer", label: "Export + methodology", anchor: "#btn-export-zip" });
   });
   $("#btn-outreach").addEventListener("click", () => {
     // .zip: the outreach CSV + its methodology sidecar together (comment lines
     // inside the CSV itself would break the mail-merge import it exists for)
-    location.href = `/api/export/outreach.zip?${filterQuery()}`;
+    downloadInFrame(`/api/export/outreach.zip?${filterQuery()}`, { view: "explorer", label: "Outreach file", anchor: "#btn-outreach" });
   });
 
   $$("#rates-table thead th[data-sort]").forEach((th) =>
@@ -1005,12 +1695,15 @@ async function openEntity(grain, unitId) {
   drawer.classList.add("open"); overlay.classList.add("open");
   overlay.onclick = closeDrawer;
   let d;
-  try { d = await api(`/api/entity/${grain}/${encodeURIComponent(unitId)}`); }
+  const isFresh = ticket("drawer");
+  try { d = await api(`/api/entity/${grain}/${encodeURIComponent(unitId)}`, { bar: { view: "explorer", label: "Practice details", keepMs: 300 } }); }
   catch (e) {
+    if (!isFresh()) return;
     drawer.innerHTML = `<button class="close">×</button><div class="empty">${esc(e.message)}</div>`;
     $(".close", drawer).onclick = closeDrawer;
     return;
   }
+  if (!isFresh()) return;
   const payers = [...new Set(d.rates.map((r) => r.payer))];
   const tinsHtml = d.tins.length ? `
     <h3>Constituent TIN${d.tins.length === 1 ? "" : "s"}</h3>
@@ -1050,7 +1743,7 @@ async function openEntity(grain, unitId) {
     ${siteHtml}
     ${varianceNote}
     ${medicareGlanceHtml(d.medicare)}
-    <h3>Median dollar rate by code${payers.length > 1 ? " and payer" : ""}</h3>
+    <h3>Current rate by code${payers.length > 1 ? " and payer" : ""} <span class="muted" style="font-size:12px;font-weight:400">each contract's newest file · professional · base modifiers</span></h3>
     ${payers.length > 1 ? `<div class="legend">${payers.slice(0, 2).map((p, i) =>
       `<span><span class="sw" style="background:var(--accent${i ? "-2" : ""})"></span>${esc(p)}</span>`).join("")}</div>` : ""}
     <div id="entity-chart"></div>
@@ -1059,13 +1752,14 @@ async function openEntity(grain, unitId) {
     <h3>All rates</h3>
     <div class="tablewrap" style="max-height:36vh">
       <table>
-        <thead><tr><th>Code</th><th>Payer</th><th>Mods</th><th>Class</th><th>Month</th><th>Type</th><th class="num">Rate</th><th class="num">Var.</th></tr></thead>
+        <thead><tr><th>Code</th><th>Payer</th><th>Mods</th><th>Class</th><th>POS</th><th>Month</th><th>Type</th><th class="num">Rate</th><th class="num">Var.</th></tr></thead>
         <tbody>${d.rates.map((r) => `
           <tr>
             <td>${esc(r.billing_code)}<div class="sub">${esc(state.catalog[r.billing_code]?.description || "")}</div></td>
             <td>${esc(r.payer)}</td>
             <td>${modTags(r.modifier_set)}</td>
             <td>${esc(r.billing_class || "—")}</td>
+            <td class="sub">${esc(String(r.service_code_set || "—").replaceAll("|", ", "))}</td>
             <td class="sub">${esc(r.file_month || "")}</td>
             <td>${esc(r.negotiated_type)}${r.is_dollar_rate ? "" : ' <span class="warn-text">(non-dollar)</span>'}</td>
             <td class="num"><span class="rate">${money(r.negotiated_rate)}</span></td>
@@ -1151,11 +1845,15 @@ function renderHistogram(el, hist, code) {
   if (!hist.length) { el.innerHTML = ""; return; }
   const maxN = Math.max(...hist.map((b) => b.n));
   const w = Math.min(1200, Math.max(560, hist.length * 44));
-  const left = 40, bottom = 26, top = 12, h = 190;
+  // the gutter fits the widest count label: a fixed 40 px cut "10,000" to
+  // "0,000" (text-anchor end at x = 34 runs off the left edge)
+  const ticks = niceTicks(maxN, 3);
+  const widest = Math.max(1, ...ticks.map((t) => fmtInt(t).length));
+  const left = Math.max(40, 14 + widest * 7), bottom = 26, top = 12, h = 190;
   const bw = (w - left - 16) / hist.length;
   const y = (n) => top + (1 - n / maxN) * (h - top - bottom);
   let svg = `<svg class="chart" viewBox="0 0 ${w} ${h}" role="img" aria-label="rate distribution for ${esc(code)}" style="max-width:${w}px">`;
-  for (const t of niceTicks(maxN, 3)) {
+  for (const t of ticks) {
     svg += `<line class="grid-line" x1="${left}" y1="${y(t)}" x2="${w - 10}" y2="${y(t)}"/>` +
            `<text class="lbl" x="${left - 6}" y="${y(t) + 4}" text-anchor="end">${fmtInt(t)}</text>`;
   }
@@ -1209,6 +1907,7 @@ function initCptView() {
     if (b) selectCpt(b.dataset.cpt);
   });
   $("#cpt-base-only").addEventListener("change", () => state.cptSelected && selectCpt(state.cptSelected));
+  $("#cpt-class").addEventListener("change", () => state.cptSelected && selectCpt(state.cptSelected));
   // comparing rates across states is misleading (a MO rate vs a NY rate are
   // different markets) — let the user scope the comparison to one state
   const cptState = $("#cpt-state-filter");
@@ -1226,44 +1925,77 @@ function initCptView() {
     // export must be too — inheriting the Explorer tab's grain toggle emitted
     // NPI-grain rows that didn't match the table the user was looking at.
     const p = new URLSearchParams({ cpt: state.cptSelected, view: `code_${state.cptSelected}`,
-      grain: "tin", sort: "negotiated_rate", dir: "desc" });
+      grain: "tin", sort: "negotiated_rate", dir: "desc", latest: "1" });
     if ($("#cpt-base-only").checked) p.set("modifier", "base");
+    if ($("#cpt-class").value) p.set("billing_class", $("#cpt-class").value);
     if (cptState.value.trim()) p.set("state", cptState.value.trim().toUpperCase());
-    location.href = `/api/export.zip?${p}`;
+    downloadInFrame(`/api/export.zip?${p}`, { view: "cpt", label: "Code export", anchor: "#cpt-export" });
   });
 }
+
+// The Code page's in-flight request. A newer click (another code, the state
+// box, the base-only toggle) aborts it: the old answer can never land under
+// the new code's heading, and the browser stops waiting on it at once.
+let cptCtl = null;
 
 async function selectCpt(code) {
   state.cptSelected = code;
   $$("#cpt-chips .chip").forEach((c) => c.classList.toggle("on", c.dataset.cpt === code));
+  if (cptCtl) cptCtl.abort();
+  const ctl = new AbortController();
+  cptCtl = ctl;
+  const current = () => cptCtl === ctl;
+  // a FINISHED request releases the gate (it stayed set for ever, so the
+  // Code page never refreshed when names or data arrived)
+  const done = () => { if (cptCtl === ctl) cptCtl = null; };
   const body = $("#cpt-body"), stateEl = $("#cpt-state");
+  const cptState = $("#cpt-state-filter").value.trim();
+  const info = state.catalog[code] || {};
+  const heading = (asOf) =>
+    `Which entities get paid most for ${code}${info.description ? " — " + info.description : ""}` +
+    (cptState ? ` · ${cptState}` : "") +
+    (info.timed ? " (timed 15-min units)" : "") +
+    (asOf === "latest" ? " · newest file per contract" : (asOf ? ` · ${asOf}` : ""));
+  // every section says it is loading THIS code — nothing from the previous
+  // code stays on screen under the new heading while the answer is on its way
+  $("#view-cpt h2").textContent = heading(null);
   body.innerHTML = "";
   stateEl.innerHTML = `<div class="loading">Loading ${esc(code)}</div>`;
-  const cptState = $("#cpt-state-filter").value.trim();
+  $("#cpt-payer-rank").innerHTML = `<div class="loading">Payers for ${esc(code)}</div>`;
+  $("#cpt-hist").innerHTML = "";
+  $("#cpt-trend").innerHTML = "";
   const p = new URLSearchParams({ grain: "tin" });
   if ($("#cpt-base-only").checked) p.set("modifier", "base");
+  // one claim type at a time: with "base rates only" the ranking led with
+  // hospital institutional lines ($870, $794 …) above every practice
+  const cls = $("#cpt-class").value;
+  if (cls) p.set("billing_class", cls);
   if (cptState) p.set("state", cptState);
   const trendP = new URLSearchParams({ cpt: code, grain: "tin" });
   if ($("#cpt-base-only").checked) trendP.set("modifier", "base");
+  if (cls) trendP.set("billing_class", cls);
   if (cptState) trendP.set("state", cptState);
-  let d, trend;
+  // both start now; the ranking renders the moment it lands and the
+  // month-by-month table fills in after — never one waiting on the other
+  const trendReq = api(`/api/trend?${trendP}`, { signal: ctl.signal }).catch(() => null);
+  let d;
   try {
-    [d, trend] = await Promise.all([
-      api(`/api/code/${code}?${p}`),
-      api(`/api/trend?${trendP}`),
-    ]);
-  } catch (e) { stateEl.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
-  const info = state.catalog[code] || {};
-  $("#view-cpt h2").textContent =
-    `Which entities get paid most for ${code}${info.description ? " — " + info.description : ""}` +
-    (cptState ? ` · ${cptState}` : "") +
-    (info.timed ? " (timed 15-min units)" : "");
-  renderPayerRank($("#cpt-payer-rank"), d.payer_rank, d.mpfs_rate);
+    d = await api(`/api/code/${code}?${p}`, { signal: ctl.signal, bar: { view: "cpt", label: "Code comparison", keepMs: 300 } });
+  } catch (e) {
+    if (!current()) return;            // superseded by a newer click (it owns the gate)
+    $("#cpt-payer-rank").innerHTML = "";
+    stateEl.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+    return done();
+  }
+  if (!current()) return;
+  $("#view-cpt h2").textContent = heading(d.as_of);
+  renderPayerRank($("#cpt-payer-rank"), d.payer_rank, d.mpfs_rate, d.payer_rank_basis,
+                  d.medicare_anchor, d.medicare_refusal);
   renderHistogram($("#cpt-hist"), d.histogram, code);
-  renderTrend($("#cpt-trend"), trend.rows);
+  trendReq.then((trend) => { if (current() && trend) renderTrend($("#cpt-trend"), trend.rows); });
   if (!d.ranked.length) {
     stateEl.innerHTML = `<div class="empty"><h3>No rates for ${esc(code)} under these filters</h3></div>`;
-    return;
+    return done();
   }
   stateEl.innerHTML = "";
   body.innerHTML = d.ranked.map((r, i) => `
@@ -1279,10 +2011,11 @@ async function selectCpt(code) {
       <td class="num">$${fmtMoney(r.max_rate)}</td>
     </tr>`).join("");
   $$("tr.clickable", body).forEach((tr) => tr.addEventListener("click", () => openEntity("tin", tr.dataset.uid)));
+  done();
 }
 
 // Payer leaderboard for one code: who pays best, with spread + confidence.
-function renderPayerRank(el, rows, mpfsRate) {
+function renderPayerRank(el, rows, mpfsRate, basis, anchor, refusal) {
   if (!el) return;
   if (!rows || !rows.length) { el.innerHTML = ""; return; }
   const mp = rows.some((r) => r.pct_medicare != null);
@@ -1300,7 +2033,7 @@ function renderPayerRank(el, rows, mpfsRate) {
     <div class="tablewrap" style="max-height:34vh"><table>
       <thead><tr><th>Payer</th><th class="num">Median</th><th class="num">P25–P75</th>${mp ? `<th class="num">% of Medicare</th>` : ""}<th class="num">Practices</th></tr></thead>
       <tbody>${body}</tbody></table></div>
-    <div class="muted" style="margin-top:4px">One row per payer — the median across the distinct practices it prices for this code. ⚠ marks a thin sample (&lt;5 practices).</div></div>`;
+    <div class="muted" style="margin-top:4px">One row per payer — the median across the distinct practices it prices for this code (each practice's own median first; same basis as the Benchmark: ${esc(basis || "")}).${anchor ? ` Medicare = ${esc(anchor)}.` : ""}${refusal ? ` <span class="warn-text">${esc(refusal)}</span>` : ""} ⚠ marks a thin sample (&lt;5 practices).</div></div>`;
 }
 
 function renderTrend(el, rows) {
@@ -1384,8 +2117,7 @@ async function initBenchmark() {
   if (subjects) $("#b-subjects").innerHTML = subjectOptionsHtml(subjects);
   wireSubjectSearch("#b-subject", "#b-subjects");
   fillMonthSelect("#b-month", months, LATEST_MONTH_OPT);
-  if (payers) $("#b-payer-chips").innerHTML = payers.payers.map((p) =>
-    `<button class="chip" data-payer="${esc(p)}">${esc(p)}</button>`).join("");
+  if (payers) $("#b-payer-chips").innerHTML = payerChipsHtml(payers);
   state.plans = plans;
   renderPlanField();
   $("#b-payer-chips").addEventListener("click", (ev) => {
@@ -1425,7 +2157,7 @@ async function initBenchmark() {
   });
   $("#b-run").addEventListener("click", runBenchmark);
   $("#b-vol-medicare").addEventListener("click", () =>
-    fillVolumesFromMedicare("#b-subject", "#b-volumes", "#b-vol-msg", "#b-vol-mult"));
+    fillVolumesFromMedicare("#b-subject", "#b-volumes", "#b-vol-msg", "#b-vol-mult", "#b-state"));
   $("#b-report").addEventListener("click", async () => {
     try { await openPitchReport(); }
     catch (e) { alert(`could not build the report: ${e.message}`); }
@@ -1444,7 +2176,7 @@ async function runContractGaps() {
   catch (e) { el.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
   el.innerHTML = `<div class="loading">Finding contract gaps</div>`;
   let d;
-  try { d = await postJson("/api/contract-gaps", { subject: payload.subject, market: payload.market }); }
+  try { d = await postJson("/api/contract-gaps", { subject: payload.subject, market: payload.market }, { view: "benchmark", label: "Contract gaps", anchor: "#b-gaps-run" }); }
   catch (e) { el.innerHTML = `<div class="empty">Couldn't find gaps (${esc(e.message)}).</div>`; return; }
   if (!d.count) {
     el.innerHTML = `<div class="ov-block"><h3>Contract gaps</h3><div class="muted">No codes found that ≥${d.min_peers} peers price and ${esc(d.subject)} doesn't — the subject is priced on everything its peers are (under this market basis).</div></div>`;
@@ -1522,20 +2254,14 @@ function benchmarkPayload() {
     billing_class: $("#b-class").value,
     target_percentile: +$("#b-target").value,
   };
-  if ($("#b-therapy").checked) market.therapy_only = true;
+  market.peer_group = $("#b-peer").value;
   if ($("#b-disc").value) market.discipline = $("#b-disc").value;
   if ($("#b-state").value.trim()) market.state = $("#b-state").value.trim();
   if ($("#b-city").value.trim()) market.city = $("#b-city").value.trim();
   if ($("#b-pos").value) market.pos = $("#b-pos").value;
   if ($("#b-peerset").value) market.peer_set = $("#b-peerset").value;
   if ($("#b-plan") && $("#b-plan").value) market.plan = $("#b-plan").value;
-  const volumes = {};
-  for (const line of $("#b-volumes").value.split(/\n+/)) {
-    const m = line.split(/[,\t]/).map((s) => s.trim());
-    // require a non-empty numeric second field: "97110," -> +"" === 0, which
-    // would silently record 0 units instead of skipping the malformed line
-    if (m.length >= 2 && m[0] && m[1] !== "" && !isNaN(+m[1])) volumes[m[0]] = +m[1];
-  }
+  const volumes = parseVolumes("#b-volumes", "#b-vol-msg") || {};
   return { subject, market, volumes };
 }
 
@@ -1551,11 +2277,16 @@ async function runBenchmark() {
   catch (e) { out.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
   out.innerHTML = `<div class="loading">Computing benchmark</div>`;
   let data;
+  const isFresh = ticket("benchmark");
   try {
     data = Object.keys(payload.volumes).length
-      ? await postJson("/api/benchmark/opportunity", payload)
-      : { benchmark: await postJson("/api/benchmark/market", payload) };
-  } catch (e) { out.innerHTML = `<div class="empty"><h3>Benchmark failed</h3>${esc(e.message)}</div>`; return; }
+      ? await postJson("/api/benchmark/opportunity", payload, { view: "benchmark", label: "Benchmark", anchor: "#b-run" })
+      : { benchmark: await postJson("/api/benchmark/market", payload, { view: "benchmark", label: "Benchmark", anchor: "#b-run" }) };
+  } catch (e) {
+    if (!isFresh()) return;
+    out.innerHTML = `<div class="empty"><h3>Benchmark failed</h3>${esc(e.message)}</div>`; return;
+  }
+  if (!isFresh()) return;
   state.lastBenchmarkPayload = payload;
   $("#b-report").disabled = false;
   $("#b-negotiation").disabled = false;
@@ -1633,7 +2364,7 @@ function renderBenchmark(out, bench, opp) {
       <tbody>${rows}</tbody></table></div>
     ${oppHtml}
     <div id="b-quality"></div>
-    <div class="bench-note">${esc(bench.basis_note)}${spreadNote} Ghost rates: a published rate does not mean a
+    <div class="bench-note">${esc(bench.basis_note)}${bench.mpfs_source ? ` % of Medicare vs ${esc(bench.mpfs_source)}.` : ""}${bench.mpfs_refusal ? ` <span class="warn-text">${esc(bench.mpfs_refusal)}</span>` : ""}${spreadNote} Ghost rates: a published rate does not mean a
     peer bills that code — scoping the market to a discipline or code list mitigates this
     (the market definition above shows which filters were actually applied). A published rate
     is not proof a peer collects it — this is directional market positioning.</div>`;
@@ -1670,7 +2401,7 @@ async function renderBenchmarkQuality(payload) {
     <h3>"Aren't the practices above us just bigger?"</h3>
     <div class="muted" style="margin-bottom:6px">${esc(size?.headline || "")}</div>
     ${bandRows ? `<div class="tablewrap"><table>
-      <thead><tr><th>Practice size</th><th class="num">Typical position</th>
+      <thead><tr><th>Practice size</th><th class="num" title="the median, across the practices of that size, of each one's average position within each payer (a different measure from a practice's overall position)">Typical within-payer position</th>
       <th class="num">Median rate</th><th class="num">Practices</th></tr></thead>
       <tbody>${bandRows}</tbody></table></div>` : ""}
     ${typeWarn}
@@ -1696,45 +2427,147 @@ function reportPayloadOrConfirmNational() {
   return { ...p, market: { ...m, allow_national: true } };
 }
 
-async function openReportWith(url, payload) {
+// The detail sentence of a refused request (FastAPI {"detail": …}), never
+// the raw JSON wrapper.
+async function refusalText(r) {
+  const raw = await r.text();
+  try { const j = JSON.parse(raw); return j.detail || j.error || raw; } catch (_) { return raw; }
+}
+
+// A GET export (CSV/ZIP, possibly many GB): the browser still streams it
+// straight to disk — no in-memory blob — through a hidden frame. A download
+// never "loads" the frame; a REFUSAL does (a JSON page), and its sentence is
+// shown here. `location.href` replaced the whole dashboard with
+// {"detail": …} and the user had to press Back (round 7 P1.21).
+function downloadInFrame(url, bar) {
+  const f = document.createElement("iframe");
+  f.style.display = "none";
+  if (bar) {
+    // the page cannot see a frame's bytes arrive: the bar ends at "built —
+    // your browser is downloading it" when the server finished the file
+    const token = newToken();
+    url += (url.includes("?") ? "&" : "?") + "progress=" + token;
+    const jb = mountJobbar(bar, token);
+    const poll = startPoll(token, jb, bar, (s) => {
+      poll.stop();
+      if (s.state === "done") jb.built(); else if (s.state === "stopped") jb.stopped(); else jb.failed("not built");
+    });
+    setTimeout(() => poll.stop(), 6 * 3600 * 1000);
+  }
+  f.addEventListener("load", () => {
+    let text = "";
+    try { text = (f.contentDocument && f.contentDocument.body) ? f.contentDocument.body.innerText : ""; }
+    catch (_) { text = ""; }
+    if (text && text.trim()) {
+      let msg = text;
+      try { const j = JSON.parse(text); msg = j.detail || j.error || text; } catch (_) { /* plain text */ }
+      // the user pressed Stop: the bar already says "stopped" — no alert
+      // (review 14 Group 3, P3)
+      if (String(msg).trim().toLowerCase() !== "stopped") alert("The export was not built.\n\n" + msg);
+    }
+    setTimeout(() => f.remove(), 1000);
+  });
+  f.src = url;
+  document.body.appendChild(f);
+}
+
+// "Save as PDF" (review 13 Group 6.1): every printable button gets a twin
+// that runs the SAME handler with this set, so the PDF is built from exactly
+// the payload the printable page would be — openReportWith then downloads
+// `?format=pdf` instead of opening a tab. Set and cleared around a
+// synchronous .click(): every handler reaches openReportWith before its
+// first await. A window property, not a module `let`: openReportWith is
+// also lifted alone into test pages (tests/mrfx/test_round7.py).
+window.mrfxPdfBase = null;
+const PDF_REPORTS = [
+  ["#b-report", "pitch_report"], ["#b-negotiation", "negotiation_one_pager"],
+  ["#ng-report", "payer_comparison"], ["#ng-proposal-report", "rate_proposal"],
+  ["#rc-report", "rate_card"], ["#vv-report", "visit_value"],
+  ["#ds-run", "practice_profile"], ["#mr-run", "market_report"],
+];
+function initPdfButtons() {
+  for (const [sel, base] of PDF_REPORTS) {
+    const main = $(sel);
+    if (!main || document.getElementById(main.id + "-pdf")) continue;
+    const b = document.createElement("button");
+    b.className = "btn pdf-twin"; b.id = main.id + "-pdf"; b.type = "button";
+    // the twin must not squeeze its row into three-line buttons: the row
+    // wraps and both buttons keep their words on one line
+    const row = main.parentElement;
+    if (row && getComputedStyle(row).display === "flex") row.style.flexWrap = "wrap";
+    main.style.whiteSpace = "nowrap";
+    b.textContent = "Save as PDF";
+    b.title = "The same report as a PDF file (printed by the built-in browser)";
+    b.disabled = main.disabled;
+    main.insertAdjacentElement("afterend", b);
+    new MutationObserver(() => { b.disabled = main.disabled; })
+      .observe(main, { attributes: true, attributeFilter: ["disabled"] });
+    b.addEventListener("click", () => {
+      window.mrfxPdfBase = base;
+      try { main.click(); } finally { window.mrfxPdfBase = null; }
+    });
+  }
+}
+
+async function openReportWith(url, payload, onError, bar) {
   if (!payload) return;  // e.g. national-confirm cancelled
+  if (window.mrfxPdfBase) {
+    const name = `${window.mrfxPdfBase}_${new Date().toISOString().slice(0, 10)}.pdf`;
+    const pb = bar ? { ...bar, label: bar.label + " (PDF)" } : bar;
+    await postDownload(url + (url.includes("?") ? "&" : "?") + "format=pdf", payload, name, pb);
+    return null;
+  }
+  const fail = (msg) => (onError ? onError(msg) : alert("Can't build this report.\n\n" + msg));
   // Open the tab SYNCHRONOUSLY, still inside the click's user-activation window
   // (any confirm() before this call is synchronous, so activation is preserved).
   // If we waited until after the await, a slow server render would push
   // window.open past the activation window and the browser would silently
   // block the popup — the report would just never appear.
   const w = window.open("about:blank", "_blank");
+  let jb = null, poll = null;
+  const headers = { "Content-Type": "application/json" };
+  if (bar) {
+    const token = newToken();
+    headers["X-Mrfx-Progress"] = token;
+    const b = { ...bar, tab: w };
+    jb = mountJobbar(b, token);
+    poll = startPoll(token, jb, b);
+  }
   try {
     const r = await fetch(url, {
-      method: "POST", headers: { "Content-Type": "application/json" },
+      method: "POST", headers,
       body: JSON.stringify(payload),
     });
+    if (poll) poll.stop();
     if (!r.ok) {
+      if (jb) { if (r.status === 409) jb.stopped(); else jb.failed("not built"); }
       if (w) w.close();
+      if (r.status === 409) return null;
       // The refusals here are deliberate, plain-language guards (no state
       // scope, no rates for this subject) that the user is meant to ACT on —
       // so show the message, not the raw {"detail": …} JSON wrapper.
-      const raw = await r.text();
-      let msg = raw;
-      try { msg = JSON.parse(raw).detail || raw; } catch (_) { /* not JSON */ }
-      alert("Can't build this report.\n\n" + msg);
+      fail(await refusalText(r));
       return;
     }
     const objUrl = URL.createObjectURL(await r.blob());
+    if (jb) jb.done();                // 100 %: the page is in hand
     if (w) w.location = objUrl; else window.location = objUrl;  // popup blocked -> same tab
     setTimeout(() => URL.revokeObjectURL(objUrl), 60000);  // let the tab load, then free it
+    return r;
   } catch (e) {
+    if (poll) poll.stop();
+    if (jb) jb.failed("the server restarted — run it again");
     if (w) w.close();
-    alert("report failed: " + e.message);
+    fail("report failed: " + e.message);
   }
 }
 
 async function openPitchReport() {
-  await openReportWith("/api/report/pitch", reportPayloadOrConfirmNational());
+  await openReportWith("/api/report/pitch", reportPayloadOrConfirmNational(), null, { view: "benchmark", label: "Pitch report", anchor: "#b-report" });
 }
 
 async function openNegotiationReport() {
-  await openReportWith("/api/report/negotiation", reportPayloadOrConfirmNational());
+  await openReportWith("/api/report/negotiation", reportPayloadOrConfirmNational(), null, { view: "benchmark", label: "Negotiation one-pager", anchor: "#b-negotiation" });
 }
 
 /* =======================================================================
@@ -1747,8 +2580,8 @@ async function initNegotiate() {
   if (state.ngInited) {
     // re-entry: refresh pickers like every sibling tab — a payer/month/org
     // ingested since the first open must show up without a page reload
-    refreshSubjectPickers("#ng-subjects", [{ sel: "#ng-month", prefix: LATEST_MONTH_OPT }]);
-    refreshSubjectPickers("#ng-comps", []);
+    refreshSubjectPickers("#ng-subjects", [{ sel: "#ng-month", prefix: LATEST_MONTH_OPT }])
+      .then(() => { $("#ng-comps").innerHTML = $("#ng-subjects").innerHTML; });
     api("/api/payers").then((p) => {
       const el = $("#ng-payer"); const cur = el.value;
       el.innerHTML = `<option value="">— pick a payer —</option>` +
@@ -1796,7 +2629,7 @@ async function initNegotiate() {
   });
   $("#ng-run").addEventListener("click", runNegotiate);
   $("#ng-vol-medicare").addEventListener("click", () =>
-    fillVolumesFromMedicare("#ng-subject", "#ng-volumes", "#ng-vol-msg"));
+    fillVolumesFromMedicare("#ng-subject", "#ng-volumes", "#ng-vol-msg", null, "#ng-state"));
   $("#ng-target").addEventListener("change", () => {
     $("#ng-target-pct").style.display =
       $("#ng-target").value === "pct_medicare" ? "" : "none";
@@ -1810,7 +2643,7 @@ async function initNegotiate() {
       if (!confirm("No state set — the proposal will pool every loaded state into one national comparison. Continue?")) return;
       p.market.allow_national = true;
     }
-    openReportWith("/api/report/proposal", p);
+    openReportWith("/api/report/proposal", p, null, { view: "negotiate", label: "Printable proposal", anchor: "#ng-proposal-report" });
   });
   $("#ng-report").addEventListener("click", () => {
     if (!state.lastNegotiatePayload) return;
@@ -1820,7 +2653,7 @@ async function initNegotiate() {
       if (!confirm("No state set — the report will pool every loaded state into one national comparison. Continue?")) return;
       p.market.allow_national = true;  // on the COPY: next click re-confirms
     }
-    openReportWith("/api/report/payer-compare", p);
+    openReportWith("/api/report/payer-compare", p, null, { view: "negotiate", label: "Printable report", anchor: "#ng-report" });
   });
 }
 
@@ -1833,13 +2666,9 @@ function proposalPayload() {
   const p = negotiatePayload();
   p.target = { kind: $("#ng-target").value };
   if (p.target.kind === "pct_medicare") p.target.value = Number($("#ng-target-pct").value);
-  // "97110, 4200" per line — same format as the Benchmark tab's volumes box
-  const vols = {};
-  $("#ng-volumes").value.split("\n").forEach((line) => {
-    const m = line.match(/^\s*([A-Za-z0-9]+)\s*[,;\t ]\s*([\d,.]+)\s*$/);
-    if (m) vols[m[1].toUpperCase()] = Number(m[2].replace(/,/g, ""));
-  });
-  if (Object.keys(vols).length) p.volumes = vols;
+  // "97110, 4200" per line — the same reader as every other volumes box
+  const vols = parseVolumes("#ng-volumes", "#ng-vol-msg");
+  if (vols) p.volumes = vols;
   return p;
 }
 
@@ -1851,7 +2680,7 @@ async function runProposal() {
   out.classList.remove("empty");
   out.innerHTML = `<div class="loading">Building the proposal</div>`;
   let d;
-  try { d = await postJson("/api/negotiate/proposal", payload); }
+  try { d = await postJson("/api/negotiate/proposal", payload, { view: "negotiate", label: "Proposal", anchor: "#ng-proposal-run" }); }
   catch (e) { out.innerHTML = `<div class="empty"><h3>Could not build</h3>${esc(e.message)}</div>`; return; }
   const s = d.summary;
   const rows = d.rows.map((r) => `<tr>
@@ -1866,12 +2695,22 @@ async function runProposal() {
   out.innerHTML = `
     <div class="rc-summary">Proposal basis: <b>${esc(d.target.label)}</b> — ${s.n_raised} of ${s.n_codes}
       codes raised, ${s.n_kept} kept${s.n_no_reference ? `, ${s.n_no_reference} with no reference rate` : ""}.
-      ${s.total_annual_value != null ? `At your volumes this ask is worth <b>${money(s.total_annual_value)}</b>/yr.` : ""}
+      ${s.total_annual_value != null ? `At your volumes this ask is worth <b>${money(s.total_annual_value)}</b>/yr <span class="muted">(every unit counted as billed to ${esc(d.payer)} — scale by its share of your volume)</span>.` : ""}
       Proposed rates never fall below current.</div>
     <div class="tablewrap"><table class="rc-table"><thead><tr>
       <th>Code</th><th class="num">Current</th><th class="num">Proposed</th>
       <th class="num">Change</th><th class="num">Units/yr</th><th class="num">Value/yr</th>
     </tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+// the Negotiate tab's market for every panel on it — the leverage and "what a
+// visit is worth" panels sent month + therapy only, so a name used in two
+// states was the wrong practice there (review 10 item 2.9)
+function ngMarket() {
+  const market = { month: $("#ng-month").value || "latest", peer_group: $("#ng-peer").value };
+  if ($("#ng-state").value.trim()) market.state = $("#ng-state").value.trim().toUpperCase();
+  if ($("#ng-disc").value) market.discipline = $("#ng-disc").value;
+  return market;
 }
 
 function negotiatePayload() {
@@ -1880,10 +2719,74 @@ function negotiatePayload() {
   const month = $("#ng-month").value || "latest"; // empty = newest rate per contract
   if (!subject) throw new Error("enter your practice (subject)");
   if (!payer) throw new Error("pick the payer you're negotiating with");
-  const market = { month, therapy_only: $("#ng-therapy").checked };
+  const market = { month, peer_group: $("#ng-peer").value };
   if ($("#ng-state").value.trim()) market.state = $("#ng-state").value.trim().toUpperCase();
   if ($("#ng-disc").value) market.discipline = $("#ng-disc").value;
   return { subject, payer, market, comparables: state.ngComps.slice() };
+}
+
+// The named clinics this payer pays more for the same codes (0.8.6) — the
+// evidence a rate request cites. City first (5+ comparable clinics), else state.
+async function loadPaidMore(payload) {
+  const box = $("#ng-paidmore");
+  // a newer Compare (another payer) wins: a slow answer for the previous
+  // one must not land under the new results
+  const seq = (state.paidMoreSeq = (state.paidMoreSeq || 0) + 1);
+  box.innerHTML = `<div class="loading">Finding the clinics ${esc(payload.payer)} pays more</div>`;
+  let d;
+  try { d = await postJson("/api/negotiate/paid-more", payload); }
+  catch (e) {
+    if (seq === state.paidMoreSeq) box.innerHTML = `<div class="muted">Clinics paid more: ${esc(e.message)}</div>`;
+    return;
+  }
+  if (seq !== state.paidMoreSeq) return;
+  const codes = d.codes.map((c) => `<tr><td><b>${esc(c.code)}</b> <span class="sub">${esc(c.description || "")}</span></td>
+      <td class="num">${money(c.your_rate)}</td><td class="num">${c.median == null ? "–" : money(c.median)}</td>
+      <td class="num">${c.highest == null ? "–" : money(c.highest)}</td>
+      <td class="num">${fmtInt(c.paid_more)} <span class="sub">of ${fmtInt(c.practices)}</span></td></tr>`).join("");
+  const rows = d.clinics.map((x) => {
+    const where = (x.cities || []).join(", ");
+    const tag = NAME_SOURCE_TAG[x.name_source] ? ` <span class="sub">· ${esc(NAME_SOURCE_TAG[x.name_source])}</span>` : "";
+    // the biggest gaps first; the CSV carries every code
+    const paid = x.rates.filter((r) => r.gap > 0).sort((a, b) => b.gap - a.gap || (a.code < b.code ? -1 : 1));
+    const rates = paid.slice(0, 8)
+      .map((r) => `${esc(r.code)} ${money(r.rate)} <span class="peer-up">+${money(r.gap)}</span>`).join(" · ")
+      + (paid.length > 8 ? ` · <i>+${paid.length - 8} more in the CSV</i>` : "");
+    return `<tr><td class="num">${x.rank}</td>
+      <td style="white-space:normal"><b title="${esc(x.type_reason || "")}">${esc(x.name)}</b>${tag}<div class="sub">${esc(where)}</div>
+        ${rates ? `<div class="sub" style="margin-top:3px">Paid more: ${rates}</div>` : ""}</td>
+      <td>${esc(x.tin || "")}</td>
+      <td class="num">${fmtInt(x.codes_paid_more)} <span class="sub">of ${fmtInt(x.codes_compared)}</span></td>
+      <td class="num">${x.median_gap_pct == null ? "–" : "+" + x.median_gap_pct + "%"}</td></tr>`;
+  }).join("");
+  box.innerHTML = `<div class="validate-card">
+    <h3>Clinics ${esc(d.payer)} pays more — ${esc(d.where)}</h3>
+    <div class="rc-summary">${esc(d.headline)}</div>
+    <div class="muted" style="margin:6px 0">Compared with ${esc(d.compared_with)} in ${esc(d.where)}${
+      d.geography === "state" && d.city ? ` (fewer than 5 in ${esc(d.city)}, so the whole state)` : ""}.
+      <button class="btn" id="ng-paidmore-csv" style="margin-left:8px">Download CSV</button></div>
+    <div class="tablewrap" style="max-height:40vh"><table class="rc-table"><thead><tr><th>Your code</th>
+      <th class="num">Your rate</th><th class="num">Their median</th><th class="num">Highest</th>
+      <th class="num">Clinics paid more</th></tr></thead><tbody>${codes}</tbody></table></div>
+    ${d.clinics.length ? `<div class="tablewrap" style="max-height:60vh;margin-top:10px"><table class="rc-table">
+      <thead><tr><th class="num">#</th><th>Clinic</th><th>Tax ID</th><th class="num">Codes paid more</th>
+      <th class="num">Median gap</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>` : ""}
+    ${d.clinics.length < d.clinics_paid_more ? `<div class="muted" style="margin-top:4px">Showing the first
+      ${fmtInt(d.clinics.length)} of ${fmtInt(d.clinics_paid_more)} — Download CSV for every one.</div>` : ""}
+    <div class="muted" style="font-size:11.5px;margin-top:6px">${esc(d.note)}</div></div>`;
+  $("#ng-paidmore-csv").addEventListener("click", async () => {
+    try {
+      const r = await fetch("/api/negotiate/paid-more.csv", { method: "POST",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+      if (!r.ok) { alert("CSV export failed.\n\n" + await refusalText(r)); return; }
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(await r.blob());
+      a.download = `paid_more_${String(d.payer).replace(/[^A-Za-z0-9]+/g, "_")}.csv`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+    } catch (e) { alert("CSV export failed: " + e.message); }
+  });
 }
 
 async function runNegotiate() {
@@ -1895,10 +2798,16 @@ async function runNegotiate() {
   state.lastNegotiatePayload = null;
   $("#ng-report").disabled = true;
   let d;
-  try { d = await postJson("/api/negotiate/compare", payload); }
-  catch (e) { out.innerHTML = `<div class="empty"><h3>Couldn't compare</h3>${esc(e.message)}</div>`; return; }
+  const isFresh = ticket("negotiate");
+  try { d = await postJson("/api/negotiate/compare", payload, { view: "negotiate", label: "Comparison", anchor: "#ng-run" }); }
+  catch (e) {
+    if (!isFresh()) return;
+    out.innerHTML = `<div class="empty"><h3>Couldn't compare</h3>${esc(e.message)}</div>`; return;
+  }
+  if (!isFresh()) return;
   state.lastNegotiatePayload = payload;
   $("#ng-report").disabled = false;
+  loadPaidMore(payload);
   const mny = (v) => (v == null ? "–" : v < 0 ? `-$${fmtMoney(-v)}` : `$${fmtMoney(v)}`);
   const s = d.summary;
   const cards = [
@@ -1950,17 +2859,337 @@ async function initRatecard() {
   if (states) $("#rc-states").innerHTML = (states.states || []).map((s) => `<option value="${esc(s)}">`).join("");
   wireSubjectSearch("#rc-subject", "#rc-subjects");
   fillMonthSelect("#rc-month", months, LATEST_MONTH_OPT);
-  if (payers) $("#rc-payer-chips").innerHTML = payers.payers.map((p) =>
-    `<button class="chip" data-payer="${esc(p)}">${esc(p)}</button>`).join("");
+  if (payers) $("#rc-payer-chips").innerHTML = payerChipsHtml(payers);
   $("#rc-payer-chips").addEventListener("click", (ev) => {
     const b = ev.target.closest(".chip");
     if (b) b.classList.toggle("on");
   });
   $("#rc-run").addEventListener("click", buildRatecard);
   $("#rc-report").addEventListener("click", () =>
-    openReportWith("/api/report/ratecard", state.lastRatecardPayload));
+    openReportWith("/api/report/ratecard", state.lastRatecardPayload, null, { view: "ratecard", label: "Printable rate card", anchor: "#rc-report" }));
   $("#rc-csv").addEventListener("click", downloadRatecardCsv);
   $("#rc-bundle").addEventListener("click", downloadTrackerBundle);
+  initStandardVisit();
+  $("#vv-run").addEventListener("click", showVisitMarket);
+  $("#vv-report").addEventListener("click", () =>
+    openReportWith("/api/report/visitvalue", state.lastVisitMarketPayload, null, { view: "ratecard", label: "Visit value report", anchor: "#vv-report" }));
+  $("#vv-csv").addEventListener("click", downloadVisitMarketCsv);
+  initVisitPracticeLists();
+}
+
+/* ---- visit value in this market (mrfx/visit_market.py) ------------------ */
+// The visit (preset or edited lines) the visit calculator shows.
+function visitBasket() {
+  const key = $("#sv-preset") && $("#sv-preset").value;
+  if (key) return { preset: key };
+  const lines = ($("#sv-lines") && $("#sv-lines").value.trim()) || "";
+  return lines ? { lines } : { preset: "ortho" };
+}
+
+// Confined to a State and a Discipline (both required); the practice is
+// optional — the market numbers are the same with or without one.
+function visitMarketPayload() {
+  const st = $("#rc-state").value.trim().toUpperCase();
+  const disc = $("#rc-disc").value;
+  if (!st) throw new Error("pick a State above — a visit's value is a market figure, and a market is one state");
+  if (!disc) throw new Error("pick a Discipline above (PT, OT or SLP) — a visit is priced on one discipline's rates");
+  const market = { month: $("#rc-month").value || "latest", state: st, discipline: disc,
+                   payers: $$("#rc-payer-chips .chip.on").map((c) => c.dataset.payer),
+                   peer_group: $("#rc-peer").value };
+  const subject = $("#rc-subject").value.trim();
+  return { market, ...visitBasket(), ...(subject ? { subject } : {}) };
+}
+
+const signedMoney = (v) => (v == null ? "–" : (v > 0 ? "+" : v < 0 ? "-" : "±") + "$" + fmtMoney(Math.abs(v)));
+const signedPct1 = (v) => (v == null ? "–" : `${v < 0 ? "-" : "+"}${Math.abs(v).toFixed(1)}%`);
+
+async function showVisitMarket() {
+  const out = $("#vv-out");
+  state.lastVisitMarketPayload = null;
+  $("#vv-report").disabled = true;
+  $("#vv-csv").disabled = true;
+  let payload;
+  try { payload = visitMarketPayload(); }
+  catch (e) { $("#vv-msg").textContent = ""; out.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
+  $("#vv-msg").textContent = "pricing the market…";
+  let d;
+  const isFresh = ticket("visit-market");
+  try { d = await postJson("/api/schedule/visit/market", payload, { view: "ratecard", label: "Visit value in this market", anchor: "#vv-run" }); }
+  catch (e) {
+    if (!isFresh()) return;
+    $("#vv-msg").textContent = ""; out.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return;
+  }
+  if (!isFresh()) return;
+  $("#vv-msg").textContent = "";
+  state.lastVisitMarketPayload = payload;
+  $("#vv-report").disabled = false;
+  $("#vv-csv").disabled = false;
+  out.innerHTML = renderVisitMarket(d);
+}
+
+function renderVisitMarket(d) {
+  const subj = !!d.subject;
+  const head = `<th>Payer</th><th class="num">Practices</th><th class="num">Average (mean)</th>
+    <th class="num">Median</th><th class="num">P25</th><th class="num">P75</th>
+    <th class="num" title="practice-payer pairs left out because the payer does not price every code of the visit">Partial visits left out</th>${
+    subj ? `<th class="num">This practice</th><th class="num" title="mid-rank among the payer's practices, this practice included">Percentile</th>
+    <th class="num">Quartile</th><th class="num">vs average</th><th class="num">vs median</th>` : ""}<th></th>`;
+  const listBtn = (payer) => `<td><button class="btn vv-list-btn" data-vv-payer="${esc(payer)}" aria-expanded="false"
+      title="list every practice in this row, highest visit value first">▸ Practices</button></td>`;
+  const row = (r, all) => {
+    const s = r.subject;
+    let subjCells = "";
+    if (subj) {
+      if (!s) subjCells = `<td class="num muted" colspan="5">no complete visit with this payer</td>`;
+      else if (s.percentile == null) subjCells = `<td class="num">${money(s.value)}</td><td class="num muted" colspan="4">not ranked — too few practices</td>`;
+      else subjCells = `<td class="num"><b>${money(s.value)}</b></td>
+        <td class="num">p${s.percentile} <span class="sub">of ${fmtInt(s.ranked_among)}</span></td>
+        <td class="num">${esc(s.quartile)}</td>
+        <td class="num"><span class="${s.vs_mean > 0 ? "peer-up" : s.vs_mean < 0 ? "peer-down" : ""}">${signedMoney(s.vs_mean)}</span> <span class="sub">${signedPct1(s.vs_mean_pct)}</span></td>
+        <td class="num"><span class="${s.vs_median > 0 ? "peer-up" : s.vs_median < 0 ? "peer-down" : ""}">${signedMoney(s.vs_median)}</span> <span class="sub">${signedPct1(s.vs_median_pct)}</span></td>`;
+    }
+    const excl = r.incomplete_excluded == null ? "" : fmtInt(r.incomplete_excluded);
+    if (r.suppressed)
+      return `<tr${all ? ' class="best-row"' : ""}><td>${esc(r.payer)}</td><td class="muted" colspan="5">fewer than ${d.min_practices} practices — not shown</td><td class="num">${excl}</td>${subjCells}<td></td></tr>`;
+    return `<tr${all ? ' class="best-row"' : ""}><td>${all ? "<b>All payers</b>" : esc(r.payer)}</td>
+      <td class="num">${fmtInt(r.practices)}</td><td class="num">${money(r.mean)}</td>
+      <td class="num"><b>${money(r.median)}</b></td><td class="num">${money(r.p25)}</td>
+      <td class="num">${money(r.p75)}</td><td class="num">${excl}</td>${subjCells}${listBtn(all ? "All payers" : r.payer)}</tr>`;
+  };
+  const body = d.rows.map((r) => row(r, false)).join("") + row(d.all_payers, true);
+  return `<div class="rc-summary">${esc(d.headline)}</div>
+    <div class="muted" style="margin:6px 0">${esc(d.state)} · ${esc(d.discipline)} · as of ${esc(d.as_of)}${d.as_of_rule ? ` (${esc(d.as_of_rule)})` : ""} ·
+      ${esc(d.label)} — ${esc(d.basket)} = <b>${d.units} units</b>${
+      d.payers_filter.length ? ` · payers: ${esc(d.payers_filter.join(", "))}` : ""}</div>
+    ${(d.flags || []).map((f) => `<div class="warn-text" style="margin-top:4px">${esc(f)}</div>`).join("")}
+    <div class="tablewrap" style="max-height:75vh;margin-top:8px"><table class="rc-table vv-table"><thead><tr>${head}</tr></thead>
+      <tbody>${body}</tbody></table></div>
+    <div class="muted" style="font-size:11.5px;margin-top:6px">${fmtInt(d.incomplete_excluded)} practice-payer pair(s) left out as partial visits${
+      d.suppressed_payers.length ? `; not shown (under ${d.min_practices} practices): ${esc(d.suppressed_payers.join(", "))}` : ""}.
+      ${esc(d.note)}${d.subject_note ? " " + esc(d.subject_note) : ""} Basis: ${esc(d.basis_note)}</div>`;
+}
+
+async function downloadVisitMarketCsv() {
+  if (!state.lastVisitMarketPayload) return;
+  try {
+    const r = await fetch("/api/schedule/visit/market.csv", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(state.lastVisitMarketPayload),
+    });
+    if (!r.ok) { alert("CSV export failed.\n\n" + await refusalText(r)); return; }
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(await r.blob());
+    a.download = "visit_value.csv";
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+  } catch (e) { alert("CSV export failed: " + e.message); }
+}
+
+/* ---- the practices behind one Visit-value row, ranked (visit_market.py) -- */
+const VV_PAGE = 50;
+
+// where a practice's name came from (mrfx/naming.py name_source)
+const NAME_SOURCE_TEXT = {
+  nppes_org: "the legal business name of its organization NPIs (NPPES)",
+  cms_dac: "the group most of its clinicians are enrolled with (CMS Doctors and Clinicians file)",
+  solo_npi: "its one provider (a solo practice)",
+  unnamed_group: "no organization name found — labelled by clinician count and main city",
+  no_npi: "no NPI is published under this tax ID",
+  pending: "loaded since names were last resolved — refreshed within minutes",
+};
+const NAME_SOURCE_TAG = { cms_dac: "name: CMS file", solo_npi: "solo provider",
+  unnamed_group: "no org name found", pending: "name pending" };
+
+function vvPracticeRow(x, perPayer) {
+  const where = [(x.cities || []).join(", "), x.state].filter(Boolean).join(" · ");
+  // one NPI on the row (the organisation's own when it has one — listed
+  // first by the server), the others on hover; the CSV carries them all
+  const list = x.npis || [];
+  const others = list.length - 1 + (x.npis_more || 0);
+  const tip = list.slice(1).map((n) => `${n.npi}${n.name ? " " + n.name : ""}`).join("\n")
+    + (x.npis_more ? `\n+${x.npis_more} more (in the CSV)` : "");
+  const npis = list.length ? `<span style="font-family:ui-monospace,monospace">${esc(list[0].npi)}</span>${
+    list[0].name ? ` <span class="sub">${esc(list[0].name)}</span>` : ""}${
+    others > 0 ? ` <span class="sub" title="${esc(tip)}" style="cursor:help;text-decoration:underline dotted">+${fmtInt(others)} more</span>` : ""}` : "";
+  const made = perPayer
+    ? (x.rates || []).map((r) => `${esc(r.code)}${r.units > 1 ? "×" + r.units : ""} ${money(r.rate)}`).join(" · ")
+    : `median of ${x.payers} payer${x.payers === 1 ? "" : "s"} (${money(x.low)} – ${money(x.high)})`;
+  const cls = x.vs_median > 0 ? "peer-up" : x.vs_median < 0 ? "peer-down" : "";
+  return `<tr class="${x.is_subject ? "best-row" : ""}">
+    <td class="num">${fmtInt(x.rank)}</td>
+    <td><b title="named by ${esc(NAME_SOURCE_TEXT[x.name_source] || x.name_source || "")}">${esc(x.name)}</b>${
+      x.is_subject ? ' <span class="sub">(this practice)</span>' : ""}${
+      NAME_SOURCE_TAG[x.name_source] ? ` <span class="sub" title="${esc(NAME_SOURCE_TEXT[x.name_source])}">· ${esc(NAME_SOURCE_TAG[x.name_source])}</span>` : ""}${
+      where ? `<div class="sub">${esc(where)}</div>` : ""}</td>
+    <td>${esc(x.tin || "")}</td>
+    <td>${npis || '<span class="sub">–</span>'}</td>
+    <td class="num">${x.therapy_npi_count == null ? "–" : fmtInt(x.therapy_npi_count)} <span class="sub">of ${x.npi_count == null ? "–" : fmtInt(x.npi_count)}</span></td>
+    <td class="num"><b>${money(x.value)}</b></td>
+    <td class="num"><span class="${cls}">${signedMoney(x.vs_median)}</span> <span class="sub">${signedPct1(x.vs_median_pct)}</span></td>
+    <td class="num">${x.percentile == null ? "–" : "p" + x.percentile}</td>
+    <td class="sub">${made}</td></tr>`;
+}
+
+async function vvLoadPractices(box, append) {
+  const offset = append ? Number(box.dataset.shown || 0) : 0;
+  const payload = { ...state.lastVisitMarketPayload, payer: box.dataset.payer, offset,
+                    limit: VV_PAGE, order: box.dataset.order || "desc" };
+  if (!append) box.innerHTML = `<div class="loading">Listing practices</div>`;
+  let d;
+  try { d = await postJson("/api/schedule/visit/market/practices", payload); }
+  catch (e) { box.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
+  const perPayer = d.payer !== "All payers";
+  const rows = d.rows.map((x) => vvPracticeRow(x, perPayer)).join("");
+  const shown = offset + d.rows.length;
+  box.dataset.shown = String(shown);
+  const more = shown < d.total
+    ? `<button class="btn" data-vv-more>Show ${fmtInt(Math.min(VV_PAGE, d.total - shown))} more</button>` : "";
+  const foot = `<span class="muted">${fmtInt(shown)} of ${fmtInt(d.total)} shown</span> ${more}`;
+  if (append) {
+    box.querySelector("tbody").insertAdjacentHTML("beforeend", rows);
+    box.querySelector(".vv-plist-foot").innerHTML = foot;
+    return;
+  }
+  const desc = d.order !== "asc";
+  box.innerHTML = `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:4px 0 6px">
+      <b>${fmtInt(d.total)} practice${d.total === 1 ? "" : "s"} — ${esc(d.payer)}</b>
+      <span class="muted">${esc(d.basket)} · median ${money(d.median)}</span>
+      <button class="btn${desc ? " primary" : ""}" data-vv-order="desc">Highest first</button>
+      <button class="btn${desc ? "" : " primary"}" data-vv-order="asc">Lowest first</button>
+      <button class="btn" data-vv-csv>Download this list (CSV)</button></div>
+    <div class="tablewrap" style="max-height:60vh"><table class="rc-table">
+      <thead><tr><th class="num">#</th><th>Practice</th><th>Tax ID</th><th>NPIs</th>
+        <th class="num" title="therapy NPIs (PT/OT/SLP taxonomy) of all the NPIs this tax ID bills under">Therapists</th>
+        <th class="num">Visit value</th><th class="num">vs median</th>
+        <th class="num" title="mid-rank among the other practices in this row">Percentile</th>
+        <th>${perPayer ? "Rates in this visit" : "Across payers"}</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>
+    <div class="vv-plist-foot" style="margin-top:6px">${foot}</div>
+    <div class="muted" style="font-size:11.5px;margin-top:4px">${esc(d.note)}</div>`;
+}
+
+async function vvTogglePractices(btn) {
+  const tr = btn.closest("tr");
+  const next = tr.nextElementSibling;
+  if (next && next.classList.contains("vv-detail")) {
+    next.remove();
+    btn.textContent = "▸ Practices";
+    btn.setAttribute("aria-expanded", "false");
+    return;
+  }
+  const cols = tr.closest("table").tHead.rows[0].cells.length;
+  const det = document.createElement("tr");
+  det.className = "vv-detail";
+  det.innerHTML = `<td colspan="${cols}"><div class="vv-plist" data-order="desc"></div></td>`;
+  const box = det.querySelector(".vv-plist");
+  box.dataset.payer = btn.dataset.vvPayer;
+  // held to the visible width of the table's scroll box and pinned at its
+  // left edge, so rank, practice and visit value stay in view when the
+  // payer table itself is wider than the panel (the subject's columns)
+  const wrap = tr.closest(".tablewrap");
+  if (wrap) {
+    box.style.position = "sticky";
+    box.style.left = "0";
+    box.style.width = `${Math.max(320, wrap.clientWidth - 32)}px`;
+  }
+  tr.after(det);
+  btn.textContent = "▾ Practices";
+  btn.setAttribute("aria-expanded", "true");
+  await vvLoadPractices(det.querySelector(".vv-plist"), false);
+}
+
+async function vvDownloadPractices(box) {
+  if (!state.lastVisitMarketPayload) return;
+  try {
+    const r = await fetch("/api/schedule/visit/market/practices.csv", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...state.lastVisitMarketPayload, payer: box.dataset.payer }),
+    });
+    if (!r.ok) { alert("CSV export failed.\n\n" + await refusalText(r)); return; }
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(await r.blob());
+    a.download = `visit_value_practices_${box.dataset.payer.replace(/[^A-Za-z0-9]+/g, "_")}.csv`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+  } catch (e) { alert("CSV export failed: " + e.message); }
+}
+
+function initVisitPracticeLists() {
+  $("#vv-out").addEventListener("click", (e) => {
+    const toggle = e.target.closest("[data-vv-payer]");
+    if (toggle) { vvTogglePractices(toggle); return; }
+    const box = e.target.closest(".vv-plist");
+    if (!box) return;
+    const order = e.target.closest("[data-vv-order]");
+    if (order) {
+      if (box.dataset.order !== order.dataset.vvOrder) {
+        box.dataset.order = order.dataset.vvOrder;
+        vvLoadPractices(box, false);
+      }
+      return;
+    }
+    if (e.target.closest("[data-vv-more]")) { vvLoadPractices(box, true); return; }
+    if (e.target.closest("[data-vv-csv]")) vvDownloadPractices(box);
+  });
+}
+
+/* ---- one standard visit, priced per payer (mrfx/visit.py) --------------- */
+const visitLinesText = (lines) => lines.map((l) => `${l.code}, ${l.minutes}`).join("\n");
+
+async function initStandardVisit() {
+  const d = await api("/api/schedule/visit/presets").catch(() => null);
+  if (!d) return;
+  state.visitPresets = Object.fromEntries(d.presets.map((p) => [p.key, p]));
+  $("#sv-preset").innerHTML = d.presets.map((p) =>
+    `<option value="${esc(p.key)}"${p.key === d.default ? " selected" : ""}>${esc(p.label)}</option>`).join("") +
+    '<option value="">Custom — edit the codes and minutes below</option>';
+  const fill = () => {
+    const p = state.visitPresets[$("#sv-preset").value];
+    if (p) $("#sv-lines").value = visitLinesText(p.lines);
+  };
+  fill();
+  $("#sv-preset").addEventListener("change", fill);
+  $("#sv-lines").addEventListener("input", () => {
+    const p = state.visitPresets[$("#sv-preset").value];
+    if (p && $("#sv-lines").value.trim() !== visitLinesText(p.lines)) $("#sv-preset").value = "";
+  });
+  $("#sv-run").addEventListener("click", priceStandardVisit);
+}
+
+async function priceStandardVisit() {
+  const out = $("#sv-out");
+  let payload;
+  try { payload = ratecardPayload(); }
+  catch (e) { $("#sv-msg").textContent = e.message; return; }
+  const key = $("#sv-preset").value;
+  if (key) payload.preset = key; else payload.lines = $("#sv-lines").value;
+  $("#sv-msg").textContent = "pricing…";
+  let d;
+  const isFresh = ticket("visit");
+  try { d = await postJson("/api/schedule/visit", payload); }
+  catch (e) {
+    if (!isFresh()) return;
+    $("#sv-msg").textContent = ""; out.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return;
+  }
+  if (!isFresh()) return;
+  $("#sv-msg").textContent = "";
+  const lines = d.lines.map((l) => `<b>${esc(l.code)}</b> ${esc(l.description)} — ${
+      l.timed ? `${l.minutes} min → ${l.units} unit${l.units === 1 ? "" : "s"}` : "untimed, 1 unit"}`).join("<br>");
+  const rows = d.rows.map((r, i) => `<tr class="${i === 0 && r.complete ? "best-row" : ""}">
+      <td>${esc(r.payer)}</td>
+      <td class="num"><b>${r.complete ? money(r.visit_value) : "–"}</b></td>
+      <td class="sub">${r.parts.map((p) => `${esc(p.code)} ${p.units}×${money(p.rate)}`).join(" · ")}</td>
+      <td class="sub">${r.complete ? "every code priced" :
+        `<span class="warn-text">no published rate for ${esc(r.missing_codes.join(", "))}</span> — ${
+          money(r.priced_value)} covers ${r.priced_units} of ${d.units} units`}</td></tr>`).join("");
+  out.innerHTML = `<div class="rc-summary">${esc(d.headline)}</div>
+    <div class="muted" style="margin:6px 0">${esc(d.label)} — ${d.total_timed_minutes} timed minutes →
+      <b>${d.units} units</b> (CMS 8-minute rule).<br>${lines}</div>
+    ${d.flags.map((f) => `<div class="warn-text" style="margin-top:4px">${esc(f)}</div>`).join("")}
+    ${d.rows.length ? `<div class="tablewrap" style="max-height:40vh;margin-top:8px"><table><thead><tr>
+      <th>Payer</th><th class="num">Per visit</th><th>Units × rate</th><th>Status</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>` : ""}
+    <div class="muted" style="font-size:11.5px;margin-top:6px">Visit: ${esc(d.basis)}. ${esc(d.units_rule)} ${esc(d.note)}</div>`;
 }
 
 async function refreshRcMpfs() {
@@ -1985,8 +3214,11 @@ function ratecardPayload() {
   // scope the per-cell peer comparison (blank = pooled, and the printable card
   // prints a national-comparison banner saying so)
   if ($("#rc-state").value.trim()) market.state = $("#rc-state").value.trim().toUpperCase();
-  if ($("#rc-therapy").checked) market.therapy_only = true;
-  return { subject, market };
+  market.peer_group = $("#rc-peer").value;
+  // the printable card and its CSV carry "Visit value in this market" when
+  // its two required scopes are set (review 12 Group 3)
+  const vm = market.state && market.discipline ? { visit_market: true, ...visitBasket() } : {};
+  return { subject, market, ...vm };
 }
 
 async function buildRatecard() {
@@ -2000,8 +3232,13 @@ async function buildRatecard() {
   catch (e) { out.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
   out.innerHTML = `<div class="loading">Building rate card</div>`;
   let data;
-  try { data = await postJson("/api/schedule/fee", payload); }
-  catch (e) { out.innerHTML = `<div class="empty"><h3>Could not build</h3>${esc(e.message)}</div>`; return; }
+  const isFresh = ticket("ratecard");
+  try { data = await postJson("/api/schedule/fee", payload, { view: "ratecard", label: "Rate card", anchor: "#rc-run" }); }
+  catch (e) {
+    if (!isFresh()) return;
+    out.innerHTML = `<div class="empty"><h3>Could not build</h3>${esc(e.message)}</div>`; return;
+  }
+  if (!isFresh()) return;
   state.lastRatecardPayload = payload;
   // Only offer the client-facing deliverables when there IS a card. With zero
   // codes the server now refuses to render one, so enabling the buttons would
@@ -2012,6 +3249,8 @@ async function buildRatecard() {
   $("#rc-csv").disabled = !hasCard;
   $("#rc-bundle").disabled = !hasCard;
   renderRatecard(out, data.fee_schedule, data.scorecard);
+  if (hasCard && $("#sv-preset").options.length) priceStandardVisit();
+  else $("#sv-out").innerHTML = "";
 }
 
 const pctOrDash = (v) => (v == null ? "–" : `${v}%`);
@@ -2063,7 +3302,7 @@ function renderRatecard(out, fs, sc) {
   }).join("");
   const bestLine = sc.best_payer ? `Best-paying payer: <b>${esc(sc.best_payer)}</b>. ` : "";
   out.innerHTML = `
-    <div class="rc-summary">${bestLine}Payers ranked by ${mp ? "% of Medicare" : "% of the best payer"}. Each cell shows your rate, then <b>peer $</b> — what that payer pays your peers for the same code — and how you compare.</div>
+    <div class="rc-summary">${bestLine}Payers ranked by % of the best payer's rate on ${(sc.shared_codes || []).length ? `the ${sc.shared_codes.length} code(s) every payer prices` : "the codes at least two of them price"}${mp ? " (% of Medicare is shown, not ranked: each payer's own codes differ)" : ""}. Each cell shows your rate, then <b>peer $</b> — what that payer pays your peers for the same code — and how you compare.</div>
     <h3>Payer scorecard — who pays best</h3>
     <div class="tablewrap"><table class="rc-table"><thead><tr>${scHead}</tr></thead><tbody>${scRows}</tbody></table></div>
     <h3 style="margin-top:18px">Fee schedule</h3>
@@ -2111,7 +3350,7 @@ async function downloadRatecardCsv() {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(state.lastRatecardPayload),
     });
-    if (!r.ok) { alert("CSV export failed: " + (await r.text())); return; }
+    if (!r.ok) { alert("CSV export failed.\n\n" + await refusalText(r)); return; }
     const a = document.createElement("a");
     a.href = URL.createObjectURL(await r.blob());
     a.download = "rate_card.csv";
@@ -2163,12 +3402,14 @@ async function clientJump(view, inputSel, runFn, subject, readySel) {
     await new Promise((r) => setTimeout(r, 150));
   }
   const input = $(inputSel);
-  if (input) { input.value = subject; runFn(); }
+  if (input) { input.value = subject; hashFromInputs(view); runFn(); }
 }
 
 async function loadClientDigest() {
   const out = $("#cl-out");
+  const isFresh = ticket("digest");
   const have = await api("/api/clients").catch(() => null);
+  if (!isFresh()) return;
   if (!have || !have.clients.length) {
     out.classList.add("empty");
     out.innerHTML = `<h3>No clients saved yet</h3>Add the practices you work for. Each refresh
@@ -2179,8 +3420,12 @@ async function loadClientDigest() {
   out.classList.remove("empty");
   out.innerHTML = `<div class="loading">Building the digest for ${have.clients.length} client${have.clients.length === 1 ? "" : "s"}</div>`;
   let d;
-  try { d = await api("/api/clients/digest"); }
-  catch (e) { out.innerHTML = `<div class="empty"><h3>Digest failed</h3>${esc(e.message)}</div>`; return; }
+  try { d = await api("/api/clients/digest", { bar: { view: "clients", label: "Client digest", anchor: "#cl-refresh" } }); }
+  catch (e) {
+    if (!isFresh()) return;
+    out.innerHTML = `<div class="empty"><h3>Digest failed</h3>${esc(e.message)}</div>`; return;
+  }
+  if (!isFresh()) return;
   const rows = d.clients.map((c) => {
     const name = `<b>${esc(c.display_name || c.subject)}</b>${
       c.display_name && c.display_name !== c.subject ? `<div class="sub">${esc(c.subject)}</div>` : ""}`;
@@ -2192,35 +3437,38 @@ async function loadClientDigest() {
     if (!d.can_diff) chg = `<span class="muted" title="rate changes need two loaded months of the same payer">needs 2 months</span>`;
     else if (!c.changes) chg = `<span class="muted">–</span>`;
     else if (c.changes.error) chg = `<span class="muted">${esc(c.changes.error)}</span>`;
-    else if (!c.changes.n) chg = `<span class="muted">no moves in ${esc(c.changes.month)}</span>`;
+    else if (c.changes.month === "latest" && !(c.changes.compared || []).length)
+      chg = `<span class="muted" title="none of this client's payers has two files loaded">needs 2 files of a payer</span>`;
+    else if (!c.changes.n) chg = `<span class="muted" title="${esc(c.changes.span || "")}">no moves</span>`;
     else {
       const b = c.changes.biggest_pct;
-      chg = `<a href="#" data-cl-changes="${esc(c.subject)}"><b>${fmtInt(c.changes.n)}</b> line${c.changes.n === 1 ? "" : "s"} moved</a>
+      chg = `<a href="#" ${c.jump === null ? `data-no-jump="1" title="saved by a Social-Security-shaped tax ID — re-add this client by name to open its screens"` : `data-cl-changes="${esc(c.jump || c.subject)}"`}><b>${fmtInt(c.changes.n)}</b> line${c.changes.n === 1 ? "" : "s"} moved</a>
         <div class="sub">biggest: <span class="${b > 0 ? "peer-up" : "peer-down"}">${b > 0 ? "+" : ""}${b}%</span>
-        on ${esc(c.changes.biggest_code || "")} (${esc(c.changes.biggest_payer || "")})</div>`;
+        on ${esc(c.changes.biggest_code || "")} (${esc(c.changes.biggest_payer || "")}${
+          c.changes.biggest_span ? `, ${esc(c.changes.biggest_span)}` : ""})</div>`;
     }
     let gaps;
     if (!c.gaps) gaps = `<span class="muted">–</span>`;
     else if (c.gaps.error) gaps = `<span class="muted">${esc(c.gaps.error)}</span>`;
     else if (!c.gaps.n) gaps = `<span class="muted">none</span>`;
-    else gaps = `<a href="#" data-cl-gaps="${esc(c.subject)}"><b>${fmtInt(c.gaps.n)}</b> code${c.gaps.n === 1 ? "" : "s"}</a>
+    else gaps = `<a href="#" ${c.jump === null ? `data-no-jump="1" title="saved by a Social-Security-shaped tax ID — re-add this client by name to open its screens"` : `data-cl-gaps="${esc(c.jump || c.subject)}"`}><b>${fmtInt(c.gaps.n)}</b> code${c.gaps.n === 1 ? "" : "s"}</a>
       <div class="sub">${c.gaps.top.map(esc).join(", ")}${c.gaps.n > 3 ? "…" : ""}</div>`;
     let med;
     if (!d.have_medicare) med = `<span class="muted" title="import the Medicare layers on the Medicare tab to light this up">no referral data</span>`;
     else if (!c.lost_referrers) med = `<span class="muted">–</span>`;
     else if (!c.lost_referrers.length) med = `<span class="ok-tag">all sources in good standing</span>`;
-    else med = `<a href="#" data-cl-med="${esc(c.subject)}"><span class="warn-text"><b>${c.lost_referrers.length}</b> source${c.lost_referrers.length === 1 ? "" : "s"} lost standing</span></a>
+    else med = `<a href="#" ${c.jump === null ? `data-no-jump="1" title="saved by a Social-Security-shaped tax ID — re-add this client by name to open its screens"` : `data-cl-med="${esc(c.jump || c.subject)}"`}><span class="warn-text"><b>${c.lost_referrers.length}</b> source${c.lost_referrers.length === 1 ? "" : "s"} lost standing</span></a>
       <div class="sub">${c.lost_referrers.slice(0, 3).map((l) =>
         `${esc(l.name || l.npi)} (${l.kind === "removed" ? "off roster" : "lost Part B"}, ${fmtInt(l.patients)} pts)`).join("; ")}</div>`;
     return `<tr><td>${name}</td><td>${chg}</td><td>${gaps}</td><td>${med}</td>
       <td style="white-space:nowrap">
-        <button class="btn" data-cl-rc="${esc(c.subject)}" title="rate card">Rates</button>
+        <button class="btn" ${c.jump === null ? `data-no-jump="1" title="saved by a Social-Security-shaped tax ID — re-add this client by name to open its screens"` : `data-cl-rc="${esc(c.jump || c.subject)}"`} title="rate card">Rates</button>
         <button class="btn" data-cl-remove="${esc(c.subject)}">remove</button>
       </td></tr>`;
   }).join("");
   out.innerHTML = `
-    <div class="muted" style="margin-bottom:8px">Newest month in the store: <b>${esc(d.month || "–")}</b>.
-      Rate moves compare it to the month before it, per payer contract line.</div>
+    <div class="muted" style="margin-bottom:8px">Rate moves compare each payer's newest file with
+      that payer's previous one, per contract line.</div>
     <div class="tablewrap"><table><thead><tr>
       <th>Client</th><th>Rate moves</th><th>Contract gaps</th><th>Referral alerts</th><th></th>
     </tr></thead><tbody>${rows}</tbody></table></div>`;
@@ -2284,12 +3532,27 @@ async function pollPackets(quiet = false) {
 }
 
 /* ---- engagement baselines: before/after proof --------------------------- */
-function parseVolumes(sel) {
+// ONE reader for every "Annual units per code" box (Benchmark, Negotiate,
+// engagements). "97110, 4,200" / "97110 4200" / "97110\t4200" / "97110: 4200"
+// all read 4200. The Benchmark box had its own split-on-comma reader that
+// turned "4,200" into 4 units and dropped "97140 1800" without a word, so its
+// opportunity was a fraction of the truth (round 7 P0.8). A line that is not
+// a code and a number is NOT guessed at: it is listed under the box.
+function parseVolumes(sel, msgSel) {
   const vols = {};
-  ($(sel).value || "").split("\n").forEach((line) => {
-    const m = line.match(/^\s*([A-Za-z0-9]+)\s*[,;\t ]\s*([\d,.]+)\s*$/);
-    if (m) vols[m[1].toUpperCase()] = Number(m[2].replace(/,/g, ""));
+  const skipped = [];
+  ($(sel).value || "").split(/\r?\n/).forEach((line) => {
+    if (!line.trim()) return;
+    const m = line.match(/^\s*([A-Za-z0-9]+)\s*[,;:\t ]\s*(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)\s*$/);
+    const n = m ? Number(m[2].replace(/,/g, "")) : NaN;
+    if (m && Number.isFinite(n)) vols[m[1].toUpperCase()] = n;
+    else skipped.push(line.trim());
   });
+  if (msgSel && $(msgSel)) {
+    $(msgSel).textContent = skipped.length
+      ? `Not read (expected "code, units"): ${skipped.slice(0, 3).join(" · ")}${skipped.length > 3 ? ` (+${skipped.length - 3} more)` : ""}`
+      : "";
+  }
   return Object.keys(vols).length ? vols : null;
 }
 
@@ -2316,7 +3579,7 @@ async function runEngagementCompare() {
   let d;
   try {
     d = await postJson("/api/engagements/compare",
-                       { subject, volumes: parseVolumes("#en-volumes") });
+                       { subject, volumes: parseVolumes("#en-volumes", "#en-vol-msg") });
   } catch (e) { $("#en-msg").textContent = ""; out.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
   $("#en-msg").textContent = "";
   const s = d.summary;
@@ -2398,9 +3661,15 @@ function initNewToNetwork() {
     } catch (e) { $("#nn-msg").textContent = ""; out.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
     $("#nn-msg").textContent = "";
     if (d.reason) { out.innerHTML = `<div class="muted">${esc(d.reason)}</div>`; return; }
+    // the months actually compared, per payer — "latest" is each payer's own
+    // newest file against its own previous one
+    const span = (d.compared_months || []).map((c) =>
+      `${esc(c.payer)} ${esc(c.prev_month)} → ${esc(c.month)}`).join("; ");
+    const when = d.month === "latest" ? "each payer's newest file" : esc(String(d.month));
     if (!d.rows.length) {
-      out.innerHTML = `<div class="muted">No practice newly appeared in a payer's book for
-        ${esc(String(d.month))}${d.zip ? ` within ${d.radius_miles} miles of ${esc(d.zip)}` : ""}.</div>`;
+      out.innerHTML = `<div class="muted">No practice newly appeared in a payer's book
+        (${when})${d.zip ? ` within ${d.radius_miles} miles of ${esc(d.zip)}` : ""}.
+        <div class="sub">Compared: ${span || "–"}</div></div>`;
       return;
     }
     const rows = d.rows.map((r, i) => `<tr>
@@ -2409,13 +3678,13 @@ function initNewToNetwork() {
       <td>${esc([...(r.cities || []), ...(r.states || [])].join(", "))}</td>
       <td>${esc(r.zip || "")}</td>
       <td class="num">${r.miles == null ? "–" : r.miles}</td>
-      <td>${esc(r.payer)}</td><td class="sub">${esc(r.prev_month)}</td>
+      <td>${esc(r.payer)}</td><td class="sub">${esc(r.prev_month)} → ${esc(r.month || d.month)}</td>
       <td class="num">${fmtInt(r.codes)}</td><td class="num">${money(r.median_rate)}</td></tr>`).join("");
     out.innerHTML = `<div class="muted" style="margin-bottom:6px">${fmtInt(d.total)} newly
-      contracted practice(s) in <b>${esc(String(d.month))}</b>.</div>
+      contracted practice(s), ${when}.<div class="sub">Compared: ${span}</div></div>
       <div class="tablewrap" style="max-height:40vh"><table><thead><tr>
         <th>#</th><th>Practice</th><th>Location</th><th>ZIP</th><th class="num">Miles</th>
-        <th>Payer</th><th>Prev. month</th><th class="num">Codes</th><th class="num">Median</th>
+        <th>Payer</th><th>Months</th><th class="num">Codes</th><th class="num">Median</th>
       </tr></thead><tbody>${rows}</tbody></table></div>
       <div class="muted" style="font-size:11.5px;margin-top:6px">${esc(d.note || "")}</div>`;
   });
@@ -2469,7 +3738,7 @@ function initRefData() {
 /* Fill a volumes box from the practice's Medicare claims. The units are a
    FLOOR (Medicare only), so the message says so every time — a pre-filled box
    the user forgets came from Medicare is how a wrong dollar figure ships. */
-async function fillVolumesFromMedicare(subjectSel, boxSel, msgSel, multSel) {
+async function fillVolumesFromMedicare(subjectSel, boxSel, msgSel, multSel, stateSel) {
   const subject = $(subjectSel).value.trim();
   const out = $(msgSel);
   if (!subject) { out.textContent = "pick a practice first"; return; }
@@ -2484,7 +3753,9 @@ async function fillVolumesFromMedicare(subjectSel, boxSel, msgSel, multSel) {
   out.textContent = "reading Medicare claims…";
   let d;
   try {
-    d = await postJson("/api/utilization/volumes", { subject, multiplier: mult });
+    const st = stateSel && $(stateSel) ? $(stateSel).value.trim() : "";
+    d = await postJson("/api/utilization/volumes",
+                       { subject, multiplier: mult, market: st ? { state: st.toUpperCase() } : null });
   } catch (e) { out.textContent = e.message; return; }
   const lines = Object.entries(d.volumes).map(([c, u]) => `${c}, ${u}`);
   $(boxSel).value = lines.join("\n");
@@ -2579,7 +3850,7 @@ async function runFloorCompare() {
       payer: $("#ng-payer").value || null,
       state: st,
       market: { month: $("#ng-month").value || "latest",
-                therapy_only: $("#ng-therapy").checked },
+                peer_group: $("#ng-peer").value },
     });
   } catch (e) { out.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
   if (!d.loaded || !d.rows.length) {
@@ -2615,15 +3886,14 @@ function initLeverage() {
     subject: $("#ng-subject").value.trim(),
     payer: $("#ng-payer").value,
     radius_miles: Number($("#lv-radius").value),
-    market: { month: $("#ng-month").value || "latest",
-              therapy_only: $("#ng-therapy").checked },
+    market: ngMarket(),
   });
   $("#lv-run").addEventListener("click", async () => {
     const p = params();
     if (!p.subject || !p.payer) { $("#lv-msg").textContent = "pick a practice and a payer"; return; }
     $("#lv-msg").textContent = "measuring…";
     let d;
-    try { d = await postJson("/api/leverage", p); }
+    try { d = await postJson("/api/leverage", p, { view: "negotiate", label: "Leverage", anchor: "#lv-run" }); }
     catch (e) { $("#lv-msg").textContent = ""; show(`<div class="muted">${esc(e.message)}</div>`); return; }
     $("#lv-msg").textContent = "";
     const rows = d.alternatives.map((a, i) => `<tr>
@@ -2645,7 +3915,7 @@ function initLeverage() {
     if (!p.subject) { $("#lv-msg").textContent = "pick a practice"; return; }
     $("#lv-msg").textContent = "ranking payers…";
     let d;
-    try { d = await postJson("/api/leverage/summary", p); }
+    try { d = await postJson("/api/leverage/summary", p, { view: "negotiate", label: "Every payer's leverage", anchor: "#lv-all" }); }
     catch (e) { $("#lv-msg").textContent = ""; show(`<div class="muted">${esc(e.message)}</div>`); return; }
     $("#lv-msg").textContent = "";
     const rows = d.payers.map((x) => `<tr>
@@ -2675,8 +3945,7 @@ function initVisitEconomics() {
     try {
       d = await postJson("/api/economics/visit", {
         subject, units_per_visit: upv ? Number(upv) : null,
-        market: { month: $("#ng-month").value || "latest",
-                  therapy_only: $("#ng-therapy").checked },
+        market: ngMarket(),
       });
     } catch (e) { $("#ec-msg").textContent = ""; out.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
     $("#ec-msg").textContent = "";
@@ -2706,40 +3975,41 @@ function initDossier() {
     const subject = $("#ds-subject").value.trim();
     if (!subject) { $("#ds-msg").textContent = "pick a practice"; return; }
     $("#ds-msg").textContent = "assembling…";
-    const body = { subject, radius_miles: Number($("#ds-radius").value),
-                   market: { month: "latest", therapy_only: false } };
-    try {
-      const meta = await postJson("/api/report/dossier.json", body);
-      $("#ds-msg").textContent = "";
-      $("#ds-out").innerHTML = (meta.skipped || []).length
-        ? `<div class="muted">Built with ${meta.skipped.length} section(s) omitted: ${
-            esc(meta.skipped.join("; "))}</div>` : "";
-      postDownloadHtml("/api/report/dossier", body);
-    } catch (e) { $("#ds-msg").textContent = ""; $("#ds-out").innerHTML = `<div class="muted">${esc(e.message)}</div>`; }
+    // the Leads tab's state and month (review 10 item 2.9: the form sent
+    // neither — "4 provider NPI(s), Town, Wichita (KS, MO)")
+    const dsMarket = { month: $("#ld-month").value || "latest", therapy_only: false };
+    if ($("#ld-state").value.trim()) dsMarket.state = $("#ld-state").value.trim().toUpperCase();
+    const body = { subject, radius_miles: Number($("#ds-radius").value), market: dsMarket };
+    // the tab opens NOW, inside the click (after the awaits Chrome's
+    // activation window has expired on a slow store and the popup is
+    // blocked); the HTML report's refusal is caught and shown (P1.23)
+    // ONE build: the omitted sections ride in a response header (the button
+    // used to build the whole dossier twice, review 13)
+    $("#ds-out").innerHTML = "";
+    const r = await openReportWith("/api/report/dossier", body,
+                                   (msg) => { $("#ds-msg").textContent = msg; },
+                                   { view: "leads", label: "Prospect dossier", anchor: "#ds-run" });
+    if ($("#ds-msg").textContent === "assembling…") $("#ds-msg").textContent = "";
+    if (r) {
+      let skipped = [];
+      try { skipped = JSON.parse(decodeURIComponent(r.headers.get("X-Mrfx-Skipped") || "%5B%5D")); } catch (_) { skipped = []; }
+      $("#ds-out").innerHTML = skipped.length
+        ? `<div class="muted">Built with ${skipped.length} section(s) omitted: ${esc(skipped.join("; "))}</div>` : "";
+    }
   });
-  $("#mr-run").addEventListener("click", () => {
+  $("#mr-run").addEventListener("click", async () => {
     const st = $("#mr-state").value.trim();
     if (!st) { $("#mr-msg").textContent = "enter a state"; return; }
-    $("#mr-msg").textContent = "";
-    postDownloadHtml("/api/report/market", {
+    $("#mr-msg").textContent = "building…";
+    // an invalid state ("ZZ") threw an unhandled rejection and showed
+    // nothing (P1.23): the refusal now lands in the message line
+    await openReportWith("/api/report/market", {
       state: st, code: $("#mr-code").value.trim() || "97110",
       zip: $("#mr-zip").value.trim() || null,
-      market: { month: "latest", therapy_only: false } });
+      market: { month: "latest", therapy_only: false } },
+      (msg) => { $("#mr-msg").textContent = msg; }, { view: "leads", label: "Market report", anchor: "#mr-run" });
+    if ($("#mr-msg").textContent === "building…") $("#mr-msg").textContent = "";
   });
-}
-
-// open a POSTed HTML report in a new tab (same trick the other reports use)
-async function postDownloadHtml(url, body) {
-  const r = await fetch(url, { method: "POST",
-    headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  if (!r.ok) {
-    let msg = `HTTP ${r.status}`;
-    try { msg = (await r.json()).detail || msg; } catch { /* not json */ }
-    throw new Error(msg);
-  }
-  const html = await r.text();
-  const w = window.open("", "_blank");
-  if (w) { w.document.write(html); w.document.close(); }
 }
 
 function initGrowth() {
@@ -2860,7 +4130,7 @@ async function runHospitalParity() {
       payer: $("#ng-payer").value || null,
       state: $("#hp-state").value.trim() || $("#ng-state").value.trim() || null,
       market: { month: $("#ng-month").value || "latest",
-                therapy_only: $("#ng-therapy").checked },
+                peer_group: $("#ng-peer").value },
     });
   } catch (e) { out.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
   if (!d.loaded || !d.rows.length) {
@@ -2890,19 +4160,19 @@ async function runHospitalParity() {
 
 /* ---- closures (NPPES deactivation dates) -------------------------------- */
 function initClosures() {
-  $("#cl-run").addEventListener("click", async () => {
-    const out = $("#cl-out");
-    $("#cl-msg").textContent = "looking…";
+  $("#cz-run").addEventListener("click", async () => {
+    const out = $("#cz-out");
+    $("#cz-msg").textContent = "looking…";
     let d;
     try {
       d = await postJson("/api/closures", {
-        zip: $("#cl-zip").value.trim() || null,
-        radius_miles: $("#cl-zip").value.trim() ? Number($("#cl-radius").value) : null,
-        state: $("#cl-state").value.trim() || null,
-        days: Number($("#cl-days").value),
+        zip: $("#cz-zip").value.trim() || null,
+        radius_miles: $("#cz-zip").value.trim() ? Number($("#cz-radius").value) : null,
+        state: $("#cz-state").value.trim() || null,
+        days: Number($("#cz-days").value),
       });
-    } catch (e) { $("#cl-msg").textContent = ""; out.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
-    $("#cl-msg").textContent = "";
+    } catch (e) { $("#cz-msg").textContent = ""; out.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
+    $("#cz-msg").textContent = "";
     if (d.reason) { out.innerHTML = `<div class="muted">${esc(d.reason)}</div>`; return; }
     if (!d.rows.length) {
       out.innerHTML = `<div class="muted">No therapy NPI was deactivated in the last ${d.days} days
@@ -2988,7 +4258,8 @@ async function runRemitCheck() {
     subject: $("#rm-subject").value.trim(),
     text: $("#rm-text").value,
     basis: $("#rm-basis").value,
-    market: { month: "latest" },
+    market: { month: "latest", ...($("#rm-state").value.trim()
+      ? { state: $("#rm-state").value.trim().toUpperCase() } : {}) },
   };
   state.lastRemitPayload = null;
   $("#rm-csv").disabled = true;
@@ -3273,7 +4544,7 @@ async function runMedicareOrg() {
   let d;
   // limit 500 (the API max) so the table and its CSV carry everything up to
   // the cap — and total_partners says when even that truncates
-  try { d = await postJson("/api/medicare/org", { subject, dataset_id: $("#md-year").value || null, limit: 500 }); }
+  try { d = await postJson("/api/medicare/org", { subject, dataset_id: $("#md-year").value || null, limit: 500 }, { view: "medicare", label: "Practice lookup", anchor: "#md-run" }); }
   catch (e) { out.innerHTML = `<div class="empty"><h3>Could not look up</h3>${esc(e.message)}</div>`; return; }
   state.lastMedicareOrg = d;
   $("#md-csv").disabled = !(d.referrals_in.rows.length || d.referrals_out.rows.length);
@@ -3450,19 +4721,33 @@ function downloadMedicareCheckCsv() {
    LEADS + RATE-CHANGE MONITORING
    ======================================================================= */
 
-async function postDownload(url, payload, filename) {
+async function postDownload(url, payload, filename, bar) {
+  let jb = null, poll = null;
+  const headers = { "Content-Type": "application/json" };
+  if (bar) {
+    const token = newToken();
+    headers["X-Mrfx-Progress"] = token;
+    jb = mountJobbar(bar, token);
+    poll = startPoll(token, jb, bar);
+  }
   try {
     const r = await fetch(url, {
-      method: "POST", headers: { "Content-Type": "application/json" },
+      method: "POST", headers,
       body: JSON.stringify(payload),
     });
-    if (!r.ok) { alert("export failed: " + (await r.text())); return; }
+    if (poll) poll.stop();
+    if (!r.ok) {
+      if (jb) { if (r.status === 409) { jb.stopped(); return; } jb.failed("not built"); }
+      alert("The export was not built.\n\n" + await refusalText(r)); return;
+    }
+    const blob = await r.blob();
+    if (jb) jb.done();
     const a = document.createElement("a");
-    a.href = URL.createObjectURL(await r.blob());
+    a.href = URL.createObjectURL(blob);
     a.download = filename;
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 60000);
-  } catch (e) { alert("export failed: " + e.message); }
+  } catch (e) { if (poll) poll.stop(); if (jb) jb.failed("failed"); alert("export failed: " + e.message); }
 }
 
 let leadsInit = false;
@@ -3479,7 +4764,7 @@ async function initLeads() {
     api("/api/states").catch(() => null),
   ]);
   fillMonthSelect("#ld-month", months, LATEST_MONTH_OPT);
-  if (payers) $("#ld-payer-chips").innerHTML = payers.payers.map((p) => `<button class="chip" data-payer="${esc(p)}">${esc(p)}</button>`).join("");
+  if (payers) $("#ld-payer-chips").innerHTML = payerChipsHtml(payers);
   $("#ld-payer-chips").addEventListener("click", (ev) => { const b = ev.target.closest(".chip"); if (b) b.classList.toggle("on"); });
   if (states) $("#ld-states").innerHTML = (states.states || []).map((s) => `<option value="${esc(s)}">`).join("");
   if (subjects) $("#ld-subjects").innerHTML = subjectOptionsHtml(subjects);
@@ -3492,7 +4777,7 @@ async function initLeads() {
   initDossier();
   initGrowth();
   initMarketSizing();
-  $("#ld-csv").addEventListener("click", () => { if (state.lastLeadsPayload) postDownload("/api/leads.csv", state.lastLeadsPayload, "leads.csv"); });
+  $("#ld-csv").addEventListener("click", () => { if (state.lastLeadsPayload) postDownload("/api/leads.csv", state.lastLeadsPayload, "leads.csv", { view: "leads", label: "Leads CSV", anchor: "#ld-csv" }); });
   $("#ld-board-run").addEventListener("click", runLeaderboard);
 }
 
@@ -3502,10 +4787,15 @@ async function runLeaderboard() {
   const sort = $("#ld-board-sort").value;
   el.innerHTML = `<div class="loading">Building market leaderboard</div>`;
   let d;
+  const isFresh = ticket("leaderboard");
   try {
     d = await postJson("/api/leaderboard", {
-      market: payload.market, min_codes: payload.min_codes, sort, limit: 50 });
-  } catch (e) { el.innerHTML = `<div class="empty">Couldn't build the leaderboard (${esc(e.message)}).</div>`; return; }
+      market: payload.market, min_codes: payload.min_codes, sort, limit: 50 }, { view: "leads", label: "Leaderboard", anchor: "#ld-board-run" });
+  } catch (e) {
+    if (!isFresh()) return;
+    el.innerHTML = `<div class="empty">Couldn't build the leaderboard (${esc(e.message)}).</div>`; return;
+  }
+  if (!isFresh()) return;
   if (!d.count) {
     el.innerHTML = `<div class="ov-block"><h3>Market leaderboard</h3><div class="muted">No practices price at least ${d.min_codes} codes with a real market under this scope.</div></div>`;
     return;
@@ -3537,7 +4827,7 @@ function fillMonthSelect(sel, months, prefix = "") {
   const el = $(sel);
   if (!el) return;
   const opts = months
-    ? (months.months || []).filter(Boolean).map((m) => `<option>${esc(m)}</option>`).join("")
+    ? monthOptionsHtml({ months: (months.months || []).filter(Boolean), covered: months.covered })
     : "";
   const note = !months
     ? `<option value="" disabled>couldn't load months — reopen this tab</option>`
@@ -3561,7 +4851,7 @@ function leadsPayload() {
   const market = { month, payers: $$("#ld-payer-chips .chip.on").map((c) => c.dataset.payer) };
   if ($("#ld-state").value.trim()) market.state = $("#ld-state").value.trim();
   if ($("#ld-disc").value) market.discipline = $("#ld-disc").value;
-  if ($("#ld-therapy").checked) market.therapy_only = true;
+  market.peer_group = $("#ld-peer").value;
   const p = { market, threshold_percentile: +$("#ld-threshold").value, min_codes: +$("#ld-mincodes").value || 3 };
   if ($("#ld-exclude").value.trim()) p.exclude_subject = $("#ld-exclude").value.trim();
   return p;
@@ -3575,7 +4865,12 @@ async function runLeads() {
   try { payload = leadsPayload(); } catch (e) { out.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
   out.innerHTML = `<div class="loading">Finding leads</div>`;
   let data;
-  try { data = await postJson("/api/leads", payload); } catch (e) { out.innerHTML = `<div class="empty"><h3>Search failed</h3>${esc(e.message)}</div>`; return; }
+  const isFresh = ticket("leads");
+  try { data = await postJson("/api/leads", payload, { view: "leads", label: "Leads", anchor: "#ld-run" }); } catch (e) {
+    if (!isFresh()) return;
+    out.innerHTML = `<div class="empty"><h3>Search failed</h3>${esc(e.message)}</div>`; return;
+  }
+  if (!isFresh()) return;
   state.lastLeadsPayload = payload;
   $("#ld-csv").disabled = false;
   renderLeads(out, data);
@@ -3583,28 +4878,32 @@ async function runLeads() {
 
 function renderLeads(out, data) {
   if (!data.leads.length) {
-    const therapyOn = $("#ld-therapy") && $("#ld-therapy").checked;
-    out.innerHTML = `<div class="empty"><h3>No leads found</h3>No practices at or below p${data.threshold_percentile} that price at least ${data.min_codes} codes with a market. Widen the cutoff or lower the min codes.${therapyOn ? ` <br><span class="muted">"Therapy practices only" is on — it keeps practices whose identified providers are MOSTLY PT/OT/SLP and excludes hospital systems and physician groups (and practices not yet identified). Uncheck it, or let NPI identification finish, to see more.</span>` : ""}</div>`;
+    const therapyOn = $("#ld-peer") && $("#ld-peer").value !== "all";
+    out.innerHTML = `<div class="empty"><h3>No leads found</h3>No practices at or below p${data.threshold_percentile} that price at least ${data.min_codes} codes with a market. Widen the cutoff or lower the min codes.${therapyOn ? ` <br><span class="muted">"Compare against" is limited to ${esc($("#ld-peer").selectedOptions[0].textContent)} — it excludes hospital systems, facilities and physician groups (and practices not yet identified). Choose "all practices", or let NPI identification finish, to see more.</span>` : ""}</div>`;
     return;
   }
   const rows = data.leads.map((l) => `<tr>
-    <td>${esc(l.display_name || "")}<div class="sub">${esc(l.entity_kind || "")}${l.website ? ` · <a href="${esc(l.website)}" target="_blank" rel="noopener">site</a>` : ""}</div></td>
+    <td>${esc(l.display_name || "")}<div class="sub">${esc(l.entity_kind || "")}${l.website ? ` · <a href="${esc(l.website)}" target="_blank" rel="noopener">site</a>` : ""}</div>${(l.not_in_newest || []).length ? `<div class="sub warn-text" title="its rate here is from an older file of that payer; the payer may have dropped it, or its newest month is only partly loaded">⚠ not in ${esc(l.not_in_newest.map((d) => `${d.payer}'s newest file (${d.payer_newest}; last seen ${d.last_seen})`).join(", "))}</div>` : ""}</td>
     <td class="sub">${esc([l.city, l.state].filter(Boolean).join(", "))}${l.multi_state ? ` <span class="muted" title="${esc((l.states || []).join(", "))}">(+${(l.states || []).length - 1} more state${(l.states || []).length - 1 === 1 ? "" : "s"})</span>` : ""}</td>
     <td class="num">${fmtInt(l.npi_count)}</td>
     <td class="num">${l.n_codes}</td>
     <td class="num">p${l.median_percentile}</td>
     <td class="num">${money(l.avg_gap_to_median)}</td>
-    <td>${l.worst_payer ? `${esc(l.worst_payer)}<div class="sub">${money(l.worst_payer_gap)}/code under mkt</div>` : "<span class='muted'>–</span>"}</td>
+    <td>${l.worst_payer ? `${esc(l.worst_payer)}<div class="sub">${money(l.worst_payer_gap)}/code under mkt${l.worst_payer_codes ? ` · ${l.worst_payer_codes} ${l.worst_payer_basis === "shared" ? "shared " : ""}code${l.worst_payer_codes === 1 ? "" : "s"}` : ""}</div>` : "<span class='muted'>–</span>"}</td>
     <td class="sub">${esc(l.tin_value)}</td></tr>`).join("");
-  out.innerHTML = `<div class="rc-summary">${data.count} practice(s) at or below p${data.threshold_percentile}, most underpaid first. <span class="muted">"Underpaid by" is the payer with the biggest average shortfall vs the market median — your outreach hook. Avg $ below median is a rate-level gap, not annual dollars.</span></div>
-    <div class="tablewrap"><table class="rc-table"><thead><tr><th>Practice</th><th>Location</th><th class="num">Providers</th><th class="num">Codes</th><th class="num">Position</th><th class="num">Avg $ below median</th><th>Underpaid most by</th><th>Tax ID</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  const cut = data.truncated
+    ? ` <span class="warn-text">The list stops at ${fmtInt(data.limit)} — the market holds more. Narrow it (state, payer) or raise the min codes to see the rest.</span>`
+    : "";
+  out.innerHTML = `<div class="rc-summary">${data.count} practice(s) at or below p${data.threshold_percentile}, most underpaid first.${cut} <span class="muted">"Underpaid by" is the payer with the biggest average shortfall vs the market median — your outreach hook. Avg $ below median is a rate-level gap, not annual dollars.</span></div>
+    <div class="tablewrap"><table class="rc-table"><thead><tr><th>Practice</th><th>Location</th><th class="num">Providers</th><th class="num">Codes</th><th class="num">Position</th><th class="num" title="average dollars under the median of the other practices, over the codes with a market">Avg $ below median</th><th title="the payer whose rates sit the most DOLLARS under the market on the codes all its payers price (the dossier's 'weakest payer' is a different measure: their lowest position among a payer's practices)">Underpaid most by ($ on shared codes)</th><th>Tax ID</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
 let changesInit = false;
 async function initChanges() {
   if (changesInit) {
     refreshSubjectPickers("#ch-subjects",
-      [{ sel: "#ch-month" }, { sel: "#ch-prev", prefix: `<option value="">auto — the previous month present</option>` }]);
+      [{ sel: "#ch-month", prefix: `<option value="latest">Latest — each payer's newest file vs its previous one</option>` },
+       { sel: "#ch-prev", prefix: `<option value="">auto — the previous month present</option>` }]);
     return;
   }
   changesInit = true;
@@ -3613,26 +4912,38 @@ async function initChanges() {
     api("/api/months").catch(() => null),
     api("/api/payers").catch(() => null),
   ]);
-  fillMonthSelect("#ch-month", months);
+  fillMonthSelect("#ch-month", months, `<option value="latest">Latest — each payer's newest file vs its previous one</option>`);
   fillMonthSelect("#ch-prev", months, `<option value="">auto — the previous month present</option>`);
-  if (payers) $("#ch-payer-chips").innerHTML = payers.payers.map((p) => `<button class="chip" data-payer="${esc(p)}">${esc(p)}</button>`).join("");
+  if (payers) $("#ch-payer-chips").innerHTML = payerChipsHtml(payers);
+  // the State box's suggestions (list="ld-states") were filled only once the
+  // Leads tab had been opened
+  if (!$("#ld-states").options.length) {
+    api("/api/states").then((d) => {
+      if (!$("#ld-states").options.length)
+        $("#ld-states").innerHTML = (d.states || []).map((x) => `<option value="${esc(x)}">`).join("");
+    }).catch(() => {});
+  }
   $("#ch-payer-chips").addEventListener("click", (ev) => { const b = ev.target.closest(".chip"); if (b) b.classList.toggle("on"); });
   if (subjects) $("#ch-subjects").innerHTML = subjectOptionsHtml(subjects);
   wireSubjectSearch("#ch-subject", "#ch-subjects");
   $("#ch-run").addEventListener("click", runChanges);
-  $("#ch-csv").addEventListener("click", () => { if (state.lastChangesPayload) postDownload("/api/changes.csv", state.lastChangesPayload, "rate_changes.csv"); });
+  $("#ch-csv").addEventListener("click", () => { if (state.lastChangesPayload) postDownload("/api/changes.csv", state.lastChangesPayload, "rate_changes.csv", { view: "changes", label: "Rate changes CSV", anchor: "#ch-csv" }); });
   $("#ch-traj-run").addEventListener("click", runTrajectory);
 }
 
 async function runTrajectory() {
   const el = $("#ch-traj");
   // trajectory spans all months, so it ignores the two-month picker; it reuses
-  // only the payer/discipline scope from the changes market
+  // the payer / discipline / STATE scope of the changes market (it was always
+  // the national call: 20 s on a 99M store where one state takes 2 s)
   const market = { payers: $$("#ch-payer-chips .chip.on").map((c) => c.dataset.payer) };
   if ($("#ch-disc").value) market.discipline = $("#ch-disc").value;
-  el.innerHTML = `<div class="loading">Tracing payer trajectories across all months</div>`;
+  const st = $("#ch-state").value.trim();
+  if (st) market.state = st;
+  else market.allow_national = true;
+  el.innerHTML = `<div class="loading">Tracing payer trajectories across all months${st ? ` in ${esc(st.toUpperCase())}` : " in every state (the slowest view on a big store)"}</div>`;
   let d;
-  try { d = await postJson("/api/trajectory", { market }); }
+  try { d = await postJson("/api/trajectory", { market }, { view: "changes", label: "Payer trajectory", anchor: "#ch-traj-run" }); }
   catch (e) { el.innerHTML = `<div class="empty">Couldn't build the trajectory (${esc(e.message)}).</div>`; return; }
   if (!d.count) {
     el.innerHTML = `<div class="ov-block"><h3>Payer trajectory</h3><div class="muted">No payer has ≥2 months of data under this scope. Re-ingest the payers' newer MRFs (a later file month).</div></div>`;
@@ -3649,8 +4960,8 @@ async function runTrajectory() {
     return `<tr>
       <td>${esc(p.payer)}</td>
       <td class="num muted">${esc(p.first_month)}→${esc(p.last_month)} (${p.n_months})</td>
-      <td class="num">${money(p.first_rate)} → <b>${money(p.last_rate)}</b></td>
-      <td class="num ${cls}">${arrow[p.direction] || ""} ${pctTxt(p.cumulative_pct)}</td>
+      <td class="num muted" title="the codes and practices this payer priced in both its first and last month — the change is measured on these only">${fmtInt(p.panel_codes || 0)} code${p.panel_codes === 1 ? "" : "s"} · ${fmtInt(p.panel_practices || 0)} practice${p.panel_practices === 1 ? "" : "s"}</td>
+      <td class="num ${cls}">${p.cumulative_pct == null ? "<span class='muted' title='no practice was priced on the same code in its first and last month'>no matched panel</span>" : `${arrow[p.direction] || ""} ${pctTxt(p.cumulative_pct)}`}</td>
       <td class="num ${realCls}" title="${esc(p.erosion_line || p.real_reason || "")}">${pctTxt(p.real_cumulative_pct)}</td>
       <td class="num muted">${p.cut_streak || 0}</td></tr>`;
   }).join("");
@@ -3666,11 +4977,13 @@ async function runTrajectory() {
     : inf.basis === "assumption"
       ? `Real terms use YOUR assumption of ${inf.assumed_pct_per_year}%/yr — an assumption, not a measurement.`
       : `<b>No real-terms figures:</b> ${esc(inf.reason || "no index year covers this span.")}`;
-  el.innerHTML = `<div class="ov-block"><h3>Payer rate trajectory — all ${d.months.length} loaded months</h3>
+  // the scope it was computed for (state · payers · discipline), and the
+  // months the series cover — "all 3 loaded months" stayed after a MO run
+  el.innerHTML = `<div class="ov-block"><h3>Payer rate trajectory — ${d.months.length} month${d.months.length === 1 ? "" : "s"} (${esc(d.months[0] || "")} → ${esc(d.months[d.months.length - 1] || "")})${changesScopeText() || " — every state"}</h3>
     <div class="muted" style="margin-bottom:6px">${esc(d.note)} Most-eroding first.</div>
     ${lines}
     <div class="tablewrap"><table>
-      <thead><tr><th>Payer</th><th class="num">Span</th><th class="num">First → last median</th><th class="num">Cumulative</th><th class="num" title="the same change restated in constant dollars — a flat rate is a real cut">Real terms</th><th class="num">Cut streak</th></tr></thead>
+      <thead><tr><th>Payer</th><th class="num">Span</th><th class="num">Matched panel</th><th class="num">Cumulative</th><th class="num" title="the same change restated in constant dollars — a flat rate is a real cut">Real terms</th><th class="num">Cut streak</th></tr></thead>
       <tbody>${rows}</tbody></table></div>
     <div class="muted" style="margin-top:6px">${basis} ${esc(inf.caveat || "")}</div></div>`;
 }
@@ -3681,6 +4994,7 @@ function changesPayload() {
   const market = { month, payers: $$("#ch-payer-chips .chip.on").map((c) => c.dataset.payer) };
   if ($("#ch-prev").value) market.prev_month = $("#ch-prev").value;
   if ($("#ch-disc").value) market.discipline = $("#ch-disc").value;
+  if ($("#ch-state").value.trim()) market.state = $("#ch-state").value.trim();
   const p = { market };
   if ($("#ch-subject").value.trim()) p.subject = $("#ch-subject").value.trim();
   if ($("#ch-minpct").value.trim()) p.min_pct = +$("#ch-minpct").value;
@@ -3697,7 +5011,12 @@ async function runChanges() {
   // order. Say which way round it goes here rather than spending a round trip
   // to be told — the server still validates.
   const mNew = $("#ch-month").value, mPrev = $("#ch-prev").value;
-  if (mPrev && mNew && mPrev >= mNew) {
+  if (mNew === "latest" && mPrev) {
+    out.innerHTML = `<div class="empty"><h3>"Latest" compares each payer with its own previous file</h3>
+      Leave "compare to" on auto, or pick a specific new month to compare against ${esc(mPrev)}.</div>`;
+    return;
+  }
+  if (mPrev && mNew && mNew !== "latest" && mPrev >= mNew) {
     out.innerHTML = `<div class="empty"><h3>Pick the earlier month to compare against</h3>
       ${esc(mPrev === mNew
         ? `Both boxes are set to ${mNew}. Choose an earlier month in "compare to".`
@@ -3706,25 +5025,60 @@ async function runChanges() {
   }
   out.innerHTML = `<div class="loading">Comparing months</div>`;
   let data;
-  try { data = await postJson("/api/changes", payload); } catch (e) { out.innerHTML = `<div class="empty"><h3>Could not compare</h3>${esc(e.message)}</div>`; return; }
+  const isFresh = ticket("changes");
+  try { data = await postJson("/api/changes", payload, { view: "changes", label: "Rate changes", anchor: "#ch-run" }); } catch (e) {
+    if (!isFresh()) return;
+    out.innerHTML = `<div class="empty"><h3>Could not compare</h3>${esc(e.message)}</div>`; return;
+  }
+  if (!isFresh()) return;
   state.lastChangesPayload = payload;
   $("#ch-csv").disabled = false;
   renderChanges(out, data);
 }
 
+function changesScopeText() {
+  const bits = [];
+  const st = ($("#ch-state") || {}).value;
+  if (st && st.trim()) bits.push(esc(st.trim().toUpperCase()));
+  const payers = $$("#ch-payer-chips .chip.on").map((c) => esc(c.dataset.payer));
+  if (payers.length) bits.push(payers.join(", "));
+  const disc = ($("#ch-disc") || {}).value;
+  if (disc) bits.push(esc(disc));
+  return bits.length ? ` — ${bits.join(" · ")}` : "";
+}
+
 function renderChanges(out, d) {
+  // per payer: which two of ITS files were compared, and which payers have
+  // only one file loaded (nothing to compare yet)
+  const pairsText = (d.compared || []).map((c) =>
+    `${esc(c.payer)} ${esc(c.prev_month)} → ${esc(c.new_month)}`).join("; ");
+  const span = d.per_payer
+    ? (d.new_month && d.new_month !== "latest"
+        ? `each payer's ${esc(d.new_month)} file vs its own previous one (${pairsText})`
+        : `each payer's newest file vs its previous one (${pairsText})`)
+    : `${esc(d.prev_month)} → ${esc(d.new_month)}`;
+  // what the result was computed for (review 10, P3: it did not say)
+  const scope = changesScopeText();
+  // a block AFTER the sentence: inside it, the sentence's "." and "Biggest
+  // cut" started a new line (". Biggest cut -10%.")
+  const notCompared = (d.not_compared || []).length
+    ? `<div class="sub">Not compared (no file for one of the two months): ${
+        d.not_compared.map((c) => esc(c.payer)).join(", ")}</div>` : "";
   if (!d.changes.length) {
-    out.innerHTML = `<div class="empty"><h3>No changes</h3>No rate moves from ${esc(d.prev_month)} to ${esc(d.new_month)} under the current filters.</div>`;
+    out.innerHTML = `<div class="empty"><h3>No changes</h3>No rate moves, ${span}${scope}.${notCompared}</div>`;
     return;
   }
   const rows = d.changes.map((c) => {
     const cls = c.direction === "cut" ? "chg-cut" : "chg-up";
     return `<tr><td>${esc(c.payer)}</td>
       <td>${esc(c.display_name || "")}<div class="sub">${esc(c.tin_value)}</div></td>
-      <td>${esc(c.billing_code)}<div class="sub">${esc(c.description || "")}${c.modifier_set ? ` · ${esc(c.modifier_set)}` : ""}</div></td>
+      <td>${esc(c.billing_code)}<div class="sub">${esc(c.description || "")}${c.modifier_set ? ` · ${esc(c.modifier_set)}` : ""}${
+        c.billing_class && c.billing_class !== "professional" ? ` · ${esc(c.billing_class)}` : ""}${
+        c.service_code_set ? ` · POS ${esc(String(c.service_code_set).replaceAll("|", ", "))}` : ""}</div></td>
       <td class="num">$${fmtMoney(c.old_rate)}</td><td class="num">$${fmtMoney(c.new_rate)}</td>
       <td class="num ${cls}">${c.delta < 0 ? "−" : "+"}$${fmtMoney(Math.abs(c.delta))}</td>
-      <td class="num ${cls}">${c.pct_change > 0 ? "+" : ""}${c.pct_change}%</td></tr>`;
+      <td class="num ${cls}">${c.pct_change > 0 ? "+" : ""}${c.pct_change}%</td>${
+        d.per_payer ? `<td class="sub">${esc(c.prev_month)} → ${esc(c.new_month)}</td>` : ""}</tr>`;
   }).join("");
   // by-payer direction: is a payer systematically cutting across the market?
   const bp = (d.by_payer || []).filter((p) => p.n >= 2);
@@ -3741,9 +5095,9 @@ function renderChanges(out, d) {
   const capNote = d.truncated
     ? ` <span class="warn-text">Showing the ${fmtInt(d.cap)} largest moves — the cut/increase counts and by-payer stats cover only these. Narrow the market (payer/state/discipline) to see the rest.</span>`
     : "";
-  out.innerHTML = `<div class="rc-summary"><b>${d.n_cuts}</b> cut(s), <b>${d.n_increases}</b> increase(s) from ${esc(d.prev_month)} → ${esc(d.new_month)}.${d.biggest_cut_pct != null ? ` Biggest cut ${d.biggest_cut_pct}%.` : ""}${capNote}</div>
+  out.innerHTML = `<div class="rc-summary"><b>${d.n_cuts}</b> cut(s), <b>${d.n_increases}</b> increase(s), ${span}.${d.biggest_cut_pct != null ? ` Biggest cut ${d.biggest_cut_pct}%.` : ""}${capNote}${notCompared}</div>
     ${byPayer}
-    <div class="tablewrap"><table class="rc-table"><thead><tr><th>Payer</th><th>Practice</th><th>Code</th><th class="num">Was</th><th class="num">Now</th><th class="num">Δ</th><th class="num">%</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    <div class="tablewrap"><table class="rc-table"><thead><tr><th>Payer</th><th>Practice</th><th>Code</th><th class="num">Was</th><th class="num">Now</th><th class="num">Δ</th><th class="num">%</th>${d.per_payer ? "<th>Months</th>" : ""}</tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
 /* =======================================================================
@@ -3759,16 +5113,28 @@ function qaLine(qa) {
   if (qa.billing_type_other) bits.push(`${fmtInt(qa.billing_type_other)} non-CPT/HCPCS`);
   if (qa.multi_code_fields) bits.push(`<span class="bad">${fmtInt(qa.multi_code_fields)} multi-code fields</span>`);
   if (qa.tin_is_really_npi_rows) bits.push(`${fmtInt(qa.tin_is_really_npi_rows)} TIN=NPI`);
+  if (qa.pos_in_modifier_rows) bits.push(`<span title="This payer put place-of-service codes (11 office, 22 outpatient hospital, ...) in the modifier field. MRF Explorer moved them to place of service, so these rates count as base (no modifier).">${fmtInt(qa.pos_in_modifier_rows)} POS codes moved out of modifiers</span>`);
+  if (qa.future_header_date) bits.push(`<span class="warn" title="The payer dated this file ${esc(qa.future_header_date)} — later than the day it was read — so it is filed under the month in its name (or the month it was read) instead.">dated in the future (${esc(String(qa.future_header_date).slice(0, 10))})</span>`);
+  if (qa.modifier_split_rows) bits.push(`<span title="This payer wrote two modifiers as one (e.g. &quot;52,53&quot;). MRF Explorer split them.">${fmtInt(qa.modifier_split_rows)} combined modifiers split</span>`);
   if (qa.duplicate_explosion_ratio > 1.5) bits.push(`<span class="warn">${qa.duplicate_explosion_ratio}x dup</span>`);
   return bits.length
     ? `<span class="qa-line" title="${esc(qa.outlier_rule || "")}">${bits.join(" · ")}</span>`
     : `<span class="qa-line muted">clean</span>`;
 }
 
+let filesInFlight = false;
 async function loadFiles() {
+  // the 4 s poll must not stack requests behind a slow store, nor run while
+  // the browser tab is hidden (audit 8 P1-C)
+  if (filesInFlight || document.hidden) return;
+  filesInFlight = true;
+  try { await loadFilesNow(); } finally { filesInFlight = false; }
+}
+
+async function loadFilesNow() {
   const body = $("#files-body"), stateEl = $("#files-state");
   let d;
-  try { d = await api("/api/files"); }
+  try { d = await api(`/api/files?limit=${state.filesLimit || 500}`); }
   catch (e) { stateEl.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
   if (!d.files.length) {
     body.innerHTML = "";
@@ -3776,14 +5142,97 @@ async function loadFiles() {
       Drop an MRF into <code class="inline">data/inbox/</code> or use the upload zone above.</div>`;
     return;
   }
-  stateEl.innerHTML = "";
+  // the one-time stored-row update still running behind the dashboard, and
+  // payer x month cells pooled from several files (review 12 items 2.9, 2.5)
+  const ru = d.rows_update;
+  const ruLine = ru && (ru.running || ru.pending)
+    ? `<div class="warn-text">Updating stored rows to this version's rules: ${fmtInt(ru.done || 0)} of ${fmtInt(ru.total || 0)} files — numbers from the files not yet updated can still change.</div>`
+    : "";
+  const pm = d.pooled_months || [];
+  const pmLine = pm.length
+    ? `<div class="muted" title="${esc(d.pooled_note || "")}">Pooled months: ${pm.slice(0, 4).map((r) =>
+        `${esc(r.payer)} ${esc(r.file_month || "")} has ${fmtInt(r.files)} files, ${fmtInt(r.practices_in_several)} practices priced in more than one (${fmtInt(r.lines_differing)} lines at different rates)`).join("; ")}${pm.length > 4 ? `; and ${fmtInt(pm.length - 4)} more` : ""} — their rates are pooled (median), not one file replacing another.</div>`
+    : "";
+  const an = d.analytics;
+  const anLine = an && an.state && an.state !== "current"
+    ? `<div class="warn-text">${an.state === "failed" ? "Analytics update stopped — " : an.state === "building" ? "Analytics: " : "Analytics behind — "}${esc(an.sentence || "")}${an.state === "building" && an.pct != null
+        ? ` <span class="progress" style="display:inline-block;width:160px;vertical-align:middle"><span class="progress-fill" style="width:${Math.max(0, Math.min(100, an.pct))}%"></span></span>`
+        : ""}</div>`
+    : "";
+  // files read before the user ADDED billing codes (review 13 item 5.2.4)
+  const rr = d.reread;
+  const rrLine = rr && rr.count
+    ? `<div class="warn-text">${fmtInt(rr.count)} loaded file${rr.count === 1 ? " was" : "s were"} read before ` +
+      `you added billing code${rr.added.length === 1 ? "" : "s"} ${esc(rr.added.join(", "))} — ` +
+      (rr.running ? "re-reading them now…" :
+        `<button class="btn" id="files-reread" style="padding:2px 8px;font-size:12px">Re-read ${fmtInt(rr.count)} file${rr.count === 1 ? "" : "s"} for the new codes</button>`) +
+      (rr.cannot_count ? ` <span class="muted">${fmtInt(rr.cannot_count)} more ha${rr.cannot_count === 1 ? "s" : "ve"} no kept copy and no link — drop ${rr.cannot_count === 1 ? "it" : "them"} in again: ${esc((rr.cannot || []).join(", "))}</span>` : "") +
+      `</div>`
+    : (rr && rr.cannot_count ? `<div class="muted">${fmtInt(rr.cannot_count)} loaded file${rr.cannot_count === 1 ? " was" : "s were"} read before you added billing codes and ha${rr.cannot_count === 1 ? "s" : "ve"} no kept copy and no link — drop ${rr.cannot_count === 1 ? "it" : "them"} in again to read the new codes: ${esc((rr.cannot || []).join(", "))}</div>` : "");
+  // automatic backups (review 13 Group 6.3): off, or the last one taken
+  const bk = d.backup;
+  const bkLine = bk && bk.sentence
+    ? `<div class="${bk.on && bk.last && bk.last.error ? "warn-text" : "muted"}" id="files-backup">${esc(bk.sentence)}` +
+      (bk.on ? ` <button class="btn" id="files-backup-now" style="padding:2px 8px;font-size:12px">Back up now</button>` : "") +
+      `</div>`
+    : "";
+  // older files being named by content (review 14 item 2.2)
+  const cb = d.content_backfill;
+  const cbLine = cb && cb.sentence ? `<div class="muted">${esc(cb.sentence)}</div>` : "";
+  stateEl.innerHTML = anLine + rrLine + ruLine + pmLine + bkLine + cbLine + (d.total > d.files.length
+    ? `<div class="muted">Showing the newest ${fmtInt(d.files.length)} of ${fmtInt(d.total)} files.
+        <button class="btn" id="files-more" style="padding:2px 8px;font-size:12px">show ${fmtInt(Math.min(d.total, (state.filesLimit || 500) * 4))}</button></div>`
+    : "");
+  const rrBtn = document.getElementById("files-reread");
+  if (rrBtn) rrBtn.onclick = async () => {
+    rrBtn.disabled = true;
+    try { await postJson("/api/files/reread", {}); } catch (e) { alert(e.message); }
+    loadFiles();
+  };
+  const bkBtn = document.getElementById("files-backup-now");
+  if (bkBtn) bkBtn.onclick = async () => {
+    bkBtn.disabled = true;
+    try {
+      const r = await postJson("/api/backup", {}, { view: "files", label: "Backup", anchor: "#files-backup" });
+      if (r && r.verdict) alert(`Backup written: ${r.path}\n${r.verdict}`);
+    } catch (e) { alert(e.message); }
+    loadFiles();
+  };
+  const more = $("#files-more");
+  if (more) more.onclick = () => { state.filesLimit = Math.min(5000, (state.filesLimit || 500) * 4); loadFiles(); };
   body.innerHTML = d.files.map((f) => {
-    let warn = "";
-    if (f.ref_groups_skipped > 0)
-      warn = `<span class="warn-text">⚠ ${fmtInt(f.ref_groups_skipped)} rate groups skipped — missing provider reference file</span>`;
+    let warn = f.identity_note ? `<span class="muted" title="${esc(f.identity_note)}">ⓘ loaded before identities were kept</span> ` : "";
+    if (f.ref_groups_skipped > 0) {
+      const remote = (f.qa && f.qa.remote_ref_groups) || 0;
+      warn = remote >= f.ref_groups_skipped
+        ? `<span class="warn-text" title="The payer published these provider lists as separate web links (location URLs). MRF Explorer does not download those, and dropping the linked files in will not fill them.">⚠ ${fmtInt(f.ref_groups_skipped)} rate groups skipped — their provider lists are remote links MRF Explorer doesn't download</span>`
+        : remote > 0
+          ? `<span class="warn-text">⚠ ${fmtInt(f.ref_groups_skipped)} rate groups skipped — ${fmtInt(remote)} point at remote provider lists MRF Explorer doesn't download; the rest need the payer's provider reference file</span>`
+          : `<span class="warn-text">⚠ ${fmtInt(f.ref_groups_skipped)} rate groups skipped — missing provider reference file</span>`;
+      const amb = (f.qa && f.qa.ambiguous_ref_ids) || 0;
+      if (amb > 0 && remote < f.ref_groups_skipped)
+        warn = `<span class="warn-text" title="This file has no provider list of its own, and two of the payer's provider reference files from the same month define the same reference ids differently (for example a PPO and an HMO list). MRF Explorer cannot tell which one this file means, so it attached neither rather than guess.">⚠ ${fmtInt(f.ref_groups_skipped)} rate groups skipped — ${fmtInt(amb)} reference id(s) defined differently by two of the payer's reference files; neither used</span>`;
+    }
+    // a group whose references were only PARTLY found kept the practices it
+    // could name and dropped the rest — say so (round 7 P1.7)
+    const missingIds = (f.qa && f.qa.missing_ref_ids) || 0;
+    if (missingIds > 0 && !(f.ref_groups_skipped > 0)) {
+      warn = `<span class="warn-text" title="Some rate groups listed several provider references and only some were in the file. The practices behind the missing ones are not in the store yet; dropping the payer's provider reference file in re-ingests this file automatically.">⚠ ${fmtInt(missingIds)} provider reference(s) not found — some practices missing; needs the payer's provider reference file</span>`;
+    }
+    // rule-3 migration: an older version may have dropped spelled-out
+    // "fee for service" items as bundled — only a re-ingest can tell
+    if (!warn && f.qa && f.qa.reingest_suggested)
+      warn = `<span class="warn-text" title="${esc(f.qa.reingest_suggested)}">⚠ re-ingest suggested — ${fmtInt(f.qa.bundled_items || 0)} item(s) were left out as bundled by an older version</span>`;
     let statusExtra = "";
     if (f.status === "pending_confirmation")
       statusExtra = ` <button class="btn" style="padding:2px 8px;font-size:12px" data-confirm="${esc(f.filename)}">ingest anyway</button>`;
+    // a different file under a loaded name, same payer and month: the user
+    // decides — never blended into every number silently (review 9 4.5)
+    if (f.status === "needs_choice")
+      statusExtra = ` <button class="btn" style="padding:2px 8px;font-size:12px" title="use only this file: the loaded one's rates are replaced by this one's" data-choose="replace" data-file="${esc(f.filename)}">replace</button>`
+        + ` <button class="btn" style="padding:2px 8px;font-size:12px" title="load this file too: both files' rates count toward every number" data-choose="keep" data-file="${esc(f.filename)}">keep both</button>`;
+    if (f.status === "processing")
+      statusExtra = ` <button class="btn" style="padding:2px 8px;font-size:12px" title="stop processing this file now — nothing from this run is saved; a downloaded link can be retried without downloading again" data-stop-file="${esc(f.filename)}">stop</button>`;
     const inflight = (f.status === "processing" || f.status === "queued") && f.chunks_total > 0;
     const progressBar = inflight
       ? `<div class="progress" title="working through the file in chunks">
@@ -3793,16 +5242,22 @@ async function loadFiles() {
       : "";
     return `<tr>
       <td>${esc(f.filename)}</td>
-      <td>${esc(f.payer || "?")}</td>
+      <td>${esc(f.payer || "?")}${f.file_month ? `<div class="sub" title="Rates month = the payer's own date in the file (last_updated_on). Published = the date in the file's name. Payers' clocks differ, so these can disagree.">rates month ${esc(f.file_month)}${f.published_month && f.published_month !== f.file_month ? ` · published ${esc(f.published_month)}` : ""}</div>` : ""}</td>
       <td>${esc(f.file_type || "?")}${f.schema_version && !String(f.schema_version).startsWith("2.") ? ` <span class="warn-text">v${esc(f.schema_version)}</span>` : ""}</td>
       <td><span class="badge ${esc(f.status)}">${esc(f.status)}</span>${statusExtra}${progressBar}</td>
       <td class="num">${fmtInt(f.rows_emitted)}</td>
       <td>${qaLine(f.qa)}</td>
-      <td>${warn}${f.error ? `<div class="${f.status === "pending_confirmation" ? "warn-text" : "err-text"}">${esc(f.error)}</div>` : ""}</td>
-      <td class="sub">${f.finished_at ? esc(f.finished_at.slice(0, 19)) : ""}</td>
+      <td>${warn}${f.error ? `<div class="${f.status === "pending_confirmation" ? "warn-text" : f.status === "skipped" || f.status === "done" ? "muted" : "err-text"}">${esc(f.error)}</div>` : ""}</td>
+      <td class="sub">${f.finished_at ? esc(localTime(f.finished_at)) : ""}</td>
       <td>${f.status === "processing" || f.status === "queued" ? "" : `<button class="btn forget-btn" title="erase this file's rates and free its disk space (re-add its link or file to get it back)" data-forget="${esc(f.filename)}">remove</button>`}</td>
     </tr>`;
   }).join("");
+  $$("[data-choose]", body).forEach((b) =>
+    b.addEventListener("click", async () => {
+      b.disabled = true;
+      await chooseHeld(b.dataset.file, b.dataset.choose);
+      loadFiles();
+    }));
   $$("[data-confirm]", body).forEach((b) =>
     b.addEventListener("click", async () => {
       b.disabled = true;
@@ -3810,6 +5265,17 @@ async function loadFiles() {
         const r = await fetch(`/api/files/${encodeURIComponent(b.dataset.confirm)}/confirm`, { method: "POST" });
         if (!r.ok) alert((await r.json().catch(() => ({}))).detail || `confirm failed (HTTP ${r.status})`);
       } catch (e) { alert("confirm failed: " + e.message); b.disabled = false; return; }
+      loadFiles();
+    }));
+  $$("[data-stop-file]", body).forEach((b) =>
+    b.addEventListener("click", async () => {
+      if (!confirm(`Stop processing ${b.dataset.stopFile}?\n\nNothing from this run is saved. If it came from a link, its download is kept and "retry" processes it again without re-downloading.`)) return;
+      b.disabled = true;
+      b.textContent = "stopping…";
+      try {
+        const r = await fetch(`/api/files/${encodeURIComponent(b.dataset.stopFile)}/stop`, { method: "POST" });
+        if (!r.ok) alert((await r.json().catch(() => ({}))).detail || `stop failed (HTTP ${r.status})`);
+      } catch (e) { alert("stop failed: " + e.message); }
       loadFiles();
     }));
   $$("[data-forget]", body).forEach((b) =>
@@ -3849,19 +5315,33 @@ async function loadUrlQueue() {
   wrap.style.display = "block";
   const c = d.counts || {};
   const total = Object.values(c).reduce((a, b) => a + b, 0);
-  const parts = ["queued", "downloading", "fetched", "expanding", "ingesting", "done", "skipped"]
-    .filter((k) => c[k]).map((k) => k === "skipped"
-      // skips are the app working as designed (duplicates of files already
-      // ingested, files without the target codes) — say so, or a healthy
-      // grind reads as mass failure
-      ? `${fmtInt(c[k])} skipped <span class="muted">(duplicates &amp; non-matches — normal)</span>`
-      : `${fmtInt(c[k])} ${k}`);
-  // over-size files are their OWN category, not failures — otherwise one big
-  // payer's shards make the failure count look alarming and bury real errors
-  if (c.oversize) parts.push(`<span class="warn-text">${fmtInt(c.oversize)} too big (needs your OK)</span>`);
-  if (c.failed) parts.push(`<span class="err-text">${fmtInt(c.failed)} failed</span>`);
-  countsEl.innerHTML = parts.join(" · ") +
-    (total > d.urls.length ? ` <span class="muted">(showing the newest ${fmtInt(d.urls.length)} of ${fmtInt(total)} links)</span>` : "");
+  // the same order as the table below (store.URL_LIST_ORDER): what is moving
+  // now, then what needs you, then what is finished, then what waits
+  const countLabel = {
+    // skips are the app working as designed (duplicates of files already
+    // ingested, files without the target codes) — say so, or a healthy
+    // grind reads as mass failure
+    skipped: (n) => `${n} skipped <span class="muted">(duplicates &amp; non-matches — normal)</span>`,
+    // over-size files are their OWN category, not failures — otherwise one big
+    // payer's shards make the failure count look alarming and bury real errors
+    oversize: (n) => `<span class="warn-text">${n} too big (needs your OK)</span>`,
+    waiting: (n) => `${n} waiting <span class="muted">(copies of a file already downloading — skipped for free if it matches)</span>`,
+    paused: (n) => `<span class="warn-text">${n} paused <span class="muted">(their servers stopped sending — parked ones rejoin the line within minutes, the rest retry by themselves)</span></span>`,
+    failed: (n) => `<span class="err-text">${n} failed</span>`,
+  };
+  const parts = ["downloading", "expanding", "ingesting", "fetched", "oversize", "paused",
+                 "waiting", "failed", "done", "skipped", "queued"]
+    .filter((k) => c[k]).map((k) => (countLabel[k] || ((n) => `${n} ${k}`))(fmtInt(c[k])));
+  const ds = d.settings || {};
+  state.monthlyRecheck = ds.monthly_recheck !== false;
+  const setLine = ds.downloads
+    ? `<div class="sub muted" style="margin-top:4px">Downloads: ${fmtInt(ds.downloads)} at a time`
+      + (ds.small_file_downloads ? ` (${fmtInt(ds.small_file_downloads)} kept for files of ${fmtInt(ds.small_file_mb)} MB or less)` : "")
+      + (ds.early_dedup_mb ? ` · copies of a loaded file are recognised after the first ${fmtInt(ds.early_dedup_mb)} MB` : " · early duplicate check off")
+      + ` · change these in ${esc(ds.config_file || "config/mrfx.yaml")} (parallel_downloads, small_file_downloads, small_file_mb, early_dedup_mb), then restart</div>`
+    : "";
+  countsEl.innerHTML = setLine + parts.join(" · ") +
+    (total > d.urls.length ? ` <span class="muted">(showing ${fmtInt(d.urls.length)} of ${fmtInt(total)} links — every active, too-big, paused and failed one; the newest finished; the next queued)</span>` : "");
   if (c.failed) {
     const btn = document.createElement("button");
     btn.className = "btn";
@@ -3874,15 +5354,26 @@ async function loadUrlQueue() {
     });
     countsEl.appendChild(btn);
   }
+  // a row that left "downloading" (parked, finished, handed back) must not
+  // carry its old stall timer into its next download (audit 8 P2-E)
+  for (const u of d.urls) if (u.status !== "downloading") _stallSeen.delete(u.id);
   body.innerHTML = d.urls.map((u) => {
     const short = u.url.split("?")[0].replace(/^https?:\/\//, "");
     const shown = short.length > 78 ? short.slice(0, 38) + "…" + short.slice(-37) : short;
     const badgeClass = u.status === "done" ? "done"
       : u.status === "failed" ? "failed"
       : u.status === "skipped" ? "skipped"
-      : u.status === "oversize" ? "pending_confirmation"  // amber, not red
+      : u.status === "paused" && u.waiting_on != null ? "skipped"                 // neutral grey
+      : u.status === "oversize" || u.status === "paused" ? "pending_confirmation"  // amber, not red
       : "processing";
-    const badgeLabel = u.status === "oversize" ? "too big" : u.status;
+    // a PARKED download (its server went quiet for a few minutes) stepped
+    // aside so the next file could use the slot; it rejoins within minutes
+    const parked = u.status === "paused" && (u.park_count || 0) > 0;
+    // a copy WAITING on an identical-looking download is the app saving a
+    // download, not a stall: neutral grey, its own word (audit 8 P2-E)
+    const waiting = u.status === "paused" && u.waiting_on != null;
+    const badgeLabel = u.status === "oversize" ? "too big" : waiting ? "waiting"
+      : parked ? "parked" : u.status;
     let statusCell = `<span class="badge ${esc(badgeClass)}">${esc(badgeLabel)}</span>`;
     if (u.status === "downloading" && u.bytes_total > 0) {
       statusCell += `<div class="progress"><div class="progress-fill" style="width:${Math.round(u.progress)}%"></div>
@@ -3897,11 +5388,24 @@ async function loadUrlQueue() {
         statusCell += `<div class="sub muted">no data for ${Math.round(held)}s —`
           + ` waiting on the payer's server, will reconnect and resume</div>`;
       }
+    } else if (u.status === "queued" && u.big_lane) {
+      // handed back at the headers: a big file waits for a big-file slot
+      // while the small-file slots keep moving (audit 8 P1-D)
+      statusCell += `<div class="sub muted">big file — waiting for a big-file download slot</div>`;
     } else if (u.status === "ingesting") {
-      statusCell += ` <span class="muted">(see file row below for chunk progress)</span>`;
+      statusCell += ` <span class="muted">(see file row below for chunk progress)</span>`
+        + ` <button class="btn" style="padding:1px 8px;font-size:11.5px" title="stop processing this file — the download is kept; retry processes it again without re-downloading" data-url-stop="${u.id}">stop</button>`;
     }
     if (u.status === "failed" || u.status === "skipped" || u.status === "oversize") {
       statusCell += ` <button class="btn" style="padding:1px 8px;font-size:11.5px" data-url-retry="${u.id}">retry</button>`;
+    }
+    if (u.status === "paused") {
+      statusCell += ` <button class="btn" style="padding:1px 8px;font-size:11.5px" title="don't wait — try this download again right now" data-url-retry="${u.id}">try now</button>`;
+    }
+    // a finished index / page can be read again (it holds no rates): how a
+    // capped list takes the files past the cap once max_toc_files is raised
+    if (u.status === "done" && (u.kind === "toc" || u.kind === "page")) {
+      statusCell += ` <button class="btn" style="padding:1px 8px;font-size:11.5px" title="read this list again and queue any files not taken yet (files already loaded are not downloaded again)" data-url-retry="${u.id}">retry</button>`;
     }
     // over the size ceiling? offer a one-click "download anyway"
     // (the disk-space guard still protects the drive)
@@ -3909,12 +5413,21 @@ async function loadUrlQueue() {
         ((u.status === "failed" || u.status === "skipped") && /confirm_over_gb|safety limit/i.test(u.error || ""))) {
       statusCell += ` <button class="btn" style="padding:1px 8px;font-size:11.5px" title="download and ingest this file even though it is over the size limit — the disk-space check still applies" data-url-force="${u.id}">download anyway</button>`;
     }
-    if (u.status === "queued" || u.status === "failed" || u.status === "oversize") {
+    if (u.status === "queued" || u.status === "failed" || u.status === "oversize" || u.status === "paused") {
       statusCell += ` <button class="btn" style="padding:1px 8px;font-size:11.5px" data-url-cancel="${u.id}">skip</button>`;
     }
     let notes = "";
     if (u.kind === "toc" && u.status === "done") notes = `found ${fmtInt(u.child_count)} files inside — queued below`;
     else if (u.kind === "page" && u.status === "done") notes = `found ${fmtInt(u.child_count)} file links on the page`;
+    // a list cut at max_toc_files says so, in amber (round 7 P1.6)
+    if (notes && u.error) notes += ` — <span class="warn-text">${esc(u.error)}</span>`;
+    // a loaded index says when it was last checked and when it is next
+    // (review 13 item 5.2.5: nothing said whether a file was current)
+    if (notes && u.parent_id == null && u.finished_at) {
+      const nx = new Date(); nx.setDate(1); nx.setMonth(nx.getMonth() + 1);
+      notes += ` · <span class="muted">last checked ${esc(localTime(u.finished_at))}` +
+        `${state.monthlyRecheck ? ` · next check ${esc(nx.toLocaleDateString())}` : " · monthly re-check off"}</span>`;
+    }
     // Color the note by what it actually is: red is reserved for real
     // failures. Over-size is amber ("your OK needed"), and SKIPPED rows are
     // neutral — a duplicate of an already-ingested file, a file with none of
@@ -3923,11 +5436,15 @@ async function loadUrlQueue() {
     // Painting those red made a healthy run read as "the vast majority of
     // files are showing errors".
     else if (u.error) notes = `<span class="${
-      u.status === "oversize" ? "warn-text" : u.status === "skipped" ? "muted" : "err-text"
-    }">${esc(u.error)}</span>`;
+      u.status === "oversize" || u.status === "paused" || u.status === "done" ? "warn-text" : u.status === "skipped" ? "muted" : "err-text"
+    }">${esc(u.error)}${u.status === "paused" && u.retry_after
+      ? (parked ? ` Back in line about ${esc(localTime(u.retry_after))}.`
+                : ` Resumes about ${esc(localTime(u.retry_after))}.`) : ""}</span>`;
     return `<tr>
       <td title="${esc(u.url)}">${esc(shown)}</td>
-      <td>${esc(KIND_LABEL[u.kind] || u.kind || "…")}</td>
+      <td>${esc((!u.kind || u.kind === "unknown") && ["queued", "downloading", "fetched", "paused"].includes(u.status)
+        ? "…"   // not read yet: "?" read as "unrecognised" (audit 8 P3)
+        : KIND_LABEL[u.kind] || u.kind || "…")}</td>
       <td>${statusCell}</td>
       <td class="num">${u.rows_emitted ? fmtInt(u.rows_emitted) : ""}</td>
       <td style="max-width:420px">${notes}</td>
@@ -3943,6 +5460,8 @@ async function loadUrlQueue() {
   };
   $$("[data-url-retry]", body).forEach((b) =>
     b.addEventListener("click", urlAction(b, `/api/urls/${b.dataset.urlRetry}/retry`, "retry")));
+  $$("[data-url-stop]", body).forEach((b) =>
+    b.addEventListener("click", urlAction(b, `/api/urls/${b.dataset.urlStop}/stop`, "stop")));
   $$("[data-url-cancel]", body).forEach((b) =>
     b.addEventListener("click", urlAction(b, `/api/urls/${b.dataset.urlCancel}/cancel`, "skip")));
   $$("[data-url-force]", body).forEach((b) =>
@@ -3974,7 +5493,9 @@ function initFilesView() {
     const msg = $("#url-msg");
     if (!confirm("Cancel everything WAITING to download?\n\nFiles already " +
       "downloaded or being processed are untouched, and cleared links become " +
-      "'skipped' so you can retry them later. This lets ingesting catch up.")) return;
+      "'skipped' so you can retry them later. This lets ingesting catch up.\n\n" +
+      "A file a downloader picked up in the instant before this click still " +
+      "finishes and loads.")) return;
     msg.textContent = "clearing queue…";
     try {
       const r = await postJson("/api/urls/clear-queued", {});
@@ -3986,12 +5507,24 @@ function initFilesView() {
   $("#url-stop-dl").addEventListener("click", async () => {
     const msg = $("#url-msg");
     if (!confirm("Stop the downloads in progress right now?\n\nPartial files " +
-      "are kept, so a retry resumes them. The freed slots let ingesting catch up.")) return;
+      "are kept, so a retry resumes them — except a file being fetched over several " +
+      "parallel connections (download_segments above 1), which starts over. The " +
+      "freed slots let ingesting catch up.")) return;
     msg.textContent = "stopping downloads…";
     try {
       const r = await postJson("/api/urls/stop-downloads", {});
       msg.textContent = `stopped ${r.stopped} download${r.stopped === 1 ? "" : "s"}`;
     } catch (e) { msg.textContent = "could not stop: " + e.message; }
+    loadUrlQueue();
+  });
+
+  $("#url-resume").addEventListener("click", async () => {
+    const msg = $("#url-msg");
+    msg.textContent = "resuming…";
+    try {
+      const r = await postJson("/api/urls/resume-stopped", {});
+      msg.textContent = `resumed ${r.resumed} link${r.resumed === 1 ? "" : "s"}`;
+    } catch (e) { msg.textContent = "could not resume: " + e.message; }
     loadUrlQueue();
   });
 
@@ -4022,14 +5555,36 @@ function initFilesView() {
     let d;
     try { d = await api("/api/known-sources"); }
     catch (e) { $("#url-msg").textContent = `couldn't load the source list: ${e.message}`; return; }
-    $("#known-body").innerHTML = (d.sources || []).map((s) => `
+    const renderKnown = () => {
+      const want = ($("#known-states").value || "").toUpperCase().split(/[\s,]+/).filter(Boolean);
+      const rows = (d.sources || []).filter((s) => !want.length ||
+        (s.states || []).some((x) => x === "US" || want.includes(x)));
+      $("#known-body").innerHTML = rows.map((s) => `
       <tr>
         <td><a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.name)}</a></td>
+        <td>${esc((s.states || []).join(" ") === "US" ? "national" : (s.states || []).join(" "))}</td>
         <td>${s.queueable ? "auto-queueable" : "portal (open in browser)"}</td>
         <td>${esc(s.verified || "")}</td>
         <td style="max-width:480px">${esc(s.notes || "")}</td>
       </tr>`).join("");
+    };
+    $("#known-states").oninput = renderKnown;
+    renderKnown();
     wrap.style.display = "";
+  });
+
+  $("#known-queue-states").addEventListener("click", async () => {
+    const msg = $("#url-msg");
+    const states = ($("#known-states").value || "").toUpperCase().split(/[\s,]+/).filter(Boolean);
+    if (!states.length) { msg.textContent = "type your state(s) first, e.g. MO KS"; return; }
+    msg.textContent = `queueing tested sources for ${states.join(", ")}…`;
+    try {
+      const r = await postJson("/api/urls/known", { states });
+      msg.textContent = `${r.added} indexes queued for ${states.join(", ")} + national payers` +
+        (r.skipped ? `, ${r.skipped} already known` : "") +
+        (r.portals ? ` (${r.portals} portal-only sources for these states need a browser)` : "");
+    } catch (e) { msg.textContent = "could not queue: " + e.message; }
+    loadUrlQueue();
   });
 
   $("#btn-scan").addEventListener("click", async () => {
@@ -4038,7 +5593,9 @@ function initFilesView() {
   });
   const dz = $("#dropzone"), input = $("#file-input");
   dz.addEventListener("click", () => input.click());
-  input.addEventListener("change", () => uploadFiles([...input.files]));
+  // reset after reading: picking the SAME file again fires no change event
+  // while the input still holds it (review 9 item 4.10)
+  input.addEventListener("change", () => { const fs = [...input.files]; input.value = ""; uploadFiles(fs); });
   ["dragenter", "dragover"].forEach((t) =>
     dz.addEventListener(t, (e) => { e.preventDefault(); dz.classList.add("drag"); }));
   ["dragleave", "drop"].forEach((t) =>
@@ -4072,13 +5629,34 @@ function initFilesView() {
     $("#v-body").innerHTML = r.rows.map((row) => `
       <tr><td>${esc(row.payer)}</td><td>${esc(row.tin_value || "")}</td><td>${esc(row.npi)}</td>
       <td>${esc(row.billing_code)}</td><td>${modTags(row.modifiers)}</td>
-      <td class="num">$${fmtMoney(row.negotiated_rate)}</td>
+      <td>${esc(row.negotiated_type || "")}</td>
+      <td class="num">${isDollarType(row.negotiated_type) ? "$" + fmtMoney(row.negotiated_rate) : esc(String(row.negotiated_rate))}</td>
       <td class="num">${row.delta_vs_expected != null ? fmtMoney(row.delta_vs_expected) : "–"}</td>
       <td class="sub">${esc(row.file_month || "")}</td><td class="sub">${esc(row.source_file)}</td></tr>`).join("");
   });
 }
 
+// a percentage / per-diem row is not dollars: no "$", no delta (P1.24)
+function isDollarType(t) {
+  const k = String(t || "").trim().toLowerCase();
+  return !k || ["negotiated", "fee schedule", "derived"].includes(k);
+}
+
+async function chooseHeld(name, action) {
+  try {
+    const r = await fetch(`/api/files/${encodeURIComponent(name)}/choose`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action }) });
+    if (!r.ok) alert(refusalTextOf(await r.text()) || `could not apply the choice (HTTP ${r.status})`);
+  } catch (e) { alert("could not apply the choice: " + e.message); }
+}
+
+function refusalTextOf(raw) {
+  try { const j = JSON.parse(raw); return j.detail || j.error || raw; } catch (_) { return raw; }
+}
+
 async function uploadFiles(files) {
+  const notes = [];   // "already loaded" / "loaded under a new name" (audit 8 P1-B)
   for (const f of files) {
     if (f.size > 1 << 30) { alert(`${f.name} is over 1 GB — drop it into data/inbox/ instead.`); continue; }
     const fd = new FormData();
@@ -4086,13 +5664,24 @@ async function uploadFiles(files) {
     $("#dropzone").innerHTML = `<div class="loading">Uploading ${esc(f.name)}</div>`;
     try {
       const r = await fetch("/api/upload", { method: "POST", body: fd });
-      if (!r.ok) alert(`upload failed: ${(await r.json()).detail || r.status}`);
+      const raw = await r.text();
+      let body = {};
+      try { body = JSON.parse(raw); } catch (_) { /* not JSON */ }
+      if (!r.ok) alert(`upload failed: ${body.detail || body.error || raw || r.status}`);
+      else if (body.status === "needs_choice") {
+        const replace = confirm(`${body.replaces} is already loaded, and ${f.name} is a DIFFERENT file for the same payer and month.\n\nOK = Replace: use only this new file.\nCancel = Keep both: both files count toward every number.`);
+        await chooseHeld(body.filename, replace ? "replace" : "keep");
+        notes.push(replace ? `${body.replaces} is being replaced by this file.`
+                           : `Both files are kept; both count toward every number. You can take either one out on the Files tab.`);
+      } else if (body.status === "duplicate") notes.push(body.note || `${f.name} is already loaded.`);
+      else if (body.note) notes.push(body.note);
     } catch (e) { alert(`upload failed: ${e.message}`); }
   }
   // refresh in place — a full page reload dumped the user back on the
   // Explorer tab right after they dropped a file on the Files tab
-  $("#dropzone").innerHTML = `<div class="muted">Uploaded — processing begins shortly.
-    Drop more files here.</div>`;
+  const anyNew = !notes.length || notes.some((n) => !/already (loaded|waiting)/.test(n));
+  $("#dropzone").innerHTML = `<div class="muted">${anyNew ? "Uploaded — processing begins shortly." : "Nothing new to load."}
+    Drop more files here.</div>${notes.map((n) => `<div class="warn-text">${esc(n)}</div>`).join("")}`;
   loadFiles();
 }
 
@@ -4144,6 +5733,20 @@ async function loadSources(stateCode = "") {
 }
 
 function sourceCard(c) {
+  // a source the tested-sources catalog (Files tab) has checked: say so,
+  // with its date and whether Files can queue it (review 10 item 3.7)
+  if (c.tested) {
+    const t = c.tested;
+    const how = t.queueable
+      ? "Files tab → <b>Queue tested payer indexes</b> (or <b>Show tested sources</b> → your state) queues it."
+      : "A portal or nested download — see the note for the manual steps.";
+    return `<div class="source-card">
+      <h4>${esc(c.name)} <span class="badge done">tested${t.verified ? " " + esc(t.verified) : ""}</span></h4>
+      <div class="parent">${esc(c.parent || "")}</div>
+      <a href="${esc(t.url)}" target="_blank" rel="noopener">${esc(t.url)}</a>
+      <div class="notes">${how}${t.notes ? " " + esc(t.notes) : ""}</div>
+    </div>`;
+  }
   const verified = c.verified;
   const badge = verified
     ? `<span class="badge done">verified${c.verified_locally ? " (locally)" : ""}</span>`
@@ -4193,12 +5796,19 @@ function hookOverrideForms(root) {
 
 (async function boot() {
   state.catalog = await api("/api/catalog").catch(() => ({}));
-  const stats = await api("/api/stats").catch(() => null);
+  // review 10 1.4: the header counts load beside the table, not in front of it
+  const statsP = api("/api/stats").catch(() => null);
+  const stats = await api("/api/boot").catch(() => null);
   if (stats?.default_grain && stats.default_grain !== "tin") {
     state.grain = stats.default_grain;
     $$("#f-grain button").forEach((b) => b.classList.toggle("on", b.dataset.g === state.grain));
   }
-  loadStats();
+  if (stats && stats.analytics && stats.analytics.state && stats.analytics.state !== "current") {
+    state.analytics = stats.analytics;
+    const el = $("#dataset-stats");
+    if (el && /loading/.test(el.textContent)) { el.innerHTML = coverageHtml(stats.analytics); wireCoverageLink(); }
+  }
+  statsP.then((s) => loadStats(s || undefined));
   loadStateOptions();
   // one failed boot fetch must not brick the page: without this guard an
   // /api/payers hiccup at load left the Code and Files tabs never wired
@@ -4206,6 +5816,11 @@ function hookOverrideForms(root) {
   catch (e) { console.error("filter init failed — refresh to retry:", e); }
   try { initCptView(); } catch (e) { console.error(e); }
   try { initFilesView(); } catch (e) { console.error(e); }
+  try { initAnalyticsPanel(); } catch (e) { console.error(e); }
+  try { initPdfButtons(); } catch (e) { console.error(e); }
+  try { initDeepLinks(); initFindBox(); } catch (e) { console.error(e); }
   refresh();
+  // a bookmarked link opens its screen (and runs it) once the page is wired
+  if (parseHash().view && parseHash().view !== "explorer") openFromHash().catch((e) => console.error(e));
   setInterval(() => { loadStats(); loadStateOptions(); }, 15000);
 })();

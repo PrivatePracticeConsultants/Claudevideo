@@ -28,11 +28,28 @@ class EnrichmentConfig(BaseModel):
     # Literal so a typo ("bulck") is a clear config error instead of silently
     # falling through to API mode and hammering NPPES
     mode: Literal["api", "bulk", "off"] = "api"
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _yaml_off(cls, v):
+        # `mode: off` unquoted is YAML's boolean False — the shipped comment
+        # recommended exactly that spelling and every command then refused to
+        # start (review 11 item 4.6)
+        return "off" if v is False else v
     # mode=bulk: point at the NPPES full monthly file — the raw .zip works
     # directly (the npidata_pfile CSV is streamed from inside it) or an unzipped
     # .csv. One local pass resolves the whole book in minutes. Get it from
     # https://download.cms.gov/nppes/NPI_Files.html
     bulk_csv_path: Path | None = None
+    # Keep a current NPPES monthly file on hand AUTOMATICALLY: at most once a
+    # day the app checks https://download.cms.gov/nppes/NPI_Files.html and,
+    # when a newer month is out, downloads the full file (~1.1 GB) into
+    # nppes_dir in the background and uses it — names then fill in from one
+    # fast local pass, no API crawl and no config edits each month. Ignored
+    # when bulk_csv_path names a specific FILE (you manage it); a FOLDER there
+    # is used instead of nppes_dir. Set false to manage the file yourself.
+    auto_download: bool = True
+    nppes_dir: Path = Path("data/nppes")
     # NPPES API lookups run concurrently so names/states fill in quickly on a
     # large book instead of one-every-0.15s. Kept modest to stay polite; dial
     # down to 1 for strictly sequential, or up if NPPES tolerates it.
@@ -107,12 +124,50 @@ class MrfxConfig(BaseModel):
     # re-paste links. Everything downstream (rate changes, the Clients digest,
     # month="latest") is only as fresh as the last ingest. Off by default: it
     # spends bandwidth and disk on your machine, so it should be your choice.
-    # Content-hash dedup means a payer that republished nothing costs one HEAD
-    # per file, not a re-ingest.
+    # Content-hash dedup means a payer that republished nothing costs one
+    # 1-byte ranged GET per loaded file (the re-check's probe), not a re-ingest.
     monthly_refresh: bool = False
+    # on (review 13 item 5.2.5): once a month every LOADED index — catalog or
+    # pasted by the user — is fetched again and each of its loaded files asked
+    # (one tiny request) whether the payer changed it; only changed files
+    # download. A file the index lists for the FIRST time is named on the
+    # index row, never downloaded by the check (review 14 item 2.8): paste
+    # the index again, or turn on monthly_refresh above (the opt-in queueing
+    # of NEW files and dated months), to load it.
+    monthly_recheck: bool = True
     # Where `mrfx packets` writes client packets. Relative paths anchor to the
     # project folder; unset means <store_dir>/../packets.
     packets_dir: Path | None = None
+
+    # Automatic backups while `mrfx serve` runs (review 13 Group 6.3): OFF
+    # until backup_dir names a folder (best on another drive). Every
+    # backup_every_days a checksummed zip of the store is written there without
+    # stopping the app, checked, and only the newest backup_keep are kept.
+    backup_dir: Path | None = None
+    backup_every_days: int = Field(default=7, ge=1)
+    backup_keep: int = Field(default=4, ge=1)
+
+    # Practice names for tax IDs with no organization NPI (0.8.5,
+    # mrfx/naming.py): the CMS Doctors and Clinicians National Downloadable
+    # File names the group each clinician is enrolled with. "auto": `serve`
+    # downloads it (~900 MB) into cms_dac_dir, loads it, and checks CMS for a
+    # newer release once a month. "off": only `mrfx dac --file …` loads it.
+    cms_dac: Literal["auto", "off"] = "auto"
+    cms_dac_dir: Path = Path("data/cms_dac")
+    # Practice TYPE evidence (0.8.6, naming.profile_sql): CMS's hospital and
+    # nursing-home address lists, and the Medicare Physician & Other
+    # Practitioners therapy-code rows (who bills as a therapist in private
+    # practice, and where). "auto": `serve` fetches both (~20 MB + a few
+    # minutes of API paging) and checks monthly. "off": `mrfx cmsref` only.
+    cms_reference: Literal["auto", "off"] = "auto"
+    cms_ref_dir: Path = Path("data/cms_ref")
+
+    @field_validator("backup_dir", mode="before")
+    @classmethod
+    def _empty_backup_dir_is_none(cls, v):
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
 
     @field_validator("packets_dir", mode="before")
     @classmethod
@@ -137,6 +192,12 @@ class MrfxConfig(BaseModel):
     # rates (no NPI) are always kept. Leave off to keep the full store and use
     # the dashboard's "therapy providers only" toggle for therapist-only views.
     therapy_only_ingest: bool = False
+    # Byte-level fast path for in-network files (mrfx/fastscan.py): skips the
+    # non-target billing codes and unused provider references as raw bytes
+    # instead of tokenizing them. Same rows, same QA counters (pinned by
+    # tests/mrfx/test_fastscan.py); a file whose shape it can't vouch for falls
+    # back to the classic parser automatically. false = always the classic path.
+    fast_scan: bool = True
     confirm_over_gb: float = Field(default=5.0, gt=0)
     # URL-drop ingestion: staging for downloads, and knobs for aggregating many
     # files without filling the disk.
@@ -168,6 +229,22 @@ class MrfxConfig(BaseModel):
     # segment count with a LOWER parallel_downloads (e.g. segments 4, downloads
     # 2). Best for a queue of a few very large files, not hundreds of small ones.
     download_segments: int = Field(default=1, ge=1, le=8)
+    # EARLY DUPLICATE CHECK. Payers host copies of each other's files under
+    # different web addresses. Once this many MB of a download have arrived,
+    # the app compares them with every file already ingested of exactly the
+    # same total size; if the first MB match, it fetches the file's LAST 1 MB
+    # (one small range request) and, if that matches too, stops and skips the
+    # file as a duplicate. 0 turns the check off (duplicates are then caught
+    # after the full download, as before).
+    early_dedup_mb: int = Field(default=15, ge=0, le=10_000)
+    # SIZE LANES. Of the parallel downloads, this many take only files of
+    # small_file_mb or less (a small file is never stuck behind a run of huge
+    # ones); the rest take the big files first and help with small ones when
+    # no big file is waiting. A "small" slot that finds its file is bigger
+    # hands it straight to a big-file slot. 0 = no lanes (every slot takes
+    # the next file in line). Always leaves at least one big-file slot.
+    small_file_downloads: int = Field(default=3, ge=0, le=8)
+    small_file_mb: int = Field(default=100, ge=1, le=100_000)
     max_toc_files: int = Field(default=2000, ge=1)  # cap child files enqueued from one TOC
     # JavaScript-only portals: when a pasted page yields no static links,
     # render it in headless Chromium and harvest links from the rendered DOM
@@ -216,6 +293,28 @@ class MrfxConfig(BaseModel):
     # raise it if you routinely pull tens-of-GB files over a slow link, or set 0
     # to disable the cap.
     download_max_seconds: float = Field(default=10800.0, ge=0)
+    # A download the payer's server stops feeding (past download_stall_seconds)
+    # or that keeps failing on network errors is PAUSED, not failed: its slot
+    # goes to the next file at once, the bytes so far are kept, and it resumes
+    # by itself this many hours later — a struggling server usually recovers
+    # within a day, and a monthly file arriving a day late costs nothing.
+    # After download_auto_resumes pauses it is marked failed (a link that is
+    # really dead must not cycle forever). 0 hours = the old behavior (failed).
+    download_pause_hours: float = Field(default=24.0, ge=0)
+    download_auto_resumes: int = Field(default=5, ge=0)
+    # PARK a download its payer's server has stopped feeding, long before the
+    # stall window above runs out: after this many seconds with no data (under
+    # 1 MB of progress) the file steps aside, its slot goes to the NEXT file in
+    # the queue at once, and its bytes so far are kept. It rejoins the line
+    # after download_park_minutes, or straight away when no other file is
+    # waiting, and resumes where it stopped. So a slow-to-answer payer no
+    # longer leaves a download slot idle: something is always downloading.
+    # After download_park_limit parks in a row with no progress at all, the
+    # server is really down and the file takes the long pause above.
+    # 0 = off (the old behaviour: hold the slot for the whole stall window).
+    download_park_seconds: float = Field(default=240.0, ge=0)
+    download_park_minutes: float = Field(default=10.0, ge=0)
+    download_park_limit: int = Field(default=6, ge=1)
     registry_path: Path = Path("config/payer_registry.yaml")
     registry_overrides_path: Path = Path("config/registry_overrides.yaml")
     known_sources_path: Path = Path("config/known_sources.yaml")
@@ -251,8 +350,9 @@ class MrfxConfig(BaseModel):
 # empty after an update" — the real store was intact, just not looked at).
 _ANCHORED_FIELDS = ("inbox_dir", "processed_dir", "failed_dir", "store_dir",
                     "downloads_dir", "entity_map_path", "mpfs_path",
-                    "duckdb_temp_dir", "tracker_dir", "packets_dir", "registry_path",
-                    "registry_overrides_path", "known_sources_path")
+                    "duckdb_temp_dir", "tracker_dir", "packets_dir", "backup_dir", "registry_path",
+                    "registry_overrides_path", "known_sources_path", "cms_dac_dir",
+                    "cms_ref_dir")
 
 
 def _project_root_of(config_path: Path) -> Path:
@@ -264,14 +364,28 @@ def _project_root_of(config_path: Path) -> Path:
     return parent.parent if parent.name.lower() == "config" else parent
 
 
+# files the APP ships (not user data): a config kept outside the project folder
+# anchored them beside itself, where they do not exist, and the Sources tab was
+# silently empty (`/api/known-sources` -> {"sources": []}; review 9 item 4.9)
+_SHIPPED_FILES = ("registry_path", "known_sources_path")
+_APP_ROOT = Path(__file__).resolve().parent.parent
+
+
 def _anchor_paths(cfg: MrfxConfig, root: Path) -> MrfxConfig:
     for name in _ANCHORED_FIELDS:
         v = getattr(cfg, name, None)
         if v is not None and not Path(v).is_absolute():
-            setattr(cfg, name, root / v)
+            anchored = root / v
+            if (name in _SHIPPED_FILES and not anchored.exists()
+                    and (_APP_ROOT / v).exists()):
+                anchored = _APP_ROOT / v
+            setattr(cfg, name, anchored)
     b = getattr(cfg.enrichment, "bulk_csv_path", None)
     if b is not None and not Path(b).is_absolute():
         cfg.enrichment.bulk_csv_path = root / b
+    nd = getattr(cfg.enrichment, "nppes_dir", None)
+    if nd is not None and not Path(nd).is_absolute():
+        cfg.enrichment.nppes_dir = root / nd
     lp = getattr(cfg.report_branding, "logo_path", None)
     if lp is not None and not Path(lp).is_absolute():
         cfg.report_branding.logo_path = root / lp

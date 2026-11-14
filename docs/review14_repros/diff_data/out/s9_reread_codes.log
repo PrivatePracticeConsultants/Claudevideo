@@ -1,0 +1,9 @@
+loaded with [97112]: [('a.json', '97112', 10), ('b.json', '97112', 10)]
+missing: [{'filename': 'a.json', 'added': ['97110']}, {'filename': 'b.json', 'added': ['97110']}]
+reread: {'reread': ['a.json'], 'redownload': [], 'asked': ['b.json']}
+rows now: [('a.json', '97110', 10), ('a.json', '97112', 10), ('b.json', '97112', 10)]
+spine 97110 rows: [(10,)] stale: False
+b row: [('b.json', 'done', 'billing codes were added to your list since this file was read — drop it in again to pick them up (its download is gone and it came from no link)')]
+missing after: [{'filename': 'b.json', 'added': ['97110']}]
+after removing 97110, missing: []
+re-added 97110, missing: [{'filename': 'b.json', 'added': ['97110']}, {'filename': 'c.json', 'added': ['97110']}]

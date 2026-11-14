@@ -37,6 +37,7 @@ from pathlib import Path
 
 from .catalog import CODE_CATALOG, code_info
 from .store import Store, sql_path
+from .rounding import half_up
 
 log = logging.getLogger(__name__)
 
@@ -332,7 +333,7 @@ def practice_utilization(store: Store, tins: list[str], year: str | None = None,
             "npis": len(npis), "matched_npis": matched,
             "total_units": sum(c["units"] for c in codes),
             "total_beneficiaries": sum(c["beneficiaries"] for c in codes),
-            "medicare_allowed": round(sum(
+            "medicare_allowed": half_up(sum(
                 (c["avg_allowed"] or 0) * c["units"] for c in codes), 2),
             "n_codes": len(codes),
             "office_only": office_only,
@@ -344,14 +345,14 @@ def practice_utilization(store: Store, tins: list[str], year: str | None = None,
 
 
 def suggested_volumes(store: Store, subject: str, year: str | None = None,
-                      multiplier: float = 1.0) -> dict:
+                      multiplier: float = 1.0, market: dict | None = None) -> dict:
     """{code: annual units} to pre-fill a volumes box for `subject`.
 
     `multiplier` lets the user scale Medicare units to their whole book when
     they know the share (e.g. Medicare is a third of their visits -> 3.0). It
     defaults to 1.0 — Medicare only — and whatever is used is echoed back and
     printed, so a scaled number can never masquerade as a measured one."""
-    from .benchmark import BenchmarkError, resolve_subject_tins
+    from .benchmark import BenchmarkError
 
     try:
         mult = float(multiplier)
@@ -359,7 +360,10 @@ def suggested_volumes(store: Store, subject: str, year: str | None = None,
         raise BenchmarkError("the volume multiplier must be a number (1 = Medicare only)")
     if not 0.1 <= mult <= 20:
         raise BenchmarkError("the volume multiplier must be between 0.1 and 20")
-    tins = resolve_subject_tins(store, subject)
+    # the subject rule (subject_tins_for_market): a name used in two states
+    # is the practice in the market's state (review 10 item 2.9)
+    from .benchmark import subject_tins_for_market
+    tins = subject_tins_for_market(store, subject, market or {})
     u = practice_utilization(store, tins, year)
     if not u["codes"]:
         raise BenchmarkError(
@@ -367,7 +371,7 @@ def suggested_volumes(store: Store, subject: str, year: str | None = None,
             + (f" in {u['year']}" if u.get("year") else
                " — import a CMS Physician & Other Practitioners file first "
                "(Data tab -> Medicare utilization)"))
-    volumes = {c["billing_code"]: (round(c["units"] * mult) if mult != 1.0
+    volumes = {c["billing_code"]: (half_up(c["units"] * mult) if mult != 1.0
                                   else c["units"]) for c in u["codes"]}
     return {"subject": subject, "year": u["year"], "volumes": volumes,
             "multiplier": mult, "summary": u["summary"], "codes": u["codes"],
@@ -411,7 +415,7 @@ def available_years(store: Store) -> list[str]:
 
 
 def practice_growth(store: Store, subject: str, *, from_year: str | None = None,
-                    to_year: str | None = None) -> dict:
+                    to_year: str | None = None, market: dict | None = None) -> dict:
     """A practice's Medicare volume between two PUF years.
 
     A growing practice is a better prospect; a shrinking referral source is a
@@ -419,7 +423,7 @@ def practice_growth(store: Store, subject: str, *, from_year: str | None = None,
     because CMS suppression can create or destroy a code line without anything
     changing in the practice.
     """
-    from .benchmark import BenchmarkError, resolve_subject_tins
+    from .benchmark import BenchmarkError
 
     years = available_years(store)
     if len(years) < 2:
@@ -441,7 +445,10 @@ def practice_growth(store: Store, subject: str, *, from_year: str | None = None,
                 f"no Medicare utilization loaded for {y} — years present: "
                 f"{', '.join(years)}")
 
-    tins = resolve_subject_tins(store, subject)
+    # the subject rule (subject_tins_for_market): a name used in two states
+    # is the practice in the market's state (review 10 item 2.9)
+    from .benchmark import subject_tins_for_market
+    tins = subject_tins_for_market(store, subject, market or {})
     if not tins:
         raise BenchmarkError(f"no practice matches {subject!r}")
     old_u = practice_utilization(store, tins, older)
@@ -463,7 +470,7 @@ def practice_growth(store: Store, subject: str, *, from_year: str | None = None,
             "billing_code": code, "description": code_info(code)[0],
             "units_from": int(o), "units_to": int(n),
             "delta": int(n - o),
-            "pct_change": round(100.0 * (n - o) / o, 1) if o else None,
+            "pct_change": half_up(100.0 * (n - o) / o, 1) if o else None,
         })
     rows.sort(key=lambda r: r["delta"])
 
@@ -471,7 +478,7 @@ def practice_growth(store: Store, subject: str, *, from_year: str | None = None,
     # suppression threshold would book a fake gain
     tot_old = sum(old_by[c] for c in both)
     tot_new = sum(new_by[c] for c in both)
-    pct = round(100.0 * (tot_new - tot_old) / tot_old, 1) if tot_old else None
+    pct = half_up(100.0 * (tot_new - tot_old) / tot_old, 1) if tot_old else None
     direction = ("grew" if pct and pct > 0 else "shrank" if pct and pct < 0
                  else "held flat")
     only_new = sorted(set(new_by) - set(old_by))
@@ -504,7 +511,7 @@ def practice_growth(store: Store, subject: str, *, from_year: str | None = None,
 
 def service_line_gaps(store: Store, subject: str, *, zip_code: str | None = None,
                       radius_miles: float = 25.0, year: str | None = None,
-                      min_peers: int = 3, centroids_path=None) -> dict:
+                      min_peers: int = 3, centroids_path=None, market: dict | None = None) -> dict:
     """Codes nearby therapy practices bill Medicare that this one does not.
 
     Distinct from contract gaps: that asks "what do peers have RATES for?",
@@ -512,11 +519,14 @@ def service_line_gaps(store: Store, subject: str, *, zip_code: str | None = None
     be a service line worth adding — or one it deliberately doesn't offer, so
     every row is a question for the owner.
     """
-    from .benchmark import BenchmarkError, resolve_subject_tins
+    from .benchmark import BenchmarkError
     from .catalog import therapy_taxonomy_sql
     from .medicare import haversine_miles_sql, load_centroids
 
-    tins = resolve_subject_tins(store, subject)
+    # the subject rule (subject_tins_for_market): a name used in two states
+    # is the practice in the market's state (review 10 item 2.9)
+    from .benchmark import subject_tins_for_market
+    tins = subject_tins_for_market(store, subject, market or {})
     if not tins:
         raise BenchmarkError(f"no practice matches {subject!r}")
     try:
@@ -537,7 +547,7 @@ def service_line_gaps(store: Store, subject: str, *, zip_code: str | None = None
         home = zip_code and str(zip_code).strip()[:5]
         if not home:
             r = con.execute("""
-                SELECT mode(lpad(substr(trim(n.zip), 1, 5), 5, '0'))
+                SELECT mode(lpad(substr(trim(n.zip), 1, 5), 5, '0') ORDER BY lpad(substr(trim(n.zip), 1, 5), 5, '0'))
                 FROM rates r JOIN npi_directory n ON n.npi = r.npi
                 WHERE r.tin_value IN (SELECT unnest(?::VARCHAR[]))
                   AND n.zip IS NOT NULL AND trim(n.zip) <> ''
@@ -577,7 +587,7 @@ def service_line_gaps(store: Store, subject: str, *, zip_code: str | None = None
             WHERE u.data_year = ?
             GROUP BY u.billing_code
             HAVING count(DISTINCT u.npi) >= ?
-            ORDER BY n_peers DESC, peer_units DESC
+            ORDER BY n_peers DESC, peer_units DESC, u.billing_code
         """, [in_radius, mine, yr, min_peers])
         peer_codes = [dict(zip(["billing_code", "n_peers", "peer_units",
                                 "median_units_each"], r)) for r in cur.fetchall()]

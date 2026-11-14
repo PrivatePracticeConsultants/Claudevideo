@@ -1,0 +1,3 @@
+bar before restart: ['Export CSV · Writing the rows to a file (3 of 5) · about 13 %\nStop']
+bar 20 s after the restart: ['Export CSV · Writing the rows to a file (3 of 5) · about 13 %\nStop'] | #btn-export disabled: True
+404 polls after the restart: 51 ['404 GET http://localhost:8792/api/progress/cb2f8895aa394185a4f126d5b85e941e']

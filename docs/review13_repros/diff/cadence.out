@@ -1,0 +1,9 @@
+##### CADENCE
+mrfx/store.py:561:# The periodic triggers (ingest rollup, name refresh) pass skip_if_busy=True so
+mrfx/store.py:1094:        # reset) — NOT by a directory name refresh, which changes no rate:
+mrfx/store.py:2013:        forced name refresh has nothing to add unless new names arrived."""
+mrfx/store.py:4588:                log.info("name refresh: %d TIN(s) updated in %.0fs (scoped to "
+mrfx/enrich.py:151:    it — a name refresh must never stack a whole-store rebuild behind an
+mrfx/enrich.py:202:        # COALESCE: skip_if_busy so a name refresh never queues behind an
+mrfx/enrich.py:220:                log.info("scoped name refresh unavailable (%s) — full directory "
+mrfx/fetch.py:3531:        # COALESCE: if a rebuild (e.g. the enrichment name refresh) is already

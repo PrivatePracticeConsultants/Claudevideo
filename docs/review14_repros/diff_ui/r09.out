@@ -1,0 +1,22 @@
+  from starlette.testclient import TestClient as TestClient  # noqa
+SAME 200/200 GET /api/rates?grain=tin&limit=50&payer=Alpha%20Health
+SAME 200/200 GET /api/summary?grain=tin&payer=Alpha%20Health
+SAME 200/200 GET /api/overview
+SAME 200/200 GET /api/code/97110?grain=tin
+SAME 200/200 GET /api/entity/tin/710000001
+SAME 200/200 GET /api/export.csv?grain=tin&payer=Alpha%20Health&cpt=97110
+DIFF 200/200 GET /api/export/outreach.zip?grain=tin&payer=Alpha%20Health&cpt=
+    first diff at 91 b'\x07[\x88Q\x1c\xf4\xc0\xf0\x8e\x8aP\\P::\xae\xe8\xdd|mrfx_outreach_2026-11-12_methodology.txt=\ri\xf9\x88a\x9b\x7fb`e\x7fY\xfb\x19f\x13\x18\x079\xe3' 
+ vs b'\x07[\x88Q\x1c\xf4\xc0\xf0\x8e\x8aP\\P::\xae\xe8\xdd|mrfx_outreach_2026-11-12_methodology.txt=\xc8>\xac!9wW\x13d\xd6\x1e\xb7\xe6\xbd\xf4\xc7\x1c\xc6\x08\xfb'
+SAME 200/200 POST /api/report/org-bundle.zip
+SAME 200/200 POST /api/schedule/fee.csv
+SAME 200/200 POST /api/roster.csv
+SAME 200/200 POST /api/report/pitch
+SAME 200/200 POST /api/report/negotiation
+SAME 200/200 POST /api/report/dossier
+SAME 200/200 POST /api/report/market
+SAME 200/200 POST /api/benchmark/market
+SAME 200/200 POST /api/contract-gaps
+SAME 200/200 GET /api/clients/digest
+SAME 200/200 POST /api/leaderboard
+SAME 200/200 POST /api/trajectory

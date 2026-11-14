@@ -187,8 +187,11 @@ def test_confirm_over_gb_gate(cfg, store):
 def test_dedup_view_counts_sources(cfg, store):
     drop(cfg, "innetwork_mixed.json")
     scan_inbox(cfg, store)
-    # same rates from a second source file
-    drop(cfg, "innetwork_mixed.json", rename="second_copy.json")
+    # same rates from a second source file — a DIFFERENT file (one more byte
+    # of whitespace): a byte-identical copy under another name is the same
+    # file and is not loaded twice (review 11 item 1.1)
+    p2 = drop(cfg, "innetwork_mixed.json", rename="second_copy.json")
+    p2.write_bytes(p2.read_bytes() + b"\n")
     scan_inbox(cfg, store)
     with store.connect() as con:
         row = con.execute(
@@ -343,3 +346,93 @@ def test_reset_clears_url_queue(cfg, store):
         assert con.execute("SELECT count(*) FROM url_queue").fetchone()[0] == 0
     # and the same URL re-queues cleanly after the wipe
     assert store.enqueue_url("https://x.example/rates.json.gz", "https://x.example/rates.json.gz") is not None
+
+
+def test_locked_temp_file_cannot_fail_a_finished_parse(cfg, store, monkeypatch):
+    """Windows: an antivirus/indexer briefly holding the worker's progress file
+    made the parent's cleanup unlink raise from a `finally`, replacing the
+    successful parse with a PermissionError (file marked failed). Cleanup must
+    retry and then give up quietly — the leftover is swept at next start."""
+    import pathlib
+
+    import mrfx.store as store_mod
+
+    real_unlink = pathlib.Path.unlink
+    held = []
+
+    def unlink(self, missing_ok=False):
+        if self.name.endswith(".progress") or self.name.endswith(".progress.tmp"):
+            held.append(self.name)
+            raise PermissionError(32, "being used by another process", str(self))
+        return real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(pathlib.Path, "unlink", unlink)
+    monkeypatch.setattr(store_mod.time, "sleep", lambda s: None)   # skip retry backoff
+    from mrfx.ingest import ParsePoolManager, set_parse_pool
+
+    p = drop(cfg, "innetwork_mixed.json", gz=True)
+    pool = ParsePoolManager(max_workers=1)   # the worker path owns the progress file
+    set_parse_pool(pool)
+    try:
+        res = ingest_file(cfg, store, p)
+    finally:
+        set_parse_pool(None)
+        pool.shutdown_now()
+    assert res["status"] == "done", res
+    assert held   # the lock really was hit
+    assert any(r["npi"] == "2222222222" for r in rates(store))
+
+
+def test_worker_computes_qa_and_matches_the_main_process(cfg, store, monkeypatch):
+    """The parse worker computes the QA aggregates on its own part (private
+    DuckDB), so the main process's shared connection isn't scanned. Its
+    numbers must equal the main-process computation exactly, and a failure
+    there must fall back to the main process, never fail the file."""
+    import mrfx.ingest as ing
+    from mrfx.ingest import ParsePoolManager, qa_report, set_parse_pool
+
+    calls = []
+    real = ing.qa_aggregate_counts
+    monkeypatch.setattr(ing, "qa_aggregate_counts",
+                        lambda con, part: calls.append(part) or real(con, part))
+    p = drop(cfg, "innetwork_mixed.json", gz=True)
+    pool = ParsePoolManager(max_workers=1)
+    set_parse_pool(pool)
+    try:
+        assert ingest_file(cfg, store, p)["status"] == "done"
+    finally:
+        set_parse_pool(None)
+        pool.shutdown_now()
+    assert calls == []          # main process never scanned the part
+    st = store.file_status(p.name)
+    import json as _json
+    worker_qa = _json.loads(st["qa"]) if isinstance(st["qa"], str) else st["qa"]
+    main_qa = qa_report(store, {k: worker_qa[k] for k in ("rows", "non_dollar_rows", "prices")
+                                if k in worker_qa}, p.name)
+    for k in ("outlier_rates", "duplicate_explosion_ratio", "tin_is_really_npi_rows"):
+        assert worker_qa[k] == main_qa[k], k
+    assert len(calls) == 1      # (that comparison ran it once in the main process)
+    assert [f for f in store.rates_dir.iterdir() if f.name.endswith(".qa-spill")] == []
+
+
+def test_worker_qa_failure_falls_back_to_the_main_process(cfg, store, monkeypatch, tmp_path):
+    import mrfx.ingest as ing
+
+    bad = tmp_path / ".k.1.parquet.tmp"
+    bad.write_bytes(b"not parquet")
+    assert ing._worker_qa_counts(bad) is None          # never raises
+    assert not (tmp_path / ".k.1.qa-spill").exists()   # spill folder removed
+    qa = ing.qa_report(store, {"rows": 0, "non_dollar_rows": 0}, "nothing.json", agg=None)
+    assert qa["duplicate_explosion_ratio"] == 1.0
+
+
+def test_orphan_sweep_removes_a_dead_workers_qa_spill(cfg, store):
+    from mrfx.store import Store
+
+    dead = store.rates_dir / ".abc.999999.qa-spill"
+    dead.mkdir()
+    (dead / "duckdb_temp_block-1.block").write_bytes(b"x" * 10)
+    live = store.rates_dir / f".abc.{__import__('os').getpid()}.qa-spill"
+    live.mkdir()
+    Store(cfg.store_dir)._sweep_orphan_tmps()
+    assert not dead.exists() and live.exists()

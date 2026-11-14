@@ -902,7 +902,12 @@ def test_parallel_ingest_matches_serial(cfg, store, server, http_root, tmp_path)
     a = recs[dedup_key(f"{server}/rates.json.gz")]
     b = recs[dedup_key(f"{server}/rates_b.json.gz")]
     assert a["status"] == "done" and b["status"] == "done"
-    assert a["rows_emitted"] == b["rows_emitted"] > 0  # same fixture -> same rows
+    # the same fixture under two payers: only the FIRST payer has a provider
+    # list (companion.json). Its rate file is read again when that list lands
+    # (review 9 item 3.2: at 64a371c both ended at 4 rows — the list arriving
+    # third was never applied); the second payer's cannot borrow another
+    # payer's list and keeps its 4
+    assert (a["rows_emitted"], b["rows_emitted"]) == (6, 4)
     with store.connect() as con:
         total = con.execute("SELECT count(*) FROM rates").fetchone()[0]
         payers = {r[0] for r in con.execute("SELECT DISTINCT payer FROM rates").fetchall()}
@@ -963,6 +968,21 @@ def test_retry_failed_is_bulk_and_unbounded(cfg, store, server):
     assert store.url_queue_counts().get("failed") == 4
     assert store.requeue_failed() == 4
     assert store.url_queue_counts().get("queued") == 4
+
+
+def test_bulk_retried_rows_wait_behind_fresh_files(cfg, store, server):
+    """Fair scheduling: after "retry failed", the dead/flaky low-id links must
+    not claim the download slots ahead of files pasted since — measured as 3
+    dead links + fresh ones: the fresh ones are claimed first."""
+    add_urls(store, [f"{server}/dead_{i}.json.gz" for i in range(3)])
+    drain(cfg, store)
+    assert store.requeue_failed() == 3
+    add_urls(store, [f"{server}/fresh_{i}.json.gz" for i in range(2)])
+    order = []
+    while (rec := store.next_queued_url()) is not None:
+        order.append(rec["url"].rsplit("/", 1)[1])
+    assert order == ["fresh_0.json.gz", "fresh_1.json.gz",
+                     "dead_0.json.gz", "dead_1.json.gz", "dead_2.json.gz"]
 
 
 def test_user_transition_guards(cfg, store, server):
@@ -2134,3 +2154,586 @@ def test_slow_big_file_requeues_itself_instead_of_waiting_for_a_human(cfg, store
     # than starting over (that is what makes repeated passes converge)
     parts = list(cfg.downloads_dir.glob("*.part"))
     assert parts and parts[0].stat().st_size > 0, "partial bytes must survive"
+
+
+def test_resume_continues_the_running_hash_instead_of_rereading(cfg, monkeypatch):
+    """Each reconnect used to re-read and re-hash EVERYTHING downloaded so far
+    (cost grows with the square of the number of resumes, and the connection
+    idled meanwhile). Within one download the hash now carries over; the
+    final hash must still be the hash of the exact bytes."""
+    import builtins
+    import hashlib
+    import http.server as hs
+    import os as _os
+
+    payload = _os.urandom(6 << 20)
+    calls = []
+
+    class Drops(hs.BaseHTTPRequestHandler):
+        def do_GET(self):
+            rng = self.headers.get("Range")
+            start = int(rng.split("=")[1].rstrip("-")) if rng else 0
+            calls.append(start)
+            body = payload[start:]
+            self.send_response(206 if rng else 200)
+            if rng:
+                self.send_header("Content-Range", f"bytes {start}-{len(payload)-1}/{len(payload)}")
+            # a strong validator on every answer: each resume is vouched for,
+            # so no splice sample is read (review 11 item 1.2)
+            self.send_header("ETag", '"r1"')
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            # every response drops after ~1.5 MB until the last stretch
+            self.wfile.write(body if len(body) <= (2 << 20) else body[: (3 << 20) // 2])
+            self.wfile.flush()
+            self.connection.close()
+
+        def log_message(self, *a):
+            pass
+
+    rereads = []
+    real_open = builtins.open
+
+    def spy_open(file, mode="r", *a, **k):
+        if str(file).endswith(".part") and mode == "rb":
+            rereads.append(str(file))
+        return real_open(file, mode, *a, **k)
+    monkeypatch.setattr(builtins, "open", spy_open)
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Drops)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        from mrfx.fetch import download, filename_for
+
+        url = f"http://127.0.0.1:{httpd.server_address[1]}/r.json.gz"
+        dest = cfg.downloads_dir / filename_for(url)
+        sha, _ = download(cfg, url, dest)
+        assert sha == hashlib.sha256(payload).hexdigest()
+        assert len(calls) >= 3, calls                 # really resumed several times
+        assert rereads == [], rereads                 # never re-read the .part to hash it
+    finally:
+        httpd.shutdown()
+
+
+def test_a_gzip_encoded_body_is_saved_as_sent_not_decoded(cfg):
+    """Some origins gzip a body we asked for as identity (S3 objects stored
+    with Content-Encoding: gzip). Decoding it wrote ~20x the bytes and made
+    Range resumes (encoded offsets) splice decoded+encoded data. The bytes
+    on disk must be exactly what was sent — and still ingestible."""
+    import gzip as _gz
+    import hashlib
+    import http.server as hs
+
+    doc = json.dumps({"reporting_entity_name": "Enc", "in_network": []}).encode() * 1
+    sent = _gz.compress(doc)
+
+    class Enc(hs.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(len(sent)))
+            self.end_headers()
+            self.wfile.write(sent)
+
+        def log_message(self, *a):
+            pass
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Enc)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        from mrfx.fetch import download, filename_for
+        from mrfx.sniff import open_stream
+
+        url = f"http://127.0.0.1:{httpd.server_address[1]}/plain.json"
+        dest = cfg.downloads_dir / filename_for(url)
+        sha, _ = download(cfg, url, dest)
+        assert dest.read_bytes() == sent and sha == hashlib.sha256(sent).hexdigest()
+        with open_stream(dest) as s:          # read as gzip by its magic bytes
+            assert s.read() == doc
+    finally:
+        httpd.shutdown()
+
+
+def test_segments_fall_back_when_the_server_compresses_each_range(cfg, monkeypatch):
+    """Stitching raw byte ranges is only valid if each 206 body IS those
+    bytes. An origin that gzips every range response would assemble a corrupt
+    file; segmentation must give up and the single connection finish it."""
+    import gzip as _gz
+    import hashlib
+    import http.server as hs
+    import os as _os
+
+    import mrfx.fetch as F
+
+    # COMPRESSIBLE like a real MRF: each gzipped range is SMALLER than the
+    # range, so naive stitching quietly fills the file with wrong bytes
+    payload = (b'{"billing_code": "97110", "negotiated_rate": 41.5}, ' * 6000)[:300_000]
+    assert len(payload) == 300_000 and _os
+
+    class CompressesRanges(hs.BaseHTTPRequestHandler):
+        def do_GET(self):
+            rng = self.headers.get("Range", "")
+            if rng.startswith("bytes="):
+                a, b = rng[6:].split("-")
+                start = int(a)
+                end = min(int(b) if b else len(payload) - 1, len(payload) - 1)
+                body = _gz.compress(payload[start:end + 1])
+                self.send_response(206)
+                self.send_header("Content-Range", f"bytes {start}-{end}/{len(payload)}")
+                self.send_header("Content-Encoding", "gzip")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+        def log_message(self, *a):
+            pass
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), CompressesRanges)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        monkeypatch.setattr(F, "_SEGMENT_MIN_BYTES", 1000)
+        monkeypatch.setattr(F, "_SEGMENT_MIN_PIECE", 50_000)
+        cfg.download_segments = 4
+        url = f"http://127.0.0.1:{httpd.server_address[1]}/f.json.gz"
+        dest = cfg.downloads_dir / F.filename_for(url)
+        sha, _ = F.download(cfg, url, dest)
+        assert dest.read_bytes() == payload and sha == hashlib.sha256(payload).hexdigest()
+    finally:
+        httpd.shutdown()
+
+
+def test_expired_signed_child_names_the_index_to_repaste(cfg, store, monkeypatch):
+    """A 403 on a child of a long-ago-expanded index: the row must say WHICH
+    index to paste again (one of thousands of rows otherwise just said 're-add
+    the TOC it came from')."""
+    import mrfx.fetch as fetch
+
+    toc = "https://idx.example/Table_of_Contents.json"
+    parent = store.enqueue_url(toc, toc)
+    store.update_url(parent, status="done", kind="toc")
+    store.enqueue_urls([("https://cdn.example/f.json.gz?sig=old", "https://cdn.example/f.json.gz")],
+                       parent_id=parent)
+
+    def expired(*a, **k):
+        raise fetch.DownloadError("HTTP 403 — access refused.", 403, retryable=False)
+
+    monkeypatch.setattr(fetch, "download", expired)
+    for run in (fetch.process_url_record, fetch.fetch_url_record):
+        rec = store.next_queued_url()
+        run(cfg, store, rec)
+        (row,) = [r for r in store.list_urls() if r["id"] == rec["id"]]
+        assert row["status"] == "failed"
+        assert f"came from the index {toc}" in row["error"], row["error"]
+        store.update_url(rec["id"], status="queued")   # second path, same row
+
+
+def test_stopped_link_keeps_its_download_and_retry_reuses_it(cfg, store, server, monkeypatch):
+    """Stop on a link mid-processing: the row is 'skipped' (not failed) with a
+    plain message, the downloaded bytes stay, and retry finishes it WITHOUT
+    downloading again (the signed link may have expired by then)."""
+    import mrfx.fetch as fetch
+
+    downloads = []
+    real_download = fetch.download
+    monkeypatch.setattr(fetch, "download",
+                        lambda *a, **k: downloads.append(1) or real_download(*a, **k))
+    real_upsert = store.upsert_file
+    pressed = []
+
+    def upsert(name, **fields):
+        real_upsert(name, **fields)
+        if fields.get("status") == "processing" and not pressed:
+            pressed.append(store.request_parse_stop(name))
+
+    monkeypatch.setattr(store, "upsert_file", upsert)
+    add_urls(store, [f"{server}/rates.json.gz"])
+    drain(cfg, store)
+    (rec,) = store.list_urls()
+    assert pressed == [True]
+    assert rec["status"] == "skipped" and "stopped by you" in rec["error"]
+    assert "download is kept" in rec["error"]
+    kept = cfg.downloads_dir / fetch.filename_for(rec["url"])
+    assert kept.exists()
+    with store.connect() as con:
+        assert con.execute("SELECT count(*) FROM rates").fetchone()[0] == 0
+
+    assert store.set_url_status_by_id(rec["id"], "queued")      # the retry button
+    drain(cfg, store)
+    (rec,) = store.list_urls()
+    assert rec["status"] == "done" and rec["rows_emitted"] > 0
+    assert len(downloads) == 1                                  # never re-downloaded
+
+
+def _drain_with_deadline(cfg, store, seconds=60):
+    """run_queue in a thread: a stalled queue (a dead processor thread) would
+    otherwise hang the test forever instead of failing it."""
+    done = {}
+    t = threading.Thread(target=lambda: done.setdefault("n", drain(cfg, store)), daemon=True)
+    t.start()
+    t.join(seconds)
+    return not t.is_alive()
+
+
+def test_a_systemexit_from_a_worker_does_not_kill_the_processor(cfg, store, server, monkeypatch):
+    """Round 3 P1.1: a SystemExit re-raised by fut.result() (a worker that
+    wrongly decided its parent was dead) passed every `except Exception`,
+    ended the processor thread silently with its row 'ingesting', and the
+    queue stalled. Now the row fails with a message and the queue drains."""
+    import mrfx.fetch as mf
+    real = mf.process_url_record
+    calls = {"n": 0}
+
+    def flaky(cfg_, store_, rec, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise SystemExit("parent process died — abandoning orphaned parse")
+        return real(cfg_, store_, rec, **kw)
+    monkeypatch.setattr(mf, "process_url_record", flaky)
+    add_urls(store, [f"{server}/rates.json.gz", f"{server}/companion.json"])
+    assert _drain_with_deadline(cfg, store), "queue stalled — the processor thread died"
+    st = {r["status"] for r in store.list_urls()}
+    assert "failed" in st and "ingesting" not in st and "fetched" not in st
+
+
+def test_a_dead_processor_thread_is_replaced(cfg, store, server, monkeypatch, caplog):
+    """Anything that still ends a processor thread (here a KeyboardInterrupt
+    from the claim call, which the loop deliberately re-raises) gets a
+    replacement thread and an ERROR line — never a silently shrinking pool."""
+    real = store.next_fetched_url
+    calls = {"n": 0}
+
+    def claim():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise KeyboardInterrupt
+        return real()
+    monkeypatch.setattr(store, "next_fetched_url", claim)
+    add_urls(store, [f"{server}/rates.json.gz"])
+    with caplog.at_level("ERROR"):
+        assert _drain_with_deadline(cfg, store), "queue stalled — no replacement thread"
+    assert "stopped unexpectedly" in caplog.text
+    assert {r["status"] for r in store.list_urls()} == {"done"}
+
+
+def test_windows_liveness_access_denied_means_alive():
+    from mrfx.store import _nt_alive_without_handle
+    assert _nt_alive_without_handle(87) is False      # ERROR_INVALID_PARAMETER: no such pid
+    assert _nt_alive_without_handle(5) is True        # ACCESS_DENIED (EDR, elevation): alive
+    assert _nt_alive_without_handle(0) is True        # unknown: unsure -> alive
+
+
+def _catalog(monkeypatch, *templates):
+    import mrfx.known_sources as ks
+    from mrfx.known_sources import expand_placeholders
+    monkeypatch.setattr(ks, "load_known_sources", lambda p, today=None: [
+        {"url": expand_placeholders(t, today), "url_template": t, "queueable": True}
+        for t in templates])
+
+
+def test_monthly_refresh_retries_a_not_yet_posted_file_until_the_10th(cfg, store, monkeypatch):
+    """Round 3 P1.2: the month used to be stamped done at the first tick after
+    midnight on the 1st — a {FIRST_OF_MONTH} index the payer posts on the 3rd
+    404'd and stayed failed all month. Now: queued on the 1st, retried once a
+    day while it fails, month closed when it succeeds (or after the 10th)."""
+    import datetime as dt
+
+    from mrfx.fetch import dedup_key, monthly_refresh_tick
+    tpl = "https://p.example/{FIRST_OF_MONTH}_index.json"
+    _catalog(monkeypatch, tpl, "https://unused.example/{FIRST_OF_MONTH}_index.json")
+    old = "https://p.example/2026-10-01_index.json"          # loaded last month
+    store.update_url(store.enqueue_url(old, dedup_key(old)), status="done")
+    cur = "https://p.example/2026-11-01_index.json"
+
+    r = monthly_refresh_tick(cfg, store, dt.date(2026, 11, 1))
+    assert (r["dated"], r["queued"], r.get("done")) == (1, 1, None)
+    urls = {u["url"]: u for u in store.list_urls()}
+    assert cur in urls and not any("unused" in u for u in urls)   # only loaded sources
+    store.update_url(urls[cur]["id"], status="failed", error="HTTP 404")
+    # same day, failed minutes ago: not retried yet, month stays open
+    r = monthly_refresh_tick(cfg, store, dt.date(2026, 11, 1))
+    assert (r["retried"], r.get("done")) == (0, None)
+    with store.connect() as con:      # the failure is a day old now
+        con.execute("UPDATE url_queue SET finished_at = finished_at - INTERVAL 21 HOUR")
+    r = monthly_refresh_tick(cfg, store, dt.date(2026, 11, 2))
+    assert r["retried"] == 1 and {u["url"]: u["status"] for u in store.list_urls()}[cur] == "queued"
+    store.update_url(urls[cur]["id"], status="done")
+    r = monthly_refresh_tick(cfg, store, dt.date(2026, 11, 3))
+    assert r.get("done") is True and store.meta_get("monthly_refresh_last") == "2026-11"
+
+
+def test_monthly_refresh_closes_the_month_after_the_grace_period(cfg, store, monkeypatch):
+    import datetime as dt
+
+    from mrfx.fetch import dedup_key, monthly_refresh_tick
+    _catalog(monkeypatch, "https://p.example/{FIRST_OF_MONTH}_index.json")
+    old = "https://p.example/2026-10-01_index.json"
+    store.update_url(store.enqueue_url(old, dedup_key(old)), status="done")
+    monthly_refresh_tick(cfg, store, dt.date(2026, 11, 1))
+    cur = next(u for u in store.list_urls() if "2026-11-01" in u["url"])
+    store.update_url(cur["id"], status="failed", error="HTTP 404")
+    assert monthly_refresh_tick(cfg, store, dt.date(2026, 11, 9)).get("done") is None
+    r = monthly_refresh_tick(cfg, store, dt.date(2026, 11, 11))
+    assert r.get("done") is True and r["retried"] == 0
+
+
+def test_a_404_when_last_months_file_is_already_loaded_explains_itself(cfg, store):
+    import datetime as dt
+
+    from mrfx.fetch import _maybe_queue_prev_month, dedup_key
+    today = dt.date.today()
+    prev = (today.replace(day=1) - dt.timedelta(days=1)).replace(day=1)
+    cur_url = f"https://p.example/{today.replace(day=1).isoformat()}_index.json"
+    prev_url = f"https://p.example/{prev.isoformat()}_index.json"
+    store.update_url(store.enqueue_url(prev_url, dedup_key(prev_url)), status="done")
+    cid = store.enqueue_url(cur_url, dedup_key(cur_url))
+    _maybe_queue_prev_month(store, {"id": cid, "url": cur_url, "parent_id": None}, "HTTP 404")
+    row = next(u for u in store.list_urls() if u["url"] == cur_url)
+    assert "isn't posted yet" in row["error"] and "already in your data" in row["error"]
+
+
+def test_a_chunked_download_never_fits_the_size_limit(store):
+    """Round 3 P1.3(e): bytes_total = 0 (chunked transfer, length unknown)
+    'fit' every limit, so an 8 GB chunked file was re-queued, re-downloaded
+    5 GB and tripped oversize again on every restart."""
+    from mrfx.fetch import dedup_key
+    a = store.enqueue_url("https://x/chunked.json.gz", dedup_key("https://x/chunked.json.gz"))
+    b = store.enqueue_url("https://x/known.json.gz", dedup_key("https://x/known.json.gz"))
+    store.update_url(a, status="oversize", bytes_total=0)
+    store.update_url(b, status="oversize", bytes_total=4_000_000_000)
+    assert store.requeue_oversize_within(5_000_000_000) == 1
+    st = {u["url"]: u["status"] for u in store.list_urls()}
+    assert st == {"https://x/chunked.json.gz": "oversize", "https://x/known.json.gz": "queued"}
+
+
+def test_resume_stopped_undoes_clear_queue_and_stop_downloads(store):
+    from mrfx.fetch import dedup_key
+    ids = [store.enqueue_url(f"https://x/{i}.json", dedup_key(f"https://x/{i}.json"))
+           for i in range(3)]
+    store.update_url(ids[0], status="downloading")
+    assert store.cancel_all_downloading() == 1 and store.is_download_canceled(ids[0])
+    assert store.clear_queued() == 2
+    assert {u["status"] for u in store.list_urls()} == {"skipped"}
+    assert store.resume_canceled() == 3
+    assert {(u["status"], u["kind"]) for u in store.list_urls()} == {("queued", "unknown")}
+
+
+def test_healthsparq_latest_metadata_shape(cfg, store, tmp_path):
+    """Round 3 P3: 16 catalog sources rely on HealthSparq's undocumented
+    latest_metadata.json. Fixture = the live shape (2026-11-06, BCBS Nebraska,
+    trimmed; the allowed-amounts entry is synthesized in the same shape). The
+    app lifts every filePath, resolved against the listing's own URL, rate
+    files first; and if the shape ever changes the row says so plainly."""
+    import http.server
+    import shutil
+
+    from mrfx.fetch import extract_links_from_page
+    from tests.mrfx.conftest import FIXTURES
+    base = "https://mrf.healthsparq.com/bcbsne-egress.nophi.kyruushsq.com/prd/mrf/BCBSNE_I/BCBSNE/"
+    links = extract_links_from_page(FIXTURES / "healthsparq_latest_metadata.json",
+                                    base + "latest_metadata.json", 100)
+    assert links == [
+        base + "2026-11-01/inNetworkRates/2026-11-01_ANTELOPEMEMORIALNETWORK_BCBSNE.json.gz",
+        base + "2026-11-01/inNetworkRates/2026-11-01_BLAIRMCHNETWORK_BCBSNE.json.gz",
+        base + "2026-11-01/allowedAmounts/2026-11-01_BCBSNE_allowed-amounts.json.gz",
+    ]
+
+    # a CHANGED shape (no filePath anywhere) fails with a plain-language reason
+    root = tmp_path / "hs"
+    (root / "prd").mkdir(parents=True)
+    (root / "prd" / "latest_metadata.json").write_text(
+        json.dumps({"documents": [{"path": "somewhere", "type": "rates"}]}))
+
+    class H(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=str(root), **k)
+
+        def log_message(self, *a):
+            pass
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        add_urls(store, [f"http://127.0.0.1:{srv.server_address[1]}/prd/latest_metadata.json"])
+        drain(cfg, store)
+    finally:
+        srv.shutdown()
+    row = store.list_urls()[0]
+    assert row["status"] == "failed" and "HealthSparq file list" in row["error"]
+    shutil.rmtree(root, ignore_errors=True)
+
+
+def _stalling_server():
+    """A server that sends a few KB of a 4 MB file and hangs up, every time
+    (the 'payer's server stopped sending data' case), plus a good file."""
+    import http.server as hs
+    import os as _os
+    payload = _os.urandom(4 << 20)
+    good = gzip.compress(json.dumps({"reporting_entity_name": "Pauseco", "last_updated_on": "2026-05-01",
+                                     "version": "2.0.0", "in_network": []}).encode())
+
+    class H(hs.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path.endswith("good.json.gz"):
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(good)))
+                self.end_headers()
+                self.wfile.write(good)
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload[:4096])
+            self.wfile.flush()
+            self.connection.close()
+
+        def log_message(self, *a):
+            pass
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd, f"http://127.0.0.1:{httpd.server_address[1]}"
+
+
+def test_a_stalled_download_is_paused_not_failed_and_the_queue_moves_on(cfg, store):
+    """A payer server that stops feeding a download used to hold a slot until
+    the stall deadline, then leave a 'failed' row for a human to retry. Now
+    it is PAUSED: the slot goes to the next file, the bytes are kept, and it
+    resumes by itself after download_pause_hours."""
+    import datetime as dt
+
+    from mrfx.fetch import filename_for
+    cfg.download_stall_seconds = 1.0
+    cfg.download_retries = 6
+    cfg.download_pause_hours = 24.0
+    httpd, base = _stalling_server()
+    try:
+        add_urls(store, [f"{base}/stalls.json.gz", f"{base}/good.json.gz"])
+        assert _drain_with_deadline(cfg, store, 120), "queue did not finish — a paused row counted as in flight"
+    finally:
+        httpd.shutdown()
+    rows = {u["url"].rsplit("/", 1)[-1]: u for u in store.list_urls()}
+    assert rows["good.json.gz"]["status"] == "done"
+    p = rows["stalls.json.gz"]
+    assert p["status"] == "paused" and p["auto_resumes"] == 1
+    assert "stopped sending data" in p["error"] and "24 hours" in p["error"]
+    wake = dt.datetime.fromisoformat(p["retry_after"])
+    now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+    assert dt.timedelta(hours=23) < wake - now < dt.timedelta(hours=25)
+    part = (cfg.downloads_dir / filename_for(p["url"]))
+    assert part.with_suffix(part.suffix + ".part").exists()        # bytes kept for the resume
+
+
+def test_a_paused_download_wakes_when_its_time_comes_then_fails_after_the_last_pause(cfg, store):
+    cfg.download_stall_seconds = 1.0
+    cfg.download_retries = 6
+    cfg.download_pause_hours = 24.0
+    cfg.download_auto_resumes = 2
+    httpd, base = _stalling_server()
+    try:
+        add_urls(store, [f"{base}/stalls.json.gz"])
+        assert _drain_with_deadline(cfg, store, 120)
+        row = store.list_urls()[0]
+        assert row["status"] == "paused"
+        assert store.wake_paused_urls() == 0                        # not yet
+        with store.connect() as con:
+            con.execute("UPDATE url_queue SET retry_after = retry_after - INTERVAL 25 HOUR")
+        assert store.wake_paused_urls() == 1
+        assert store.list_urls()[0]["status"] == "queued"
+        assert _drain_with_deadline(cfg, store, 120)                 # pause 2 of 2
+        row = store.list_urls()[0]
+        assert row["status"] == "paused" and row["auto_resumes"] == 2
+        with store.connect() as con:
+            con.execute("UPDATE url_queue SET retry_after = retry_after - INTERVAL 25 HOUR")
+        store.wake_paused_urls()
+        assert _drain_with_deadline(cfg, store, 120)                 # out of pauses -> failed
+        assert store.list_urls()[0]["status"] == "failed"
+    finally:
+        httpd.shutdown()
+
+
+def test_retry_now_and_retry_all_wake_a_paused_download(store):
+    from mrfx.fetch import dedup_key
+    a = store.enqueue_url("https://x/a.json.gz", dedup_key("https://x/a.json.gz"))
+    b = store.enqueue_url("https://x/b.json.gz", dedup_key("https://x/b.json.gz"))
+    store.pause_url(a, 24, "paused: test")
+    store.pause_url(b, 24, "paused: test")
+    assert store.set_url_status_by_id(a, "queued")                  # the row's "try now" button
+    assert store.requeue_failed() == 1                               # "retry all failed" takes paused too
+    st = {u["id"]: (u["status"], u["retry_after"]) for u in store.list_urls()}
+    assert st == {a: ("queued", None), b: ("queued", None)}
+
+
+def test_a_server_that_dribbles_on_one_connection_trips_the_stall_deadline(cfg):
+    """A server that keeps the connection open and sends a trickle never hits
+    the read timeout, so the stall deadline (checked between connections)
+    never ran and the download held its slot until the 3-hour cap. The
+    deadline is now checked mid-stream."""
+    import http.server as hs
+    import time as _time
+    cfg.download_stall_seconds = 2.0
+    cfg.download_max_seconds = 999
+    cfg.download_retries = 0
+
+    class Dribble(hs.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", str(50 << 20))
+            self.end_headers()
+            try:
+                while True:
+                    self.wfile.write(b"x" * 1024)
+                    self.wfile.flush()
+                    _time.sleep(0.2)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        def log_message(self, *a):
+            pass
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Dribble)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        from mrfx.fetch import DownloadError, download, filename_for
+        url = f"http://127.0.0.1:{httpd.server_address[1]}/slow.json.gz"
+        t0 = _time.monotonic()
+        with pytest.raises(DownloadError) as ei:
+            download(cfg, url, cfg.downloads_dir / filename_for(url))
+        assert _time.monotonic() - t0 < 30, "mid-stream stall check did not fire"
+        assert "no download progress" in str(ei.value) and ei.value.retryable
+    finally:
+        httpd.shutdown()
+
+
+def test_queue_lists_active_then_attention_then_finished_then_queued(cfg, store):
+    """Files & imports order (user request): downloading, processing, too big,
+    failed, done, then queued — paused next to too big, skipped after done,
+    queued in the order they will be downloaded. And on a big index the files
+    downloading RIGHT NOW are always in the window (the newest-N window was
+    full of queued rows and could drop them)."""
+    parent = store.enqueue_url("https://x.example/toc.json", "https://x.example/toc.json")
+    store.enqueue_urls([(f"https://x.example/f{i}.json.gz", f"https://x.example/f{i}.json.gz")
+                        for i in range(40)], parent_id=parent)
+    want = {1: "downloading", 2: "ingesting", 3: "oversize", 4: "failed", 5: "done",
+            6: "paused", 7: "fetched", 8: "skipped", 9: "done", 10: "expanding"}
+    with store.write_lock, store.connect() as con:
+        ids = [r[0] for r in con.execute(
+            "SELECT id FROM url_queue WHERE parent_id IS NOT NULL ORDER BY id").fetchall()]
+        for k, st in want.items():
+            con.execute("UPDATE url_queue SET status = ?, finished_at = CASE WHEN ? IN "
+                        "('done', 'failed', 'skipped') THEN TIMESTAMP '2026-11-01' + "
+                        "INTERVAL (?) MINUTE END WHERE id = ?", [st, st, k, ids[k]])
+        con.execute("UPDATE url_queue SET status = 'done', finished_at = TIMESTAMP "
+                    "'2026-10-01' WHERE id = ?", [parent])
+        con.execute("UPDATE url_queue SET retries = 1 WHERE id = ?", [ids[11]])  # a retried one
+    listed = store.list_urls(limit=5)
+    order = [r["status"] for r in listed]
+    firsts = list(dict.fromkeys(order))
+    assert firsts == ["downloading", "expanding", "ingesting", "fetched", "oversize", "paused",
+                      "failed", "done", "skipped", "queued"]
+    done = [r["id"] for r in listed if r["status"] == "done"]
+    assert done == [parent, ids[9], ids[5]]          # the pasted link first, then newest
+    queued = [r["id"] for r in listed if r["status"] == "queued"]
+    assert queued == [ids[0], ids[12], ids[13], ids[14], ids[15]]   # download order; retried last
+    assert ids[1] in [r["id"] for r in listed]       # downloading stays in a tiny window

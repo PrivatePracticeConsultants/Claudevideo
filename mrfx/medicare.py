@@ -611,7 +611,14 @@ def org_referrals(store: Store, npis: list[str], direction: str = "in",
                    coalesce(n.taxonomy_code, '')          AS taxonomy,
                    sum(p.patients)                        AS patients,
                    sum(p.transactions)                    AS transactions,
-                   round(avg(p.avg_day_wait), 1)          AS avg_day_wait
+                   -- weighted by each pair's transactions: a pair with one
+                   -- referral weighed as much as one with forty (11.3 vs 11.6)
+                   -- (a dataset without transaction counts keeps the plain mean)
+                   round(coalesce(
+                       (sum(p.avg_day_wait::DECIMAL(18, 6) * p.transactions)
+                        / nullif(sum(p.transactions) FILTER (
+                              WHERE p.avg_day_wait IS NOT NULL), 0))::DOUBLE,
+                       avg(p.avg_day_wait::DECIMAL(18, 6))::DOUBLE), 1) AS avg_day_wait
             FROM referral_pairs p
             LEFT JOIN npi_directory n ON n.npi = p.{theirs}
             WHERE p.dataset_id = ?
@@ -695,6 +702,13 @@ def load_centroids(con, centroids_path=None) -> None:
         f"types = {{'zip': 'VARCHAR', 'lat': 'DOUBLE', 'lon': 'DOUBLE'}})")
 
 
+def modal_tin(tins: list[str]) -> str | None:
+    """The most frequent TIN, ties to the lowest. max() over a set() broke a
+    tie by Python's per-process string-hash order, so a referral leader's
+    drawer moved to another TIN after a restart (invariant 7)."""
+    return min(set(tins), key=lambda t: (-tins.count(t), t)) if tins else None
+
+
 def haversine_miles_sql(lat_col: str, lon_col: str, lat0: float, lon0: float) -> str:
     """Great-circle miles from a fixed origin to (lat_col, lon_col). Verified
     against an independent implementation to 0 ULPs and against published
@@ -713,8 +727,9 @@ def referral_leaders(store: Store, zip_code: str | None = None,
     """Practices ranked by shared Medicare patients RECEIVED — who wins the
     referral market — optionally centered on a ZIP and clipped to a radius.
 
-    Practices group by NPPES organization name (the entity grain's own rule),
-    so a clinic's org NPI and its therapists count once. Distance is
+    An organization (NPI-2) is its NPPES name within its state — the entity
+    grain's own key, so a clinic's several org NPIs count once; an individual
+    (NPI-1) is its own NPI, since a person's name is not an identity. Distance is
     ZCTA-centroid haversine — good to a mile or two, honest for a radius
     filter, not for door-to-door directions. Practices whose ZIP has no
     centroid are EXCLUDED from a radius search and REPORTED in `unplaced`,
@@ -759,24 +774,47 @@ def referral_leaders(store: Store, zip_code: str | None = None,
         # flagged: unknown means unidentified, not non-therapy; once
         # enrichment classifies them they either name themselves or drop out
         # honestly on the next run.
-        keep = f"({therapy} OR n.npi IS NULL)" if therapy_only else "TRUE"
+        keep = "(p.is_therapy OR p.dir_npi IS NULL)" if therapy_only else "TRUE"
         base = f"""
-            WITH agg AS (
-                SELECT coalesce(nullif(trim(n.org_name), ''), p.target_npi) AS practice,
-                       mode(n.city)                          AS city,
-                       mode(n.state)                         AS state,
-                       mode(substr(trim(n.zip), 1, 5))       AS zip,
+            WITH keyed AS (
+                -- WHO a row belongs to (round 7 P0.6): an ORGANIZATION (NPI-2)
+                -- is its name within its state — the entity grain's own key;
+                -- an INDIVIDUAL (NPI-1) is its NPI. Grouping by name alone
+                -- merged two therapists both called "JOHN SMITH" in Missouri
+                -- and Kansas into one row, with Kansas patients inside a
+                -- Missouri radius.
+                SELECT p.*, n.npi AS dir_npi, n.org_name, n.city, n.state,
+                       {therapy} AS is_therapy,
+                       substr(trim(n.zip), 1, 5) AS zip5,
+                       CASE WHEN n.npi IS NOT NULL AND n.entity_type = 'NPI-2'
+                                 AND nullif(trim(n.org_name), '') IS NOT NULL
+                            THEN 'org:' || upper(trim(n.org_name)) || '|' || coalesce(n.state, '')
+                            ELSE 'npi:' || p.target_npi END AS pkey
+                FROM referral_pairs p
+                LEFT JOIN npi_directory n ON n.npi = p.target_npi
+                WHERE p.dataset_id = ?
+            ),
+            agg AS (
+                SELECT p.pkey,
+                       coalesce(nullif(trim(min(p.org_name)), ''), min(p.target_npi)) AS practice,
+                       -- ONE location per practice: the most common (city,
+                       -- state, ZIP) together, so a row can never read
+                       -- "Kansas" with a Missouri ZIP
+                       mode(struct_pack(c := p.city, s := p.state, z := p.zip5)
+                            ORDER BY struct_pack(c := p.city, s := p.state, z := p.zip5)) AS loc,
                        sum(p.patients)                       AS patients,
                        count(DISTINCT p.source_npi)          AS sources,
                        count(DISTINCT p.target_npi)          AS npis,
                        list(DISTINCT p.target_npi)           AS member_npis,
-                       bool_and(n.npi IS NULL)               AS unidentified,
+                       bool_and(p.dir_npi IS NULL)           AS unidentified,
                        max(CASE WHEN r.npi IS NOT NULL THEN 1 ELSE 0 END) = 1 AS in_store
-                FROM referral_pairs p
-                LEFT JOIN npi_directory n ON n.npi = p.target_npi
+                FROM keyed p
                 LEFT JOIN (SELECT DISTINCT npi FROM rates) r ON r.npi = p.target_npi
-                WHERE p.dataset_id = ? AND {keep}
-                GROUP BY 1
+                WHERE {keep}
+                GROUP BY p.pkey
+            ),
+            located AS (
+                SELECT * EXCLUDE (loc), loc.c AS city, loc.s AS state, loc.z AS zip FROM agg
             )
         """
         if use_radius:
@@ -785,37 +823,37 @@ def referral_leaders(store: Store, zip_code: str | None = None,
                 SELECT * FROM (
                     SELECT a.*, round({haversine_miles_sql('z.lat', 'z.lon',
                                                            origin[0], origin[1])}, 1) AS miles
-                    FROM agg a JOIN _zcta z ON z.zip = a.zip
+                    FROM located a JOIN _zcta z ON z.zip = a.zip
                 ) WHERE miles <= ?
-                ORDER BY patients DESC NULLS LAST, practice LIMIT ?
+                ORDER BY patients DESC NULLS LAST, practice, pkey LIMIT ?
             """, [ds_id, float(radius_miles), limit])
         else:
             cur = con.execute(base + """
-                SELECT a.*, CAST(NULL AS DOUBLE) AS miles FROM agg a
-                ORDER BY a.patients DESC NULLS LAST, a.practice LIMIT ?
+                SELECT a.*, CAST(NULL AS DOUBLE) AS miles FROM located a
+                ORDER BY a.patients DESC NULLS LAST, a.practice, a.pkey LIMIT ?
             """, [ds_id, limit])
         rows = [dict(zip([d[0] for d in cur.description], r)) for r in cur.fetchall()]
         # drawer TIN for the returned rows only — an individual therapist's
         # NPPES name is not an entity key, but the TIN their rates bill under
         # always resolves in the drawer
-        members: dict[str, list[str]] = {r["practice"]: r.pop("member_npis") or []
+        members: dict[str, list[str]] = {r["pkey"]: r.pop("member_npis") or []
                                          for r in rows}
         wanted = sorted({n for r in rows if r["in_store"]
-                         for n in members[r["practice"]]})
+                         for n in members[r["pkey"]]})
         tin_of = dict(con.execute(
-            "SELECT npi, mode(tin_value) FROM rates WHERE npi IN "
+            "SELECT npi, mode(tin_value ORDER BY tin_value) FROM rates WHERE npi IN "
             "(SELECT unnest(?::VARCHAR[])) GROUP BY npi",
             [wanted]).fetchall()) if wanted else {}
         for r in rows:
-            tins = [tin_of[n] for n in members[r["practice"]] if n in tin_of]
+            tins = [tin_of[n] for n in members[r.pop("pkey")] if n in tin_of]
             # the practice's modal TIN — the drawer that shows most of its book
-            r["tin"] = max(set(tins), key=tins.count) if tins else None
+            r["tin"] = modal_tin(tins)
         total, unplaced, unidentified = con.execute(base + f"""
             SELECT count(*),
                    count(*) FILTER (zip IS NULL{
                        " OR zip NOT IN (SELECT zip FROM _zcta)" if use_radius else ""}),
                    count(*) FILTER (unidentified)
-            FROM agg
+            FROM located
         """, [ds_id]).fetchone()
     return {"rows": rows, "dataset": label, "data_year": yr, "dataset_id": ds_id,
             "zip": zip_code, "radius_miles": radius_miles if use_radius else None,

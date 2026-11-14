@@ -27,15 +27,29 @@ import logging
 import re
 from pathlib import Path
 
+from . import progress as _progress
 from .benchmark import (BenchmarkError, compute_benchmark, contract_gaps,
-                        resolve_subject_tins,
-                        render_pitch_report)
+                        normalize_market, render_pitch_report,
+                        resolve_subject_tins)
 from .config import MrfxConfig
 from .schedule import (compute_fee_schedule, payer_scorecard,
                        render_rate_card, require_rate_card_content)
 from .store import Store
+from .rounding import half_up
 
 log = logging.getLogger(__name__)
+
+
+def _write_html(path: Path, text: str, encoding: str = "utf-8") -> None:
+    """Every packet document is written through here: an SSN-pattern tax ID
+    never reaches a saved page or the PDF printed from it (review 14 2.5)."""
+    from .store import mask_ssn_text
+    path.write_text(mask_ssn_text(text), encoding=encoding)
+
+
+def _label(subject: str) -> str:
+    from .clients import subject_label
+    return subject_label(subject)
 
 
 def _safe(name: str) -> str:
@@ -61,32 +75,66 @@ def _month_dir(root: Path, month: str) -> Path:
     return d
 
 
+def subject_vintage(store: Store, subject: str) -> list[tuple[str, str]]:
+    """[(payer, month)] — the month of each payer's newest published file
+    among this practice's current contract lines, ordered by payer."""
+    try:
+        tins = resolve_subject_tins(store, subject)
+    except BenchmarkError:
+        return []
+    if not tins:
+        return []
+    with store.connect() as con:
+        return [tuple(r) for r in con.execute(
+            "SELECT payer, max(file_month) FROM rates_by_tin WHERE is_latest AND "
+            "tin_value IN (SELECT unnest(?::VARCHAR[])) GROUP BY payer ORDER BY payer",
+            [tins]).fetchall()]
+
+
 def build_client_packet(cfg: MrfxConfig, store: Store, subject: str,
-                        out_dir: Path, market: dict | None = None) -> dict:
-    """One client's packet. Returns what was written and what was skipped."""
-    from .clients import client_digest  # local import: avoids a cycle
+                        out_dir: Path, market: dict | None = None,
+                        digest: dict | None = None, gaps: dict | None = None) -> dict:
+    """One client's packet. Returns what was written and what was skipped.
+    `digest` is the book's client digest when the caller already built it
+    (build_all_packets does, once for the whole book)."""
+    from .clients import client_digest, subject_display_name, subject_label  # avoids a cycle
 
     market = dict(market or {})
-    # A packet is a MONTHLY deliverable: pin the concrete month rather than
-    # "latest", so a packet mailed in November still says which vintage it
-    # describes when it is opened in February.
-    if not market.get("month") or str(market["month"]).lower() == "latest":
-        with store.connect() as con:
-            m = (con.execute(
-                "SELECT max(file_month) FROM rates_by_tin").fetchone() or [None])[0]
-        market["month"] = m or dt.date.today().strftime("%Y-%m")
+    # A packet is a monthly deliverable, so it says which vintage it describes.
+    # It is COMPUTED on each contract's newest file ("latest") and LABELLED with
+    # the month each payer's rates come from. Pinning the STORE's newest month
+    # instead emptied every packet on the real store, where one payer's 76-row
+    # file was dated a month ahead of everyone else (round 6). An explicitly
+    # chosen month is still honoured.
+    if not market.get("month"):
+        market["month"] = "latest"
+    pinned = str(market["month"]).lower() != "latest"
+    vintage = [] if pinned else subject_vintage(store, subject)
+    as_of = (market["month"] if pinned else
+             (max(m for _, m in vintage) if vintage else None))
     market.setdefault("therapy_only", True)
+    # a client packet is about ONE practice in ITS market: with no state given
+    # (the Clients button and `mrfx packets` give none) it is the practice's
+    # main state — the dossier's rule. Without one the pitch report refused
+    # every packet ("requires a state … allow_national=true") and the rate card
+    # pooled peers nationally (review 10 item 2.7)
+    scoped_to = None
+    if not market.get("state") and not market.get("allow_national"):
+        try:
+            from .benchmark import anchor_state
+            scoped_to = anchor_state(store, {}, resolve_subject_tins(store, subject))
+        except Exception:  # noqa: BLE001 — no state found: the documents say so
+            scoped_to = None
+        if scoped_to:
+            market["state"] = scoped_to
     written: list[str] = []
     skipped: list[str] = []
-    display = subject
+    display = subject_label(subject)
     try:
-        from .benchmark import resolve_subject_tins
         with store.connect() as con:
-            name = (con.execute(
-                "SELECT any_value(display_name) FROM tin_directory WHERE tin_value "
-                "IN (SELECT unnest(?::VARCHAR[]))",
-                [resolve_subject_tins(store, subject)]).fetchone() or [None])[0]
-        display = name or subject
+            from .benchmark import mapped_entity_name
+            display = subject_display_name(con, resolve_subject_tins(store, subject),
+                                           mapped_entity_name(store, subject)) or display
     except Exception:  # noqa: BLE001 — a name is cosmetic; the packet still builds
         pass
 
@@ -96,10 +144,11 @@ def build_client_packet(cfg: MrfxConfig, store: Store, subject: str,
         except BenchmarkError as e:      # a real, expected refusal
             skipped.append(f"{section}: {_reason(e)}")
         except Exception as e:           # noqa: BLE001 — never lose the packet
-            log.warning("packet %s / %s failed: %s", subject, section, e)
+            log.warning("packet %s / %s failed: %s", subject_label(subject), section, e)
             skipped.append(f"{section}: could not be built ({_reason(e)})")
 
-    pdir = Path(out_dir) / _safe(subject)
+    # never an SSN-pattern key in a folder name, a title or a PDF (review 14 2.5)
+    pdir = Path(out_dir) / _safe(subject_label(subject))
     pdir.mkdir(parents=True, exist_ok=True)
 
     # 1. rate card — the anchor document
@@ -110,17 +159,22 @@ def build_client_packet(cfg: MrfxConfig, store: Store, subject: str,
         require_rate_card_content(fs)
         sc = payer_scorecard(fs)
         state["fs"], state["sc"] = fs, sc
-        (pdir / "1_rate_card.html").write_text(
+        _write_html(pdir / "1_rate_card.html", 
             render_rate_card(cfg, store, fs, sc), encoding="utf-8")
         written.append("1_rate_card.html")
     attempt("Rate card", _rate_card)
 
     # 2. market position + opportunity (the pitch report)
     def _pitch():
+        # the report's own scope rule FIRST: it refuses a market with no state,
+        # and the full-market benchmark it would have refused cost 4.6 s per
+        # client on a 99M-rate store
+        from .benchmark import normalize_market, require_geographic_scope
+        require_geographic_scope(normalize_market(market), "pitch report")
         bench = compute_benchmark(store, subject, market)
         if not bench.get("rows"):
             raise BenchmarkError("no benchmarkable codes this month")
-        (pdir / "2_market_position.html").write_text(
+        _write_html(pdir / "2_market_position.html", 
             render_pitch_report(cfg, store, bench), encoding="utf-8")
         written.append("2_market_position.html")
     attempt("Market position", _pitch)
@@ -128,13 +182,13 @@ def build_client_packet(cfg: MrfxConfig, store: Store, subject: str,
     # 3. what moved this month + gaps + Medicare alerts, from the SAME digest
     #    the Clients tab renders (so the packet and the screen agree)
     def _changes():
-        dig = client_digest(store)
-        row = next((c for c in dig["clients"] if c["subject"] == subject), None)
+        dig = digest if digest is not None else client_digest(store)
+        row = next((c for c in dig["clients"] if c["subject"] == subject_label(subject)), None)
         if row is None:
             raise BenchmarkError("this practice is not on the watchlist")
         if row.get("error"):
             raise BenchmarkError(row["error"])
-        (pdir / "3_this_month.html").write_text(
+        _write_html(pdir / "3_this_month.html", 
             _month_summary_html(cfg, display, row, dig, store, subject, market),
             encoding="utf-8")
         written.append("3_this_month.html")
@@ -142,7 +196,9 @@ def build_client_packet(cfg: MrfxConfig, store: Store, subject: str,
 
     # 4. contract gaps as a working list
     def _gaps():
-        g = contract_gaps(store, subject, market)
+        g = gaps if gaps is not None else contract_gaps(store, subject, market)
+        if isinstance(g, BenchmarkError):
+            raise g
         if not g.get("gaps"):
             raise BenchmarkError("no contract gaps found — nothing to chase")
         rows = "".join(
@@ -151,7 +207,7 @@ def build_client_packet(cfg: MrfxConfig, store: Store, subject: str,
             f"<td class='num'>{x.get('n_peers', '')}</td>"
             f"<td class='num'>${x.get('peer_median', 0) or 0:,.2f}</td></tr>"
             for x in g["gaps"])
-        (pdir / "4_contract_gaps.html").write_text(_doc(
+        _write_html(pdir / "4_contract_gaps.html", _doc(
             cfg, f"Contract gaps — {display}",
             "<p class='meta'>Codes this practice's peers publish rates for, that it "
             "has no published rate on. Directional: absence in a machine-readable "
@@ -172,7 +228,7 @@ def build_client_packet(cfg: MrfxConfig, store: Store, subject: str,
         cmp = compare_to_baseline(store, subject, bl[0]["label"])
         if not cmp["rows"]:
             raise BenchmarkError("no codes in common with the baseline yet")
-        (pdir / "5_results_since_baseline.html").write_text(
+        _write_html(pdir / "5_results_since_baseline.html", 
             _wins_html(cfg, display, cmp), encoding="utf-8")
         written.append("5_results_since_baseline.html")
     attempt("Results since baseline", _wins)
@@ -217,7 +273,7 @@ def build_client_packet(cfg: MrfxConfig, store: Store, subject: str,
             f"<td>{html.escape(taxonomy_label(partners[x['npi']].get('taxonomy')))}</td>"
             f"<td>{html.escape(str(x.get('phone') or ''))}</td></tr>"
             for x in sorted(gone, key=lambda r: r["deactivated"], reverse=True))
-        (pdir / "6_closed_referral_sources.html").write_text(_doc(
+        _write_html(pdir / "6_closed_referral_sources.html", _doc(
             cfg, f"Referral sources that closed — {display}",
             "<p class='meta'>Practices that referred patients to this one whose NPI "
             "has since been DEACTIVATED in NPPES and not reactivated. A deactivated "
@@ -233,36 +289,71 @@ def build_client_packet(cfg: MrfxConfig, store: Store, subject: str,
         written.append("6_closed_referral_sources.html")
     attempt("Closed referral sources", _closed_sources)
 
-    index = _index_html(cfg, display, subject, written, skipped, market,
-                        market["month"])
-    (pdir / "index.html").write_text(index, encoding="utf-8")
-    return {"subject": subject, "display_name": display, "dir": str(pdir),
-            "written": written, "skipped": skipped}
+    index = _index_html(cfg, display, subject, written, [s.split(":", 1)[0] for s in skipped],
+                        market,
+                        as_of, vintage)
+    _write_html(pdir / "index.html", index, encoding="utf-8")
+    return {"subject": subject_label(subject), "display_name": display, "dir": str(pdir),
+            "written": written, "skipped": skipped, "as_of": as_of,
+            "vintage": [{"payer": p, "month": m} for p, m in vintage]}
 
 
 def build_all_packets(cfg: MrfxConfig, store: Store, out_root: Path | str | None = None,
                       market: dict | None = None,
                       progress=None) -> dict:
     """Every watchlist client, into <out_root>/<month>/<practice>/."""
-    from .clients import watchlist
+    from .clients import client_digest, watchlist
 
     subjects = watchlist(store)
     if not subjects:
         raise BenchmarkError(
             "no clients saved yet — add them on the Clients tab first")
-    with store.connect() as con:
-        month = (con.execute(
-            "SELECT max(file_month) FROM rates_by_tin").fetchone() or [None])[0]
-    month = month or dt.date.today().strftime("%Y-%m")
+    # the folder is named for the newest month any CLIENT's rates come from —
+    # not the store's newest month, which can be one unrelated payer's file
+    pinned = (market or {}).get("month")
+    if pinned and str(pinned).lower() != "latest":
+        month = str(pinned)
+    else:
+        months = [m for s in subjects for _, m in subject_vintage(store, s)]
+        month = max(months) if months else dt.date.today().strftime("%Y-%m")
     root = Path(out_root) if out_root else (Path(store.dir).parent / "packets")
     mdir = _month_dir(root, month)
 
+    # the book's contract gaps and digest ONCE: each packet used to rebuild
+    # the whole digest for every client (O(N²): 5 clients took 175 s on a
+    # 99M-rate store) and its gaps ran the national market per client
+    from .benchmark import contract_gaps_book
+    from .clients import DIGEST_GAPS_MARKET
+    pmarket = dict(market or {})
+    pmarket.setdefault("month", "latest")
+    pmarket.setdefault("therapy_only", True)
+    prog = _progress.current()
+    prog.stage("Finding contract gaps for the whole book")
+    if progress:
+        progress("finding contract gaps for the book")
+    try:
+        book = contract_gaps_book(store, subjects, pmarket)
+    except BenchmarkError as e:
+        book = {s: e for s in subjects}
+    prog.stage("Building the book's digest")
+    if progress:
+        progress("building the book's digest")
+    same = (normalize_market(pmarket) == normalize_market(DIGEST_GAPS_MARKET))
+    digest = client_digest(store, gaps_book=book if same else None)
     packets = []
+    prog.stage("Building the packets")
     for i, s in enumerate(subjects, 1):
+        _progress.check_cancelled()        # a stop ends the run between clients
+        prog.tick((i - 1) / len(subjects))
         if progress:
-            progress(f"building packet {i} of {len(subjects)}: {s}")
-        packets.append(build_client_packet(cfg, store, s, mdir, market))
-    (mdir / "index.html").write_text(
+            from .clients import subject_label
+            progress(f"building packet {i} of {len(subjects)}: {subject_label(s)}")
+        with prog.group():
+            packets.append(build_client_packet(cfg, store, s, mdir, market, digest=digest,
+                                               gaps=book.get(s)))
+        prog.tick(i / len(subjects))
+    prog.stage("Writing the index")
+    _write_html(mdir / "index.html", 
         _book_index_html(cfg, month, packets), encoding="utf-8")
     log.info("packets: %s client(s) written to %s", len(packets), mdir)
     return {"month": month, "dir": str(mdir), "packets": packets,
@@ -291,7 +382,8 @@ _CSS = """
  ul { margin: 6px 0 6px 18px; } a { color: #2a78d6; }
  footer { margin-top: 34px; border-top: 1px solid #d0d5dd; padding-top: 12px;
           color: #475467; font-size: 11px; }
- @media print { body { margin: 0; } h2 { break-after: avoid; } }
+ @page { size: landscape; margin: 10mm; }
+ @media print { body { margin: 0; max-width: none; } table { font-size: 10.5px; } th, td { padding: 3px 5px; } * { -webkit-print-color-adjust: exact; print-color-adjust: exact; } h2 { break-after: avoid; } }
 """
 
 
@@ -316,17 +408,26 @@ def _month_summary_html(cfg: MrfxConfig, display: str, row: dict, dig: dict,
     elif not ch or ch.get("error"):
         parts.append(f"<p>No rate-change comparison available"
                      f"{' (' + e(ch['error']) + ')' if ch and ch.get('error') else ''}.</p>")
+    elif ch.get("month") == "latest" and not ch.get("compared"):
+        parts.append("<p>None of this practice's payers has two published files "
+                     "in the store yet, so there is nothing to compare.</p>")
     elif not ch.get("n"):
-        parts.append(f"<p>No published rate changed for this practice in "
+        parts.append("<p>No published rate changed for this practice between each "
+                     f"payer's two newest files ({e(ch.get('span') or '')}).</p>"
+                     if ch.get("month") == "latest" else
+                     f"<p>No published rate changed for this practice in "
                      f"<b>{e(str(ch.get('month')))}</b> versus "
                      f"{e(str(ch.get('prev') or 'the prior month'))}.</p>")
     else:
+        when = (f"between each payer's two newest files ({e(ch.get('span') or '')})"
+                if ch.get("month") == "latest" else
+                f"in <b>{e(str(ch['month']))}</b> versus {e(str(ch.get('prev') or 'the prior month'))}")
         parts.append(
-            f"<p class='band'><b>{ch['n']}</b> contract line(s) moved in "
-            f"<b>{e(str(ch['month']))}</b> versus {e(str(ch.get('prev') or 'the prior month'))}. "
+            f"<p class='band'><b>{ch['n']}</b> contract line(s) moved {when}. "
             f"Largest: <span class='{'up' if (ch.get('biggest_pct') or 0) > 0 else 'down'}'>"
             f"{ch.get('biggest_pct')}%</span> on {e(str(ch.get('biggest_code') or ''))} "
-            f"({e(str(ch.get('biggest_payer') or ''))}).</p>")
+            f"({e(str(ch.get('biggest_payer') or ''))}"
+            f"{', ' + e(ch['biggest_span']) if ch.get('biggest_span') else ''}).</p>")
     g = row.get("gaps") or {}
     if g.get("n"):
         parts.append(f"<h2>Contract gaps</h2><p>{g['n']} code(s) peers publish that "
@@ -387,8 +488,8 @@ def _wins_html(cfg: MrfxConfig, display: str, cmp: dict) -> str:
         cls = "up" if r["delta"] > 0 else "down" if r["delta"] < 0 else ""
         sign = "+" if r["delta"] > 0 else ""
         pct = f" ({sign}{r['delta_pct']}%)" if r.get("delta_pct") is not None else ""
-        pb = "" if r["pctile_before"] is None else f"p{round(r['pctile_before'])}"
-        pa = "" if r["pctile_after"] is None else f"p{round(r['pctile_after'])}"
+        pb = "" if r["pctile_before"] is None else f"p{half_up(r['pctile_before'])}"
+        pa = "" if r["pctile_after"] is None else f"p{half_up(r['pctile_after'])}"
         val = "" if r["annual_value"] is None else f"${r['annual_value']:,.2f}"
         return (f"<tr><td>{e(r['billing_code'])}"
                 f"<div class='sub'>{e(r.get('description') or '')}</div></td>"
@@ -428,15 +529,23 @@ def _wins_html(cfg: MrfxConfig, display: str, cmp: dict) -> str:
 
 
 def _index_html(cfg: MrfxConfig, display: str, subject: str, written: list[str],
-                skipped: list[str], market: dict, month) -> str:
+                skipped: list[str], market: dict, month,
+                vintage: list[tuple[str, str]] | None = None) -> str:
     e = html.escape
     docs = "".join(f"<li><a href='{e(f)}'>{e(f)}</a></li>" for f in written)
     miss = "".join(f"<li>{e(x)}</li>" for x in skipped)
+    source = ("" if not vintage else
+              " Rates are each payer's newest published file: "
+              + ", ".join(f"{e(p)} {e(m)}" for p, m in vintage) + ".")
+    if market.get("state"):
+        source += f" Market: practices in {e(str(market['state']))}."
     return _doc(
         cfg, f"{display} — monthly packet",
-        f"<p class='meta'>As of month: <b>{e(str(month or market.get('month')))}</b>. "
-        f"Practice: {e(subject)}.</p>"
+        f"<p class='meta'>As of month: <b>{e(str(month or market.get('month')))}</b>."
+        f"{source} Practice: {e(_label(subject))}.</p>"
         f"<h2>Documents</h2><ul>{docs or '<li>(none)</li>'}</ul>"
+        # section NAMES only: the technical reason (and any setup advice) is
+        # the consultant's, in the book index — not the client's folder
         + (f"<h2>Not included this month</h2><ul>{miss}</ul>"
            "<p class='sub'>A section is omitted when it has nothing to say — an "
            "empty branded document would be worse than none.</p>" if skipped else ""),

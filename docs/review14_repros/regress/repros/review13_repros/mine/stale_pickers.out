@@ -1,0 +1,7 @@
+inbox scan: rollup rebuild failed — the file's rows are safely stored; analytics will refresh on the next successful rebuild
+files table: [('Blue Cross Blue Shie', 'done'), ('HEALTHSCOPE BENEFITS', 'done'), ('Moda', 'done')]
+header /api/stats: {'payers': 3, 'files_done': 3, 'rates': 1130194, 'tins': 4007}
+chips  /api/payers: {'payers': ['Moda']}
+stale per store: True | 2 newly ingested file(s) not yet rolled up (incremental)
+any coverage/stale field in /api/stats or /api/boot? NONE
+/api/rates total rows the Explorer counts: 82546

@@ -1,0 +1,96 @@
+{
+ "views": [
+  {
+   "view": "initial load",
+   "idle_s": 4.81
+  },
+  {
+   "view": "overview",
+   "idle_s": 0.11,
+   "text_head": "STATE (OPTIONAL) Refresh A one-glance read of the market: coverage, rates by discipline, best-covered codes, and which payers pay above vs below market. Market snapshot \u2014 all loaded states. The payer "
+  },
+  {
+   "view": "clients",
+   "idle_s": 0.06,
+   "text_head": "Your clients \u2014 what changed Refresh digest ADD A CLIENT (ENTITY / TIN / NPI) Add Every cell reuses the same math as its own tab \u2014 rate moves from Changes (each payer's newest file vs its previous one)"
+  },
+  {
+   "view": "explorer",
+   "idle_s": 0.12,
+   "text_head": "GRAIN Entity TIN NPI PAYER Payer 00 Payer 01 Payer 02 Payer 03 Payer 04 Payer 05 Payer 06 Payer 07 Payer 08 Payer 09 Payer 10 Payer 11 Payer 12 Payer 13 Payer 14 DISCIPLINE PT OT SLP unspecified MONTH"
+  },
+  {
+   "view": "cpt",
+   "idle_s": 0.09,
+   "text_head": "Which entities get paid most for 90912 \u2014 Biofeedback training, first 15 min (timed 15-min units) State base rates only (no CQ/CO) Claim type  professional (practices) institutional (facilities) both E"
+  },
+  {
+   "view": "markets",
+   "idle_s": 0.06,
+   "text_head": "Market intelligence for a code Code State Discipline any PT OT SLP Payer therapy only ZIP Run Pick a code For one code across the whole market: where it pays best by state, which payers actually negot"
+  },
+  {
+   "view": "changes",
+   "idle_s": 0.08,
+   "text_head": "Rate-change monitoring  What a payer changed between two months \u2014 quiet cuts and increases on the same contract line. Needs at least two months of a payer in the store.  NEW MONTH (REQUIRED) COMPARE T"
+  },
+  {
+   "view": "benchmark",
+   "idle_s": 0.06,
+   "text_head": "Market benchmark SUBJECT ENTITY / TIN / NPI AS-OF MONTH PAYER(S) PLAN / NETWORK all plans (pooled) DISCIPLINE any PT OT SLP STATE / CITY BILLING CLASS / POS professional institutional any POS 11 offic"
+  },
+  {
+   "view": "negotiate",
+   "idle_s": 0.13,
+   "text_head": "Payer negotiation YOUR PRACTICE (SUBJECT) PAYER YOU'RE NEGOTIATING WITH (REQUIRED) AS-OF MONTH STATE (required for the printable report) DISCIPLINE any PT OT SLP THERAPY PRACTICES ONLY COMPARABLE ENTI"
+  },
+  {
+   "view": "ratecard",
+   "idle_s": 0.07,
+   "text_head": "Rate card & payer scorecard  A practice's own negotiated rates, laid out by payer, with its payers ranked by who pays best. No volumes or assumptions \u2014 just what the payers published.  SUBJECT ENTITY "
+  },
+  {
+   "view": "leads",
+   "idle_s": 0.08,
+   "text_head": "Underpaid-practice leads  Practices sitting furthest below the market \u2014 the biggest gap is the strongest prospect. Position is each practice's median percentile across the codes it prices.  AS-OF MONT"
+  },
+  {
+   "view": "medicare",
+   "idle_s": 0.08,
+   "text_head": "Medicare: referrals & eligibility checking what's loaded\u2026 PRACTICE (ENTITY / TIN / NPI) REFERRAL DATASET (never blended) newest loaded Look up Download CSV Who shares Medicare patients with this pract"
+  },
+  {
+   "view": "roster",
+   "idle_s": 0.05,
+   "text_head": "Organizations contracted with\u2026 Payer State Discipline any PT OT SLP Min codes Sort name size (NPIs) best-paid most codes therapy only Run Download CSV Pick a payer Every organization the payer publish"
+  },
+  {
+   "view": "files",
+   "idle_s": 0.07,
+   "text_head": "Ingest status Rescan inbox Paste file links \u2014 the app does the rest  Paste one or more links (one per line): direct rate files (.json.gz), a payer's Table\u00a0of\u00a0Contents / index link (it will be opened a"
+  },
+  {
+   "view": "sources",
+   "idle_s": 0.12,
+   "text_head": "Where to get MRF files \u2014 pick a state \u2014 find the source \u2192 download \u2192 drop in inbox \u2192 preflight \u2192 explore \u2192 benchmark NATIONAL PAYERS (ALL STATES)"
+  },
+  {
+   "view": "benchmark run (subject + state)",
+   "idle_s": 1.2,
+   "text_head": "100049428 vs market \u2014 as of latest available auto market (all entities matching the market definition) \u00b7 target p50 CODE\tYOU\tP25\tMEDIAN\tP75\tTARGET\tGAP\tPEERS\tPOSITION 92507 Speech, language, voice & communication treatment, individual \t$80.20\t$48.68\t$65.31\t$81.97\t$65.31\t-$14.89\t15,917\t  P72 92521 Eva"
+  },
+  {
+   "view": "rate card run (subject + state + PT)",
+   "idle_s": 0.48,
+   "text_head": "Best-paying payer: Payer 01. Payers ranked by % of the best payer's rate on the 10 code(s) every payer prices. Each cell shows your rate, then peer $ \u2014 what that payer pays your peers for the same code \u2014 and how you compare. Payer scorecard \u2014 who pays best RANK\tPAYER\tCODES\tMED % OF BEST\tMED RATE 1\tP"
+  },
+  {
+   "view": "visit value in this market (button)",
+   "idle_s": 0.55
+  }
+ ],
+ "pageerrors": [],
+ "console": [],
+ "failed": [],
+ "popups": []
+}

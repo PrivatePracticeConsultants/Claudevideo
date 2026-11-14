@@ -1,0 +1,10 @@
+  from starlette.testclient import TestClient as TestClient  # noqa
+forgetting: ['71000_2026-06-8896839e.json'] {'rows': 10, 'bytes': 6502}
+stats.payers       before=2                                                            after=1                                             fresh=1                             
+payers             before=['Alpha Health', 'Beta Health']                              after=['Alpha Health']                              fresh=['Alpha Health']              
+overview.payers    before=2                                                            after=1                                             fresh=1                             
+summary.n          before={"n": 20, "entities": 5, "codes": 2, "min": 40.0, "p25": 50. after={"n": 10, "entities": 5, "codes": 2, "min": 4 fresh={"n": 10, "entities": 5, "code
+leaderboard.n      before=0                                                            after=0                                             fresh=0                             
+leads.n            before=2                                                            after=2                                             fresh=2                             
+freshness          before=['Beta Health', 'Alpha Health']                              after=['Alpha Health']                              fresh=['Alpha Health']              
+benchmark.payers   before=[None]                                                       after=[None]                                        fresh=[None]                        

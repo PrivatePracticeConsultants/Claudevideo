@@ -34,6 +34,7 @@ import re
 from pathlib import Path
 
 from .store import Store
+from .rounding import half_up
 
 log = logging.getLogger(__name__)
 
@@ -62,6 +63,58 @@ _SENIOR_AGE = re.compile(r"\b(6[5-9]|7\d|8\d|9\d|100)\b")
 _B01001_SENIOR = {"020", "021", "022", "023", "024", "025",
                   "044", "045", "046", "047", "048", "049"}
 _B01001_VAR = re.compile(r"\bb01001[ _]?(\d{3})\s*e?\b")
+
+
+_AGG_RE = re.compile(r"\b(\d{2,3}) years and over\b")
+_EXPLICIT_65_IDS = re.compile(r"\b(s0101 c01 030e|dp05 0024e)\b")
+
+
+def _senior_columns(header: list[str]) -> list[str]:
+    """The columns whose SUM is the 65+ population — each person once.
+
+    Round 7 P0.7: every label with 65-100 and "year"/"over" used to be summed,
+    which on S0101 / DP05 (the tables data.census.gov shows first) added the
+    "65 years and over" and "75 years and over" totals, the Percent columns
+    and the Male/Female copies of every bucket on top of the buckets — about
+    3x the real count, with a successful import. In order:
+    1. B01001 variable ids (the API / B01001 export): the 12 sex-by-age
+       buckets, as before;
+    2. an explicit 65+ TOTAL estimate: S0101_C01_030E / DP05_0024E, or a
+       label "65 years and over" that is not a margin, a percent, or a male/
+       female sub-total — used alone;
+    3. otherwise the mutually exclusive age buckets (65-69 … 85+), sex-total
+       copies preferred; male+female copies only when no sex-total exists;
+       never an aggregate like "75 years and over", never a percent."""
+    normed = [(c, _norm(c)) for c in header]
+    ids = [c for c, n in normed if (m := _B01001_VAR.search(n)) and m.group(1) in _B01001_SENIOR]
+    if ids:
+        return ids
+
+    def estimate(n: str) -> bool:
+        return "margin" not in n and "percent" not in n
+
+    def sex(n: str) -> str | None:
+        toks = set(n.split())
+        return "female" if "female" in toks else ("male" if "male" in toks else None)
+
+    explicit = [c for c, n in normed if _EXPLICIT_65_IDS.search(n) and estimate(n)]
+    if explicit:
+        return explicit[:1]
+    totals = [c for c, n in normed if estimate(n) and sex(n) is None
+              and "65 years and over" in n and not _B01001_VAR.search(n)
+              and n.rstrip().endswith("65 years and over")]
+    if totals:
+        return totals[:1]
+    buckets = []
+    for c, n in normed:
+        if not (estimate(n) and _is_senior_col(c)):
+            continue
+        agg = _AGG_RE.search(n)
+        if agg and int(agg.group(1)) < 85:
+            continue                     # "65 years and over" etc. are totals
+        buckets.append((c, sex(n)))
+    no_sex = [c for c, sx in buckets if sx is None]
+    return no_sex if no_sex else [c for c, _ in buckets]
 
 
 def _is_senior_col(header_name: str) -> bool:
@@ -150,10 +203,9 @@ def parse_acs_csv(text: str) -> tuple[list[dict], list[str]]:
     col_income = (_find(header, "b19013 001")
                   or _find(header, "median", "household", "income",
                            exclude=("margin",)))
-    # every 65+ age bucket, male and female
-    senior_cols = [c for c in header if _is_senior_col(c)]
-    col_65 = _find(header, "65", "over", exclude=("margin", "male", "female")) \
-        if not senior_cols else None
+    # the 65+ population, each person counted once (see _senior_columns)
+    senior_cols = _senior_columns(header)
+    col_65 = None
     if col_zip is None or (col_total is None and not senior_cols and col_65 is None):
         raise DemographicsImportError(
             "this does not look like an ACS ZCTA table — expected a ZCTA/GEO_ID "
@@ -221,7 +273,7 @@ def import_demographics(store: Store, path: str | Path,
         "population": pa.array([r["population"] for r in rows], type=pa.float64()),
         "pop_65_plus": pa.array([r["pop_65_plus"] for r in rows], type=pa.float64()),
         "pct_65_plus": pa.array(
-            [(round(100.0 * r["pop_65_plus"] / r["population"], 1)
+            [(half_up(100.0 * r["pop_65_plus"] / r["population"], 1)
               if r["population"] and r["pop_65_plus"] is not None else None)
              for r in rows], type=pa.float64()),
         "median_income": pa.array([r["median_income"] for r in rows], type=pa.float64()),
@@ -343,11 +395,11 @@ def market_sizing(store: Store, zip_code: str, radius_miles: float = 25,
         # otherwise scale with total rows, not distinct pairs).
         practices, npis = con.execute(f"""
             WITH pairs AS (
-                SELECT DISTINCT tin_value, npi FROM rates
+                SELECT DISTINCT tin_value, npi FROM {store.pairs_relation()}
                 WHERE tin_value IS NOT NULL AND NOT tin_is_really_npi
             ), p AS (
                 SELECT pr.tin_value AS tin,
-                       mode(lpad(substr(trim(n.zip), 1, 5), 5, '0')) AS zip,
+                       mode(lpad(substr(trim(n.zip), 1, 5), 5, '0') ORDER BY lpad(substr(trim(n.zip), 1, 5), 5, '0')) AS zip,
                        count(DISTINCT pr.npi) AS npis
                 FROM pairs pr JOIN npi_directory n ON n.npi = pr.npi
                 WHERE {therapy}
@@ -358,7 +410,7 @@ def market_sizing(store: Store, zip_code: str, radius_miles: float = 25,
         """, [in_radius]).fetchone()
         top = [] if not has_demo else [
             {"zip": z, "population": int(p or 0), "pop_65_plus": int(s or 0),
-             "pct_65_plus": pct, "median_income": inc, "miles": round(d, 1)}
+             "pct_65_plus": pct, "median_income": inc, "miles": half_up(d, 1)}
             for z, p, s, pct, inc, d in con.execute(f"""
             SELECT d.zip, d.population, d.pop_65_plus, d.pct_65_plus,
                    d.median_income, {miles} AS miles
@@ -374,13 +426,13 @@ def market_sizing(store: Store, zip_code: str, radius_miles: float = 25,
         "zctas_in_radius": len(in_radius), "zctas_matched": matched,
         "zctas_unmatched": len(in_radius) - matched,
         "population": int(pop or 0), "pop_65_plus": int(seniors or 0),
-        "pct_65_plus": (round(100.0 * seniors / pop, 1)
+        "pct_65_plus": (half_up(100.0 * seniors / pop, 1)
                         if pop and seniors is not None else None),
-        "median_income": round(demo[3], 0) if demo[3] is not None else None,
+        "median_income": half_up(demo[3], 0) if demo[3] is not None else None,
         "practices": practices, "clinicians": int(npis or 0),
-        "seniors_per_practice": (round(seniors / practices)
+        "seniors_per_practice": (half_up(seniors / practices)
                                  if practices and seniors else None),
-        "people_per_practice": (round(pop / practices)
+        "people_per_practice": (half_up(pop / practices)
                                 if practices and pop else None),
         "top_zips": top,
         "loaded": bool(matched),

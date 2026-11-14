@@ -1,0 +1,151 @@
+
+== case_a
+----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 46516)
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.13/socketserver.py", line 697, in process_request_thread
+    self.finish_request(request, client_address)
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.13/socketserver.py", line 362, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+    ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.13/socketserver.py", line 766, in __init__
+    self.handle()
+    ~~~~~~~~~~~^^
+  File "/usr/local/lib/python3.13/http/server.py", line 453, in handle
+    self.handle_one_request()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/usr/local/lib/python3.13/http/server.py", line 419, in handle_one_request
+    self.raw_requestline = self.rfile.readline(65537)
+                           ~~~~~~~~~~~~~~~~~~~^^^^^^^
+  File "/usr/local/lib/python3.13/socket.py", line 723, in readinto
+    return self._sock.recv_into(b)
+           ~~~~~~~~~~~~~~~~~~~~^^^
+ConnectionResetError: [Errno 104] Connection reset by peer
+----------------------------------------
+
+   -- A. 0.7.4 child, republished, probe gives no size/validator
+   requests: [('GET', '/index.json', None, 200), ('GET', '/r.json.gz', 'bytes=0-0', 200)]
+   row 1 done/toc reval=0 val=None size=267 err=None
+   row 2 done/in_network reval=0 val=None size=None err=None
+   rates by month: [('2026-05', 50)]; files: [('d44fa06f_r.json.gz', 50)]
+   VERDICT A: LEFT AT THE OLD MONTH, no note on the row
+
+== case_b
+
+   -- B. same size, one rate changed, NO validator ever
+   requests: [('GET', '/index.json', None, 200), ('GET', '/r.json.gz', 'bytes=0-0', 206)]
+   row 1 done/toc reval=0 val=None size=267 err=None
+   row 2 done/in_network reval=0 val=None size=25294 err=None
+   rates by month: [('2026-05', 50)]; files: [('0253773f_r.json.gz', 50)]
+   rates distinct values: [(40.0,)]
+
+== case_c
+
+   -- C. new bytes AND new size, ETag unchanged
+   requests: [('GET', '/index.json', None, 200), ('GET', '/r.json.gz', 'bytes=0-0', 206)]
+   row 1 done/toc reval=0 val=None size=267 err=None
+   row 2 done/in_network reval=0 val="same-forever" size=1505 err=None
+   rates by month: [('2026-05', 50)]; files: [('58dc8ae0_r.json.gz', 50)]
+   VERDICT C: LEFT AT THE OLD MONTH (validator wins over size), no note
+
+== case_d
+
+   -- D. /s.json.gz removed from the index
+   requests: [('GET', '/index.json', None, 200), ('GET', '/r.json.gz', 'bytes=0-0', 206)]
+   row 1 done/toc reval=0 val=None size=267 err=None
+   row 2 done/in_network reval=0 val="v1" size=1505 err=None
+   row 3 done/in_network reval=0 val="s1" size=1497 err=None
+   rates by month: [('2026-05', 100)]; files: [('5e8653f7_s.json.gz', 50), ('d4da6f0e_r.json.gz', 50)]
+
+== case_e
+
+   -- E. child's URL changed, bytes unchanged
+   requests: [('GET', '/index.json', None, 200), ('GET', '/r2.json.gz', None, 200)]
+   row 1 done/toc reval=0 val=None size=268 err=None
+   row 2 done/in_network reval=0 val="v1" size=1505 err=None
+   row 3 skipped/duplicate reval=0 val="v1" size=1505 err="identical to a file already ingested (payers host copies of each other's files) — skipped as duplicate of http://127.0.0"
+   rates by month: [('2026-05', 50)]; files: [('3e5b0034_r.json.gz', 50)]
+
+== case_f
+
+   -- F. static index now lists May AND June (month-dated children)
+   requests: [('GET', '/index.json', None, 200), ('GET', '/2026-06/r.json.gz', None, 200), ('GET', '/2026-05/r.json.gz', 'bytes=0-0', 206)]
+   row 1 done/toc reval=0 val=None size=357 err=None
+   row 2 done/in_network reval=0 val="m5" size=1505 err=None
+   row 3 done/in_network reval=0 val="m6" size=2174 err=None
+   rates by month: [('2026-05', 50), ('2026-06', 80)]; files: [('3c88f139_r.json.gz', 80), ('932d5300_r.json.gz', 50)]
+
+== case_g
+----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 45016)
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.13/socketserver.py", line 697, in process_request_thread
+    self.finish_request(request, client_address)
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.13/socketserver.py", line 362, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+    ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.13/socketserver.py", line 766, in __init__
+    self.handle()
+    ~~~~~~~~~~~^^
+  File "/usr/local/lib/python3.13/http/server.py", line 453, in handle
+    self.handle_one_request()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/usr/local/lib/python3.13/http/server.py", line 419, in handle_one_request
+    self.raw_requestline = self.rfile.readline(65537)
+                           ~~~~~~~~~~~~~~~~~~~^^^^^^^
+  File "/usr/local/lib/python3.13/socket.py", line 723, in readinto
+    return self._sock.recv_into(b)
+           ~~~~~~~~~~~~~~~~~~~~^^^
+ConnectionResetError: [Errno 104] Connection reset by peer
+----------------------------------------
+
+   -- G. GCS-style signed child, signature rotated, bytes unchanged
+   requests: [('GET', '/index.json', None, 200), ('GET', '/r.json.gz?…', None, 200), ('GET', '/r.json.gz?…', 'bytes=2674903-3723478', 206), ('GET', '/r.json.gz?…', 'bytes=380951-446486', 206), ('GET', '/r.json.gz?…', 'bytes=794671-860206', 206), ('GET', '/r.json.gz?…', 'bytes=1208391-1273926', 206), ('GET', '/r.json.gz?…', 'bytes=1622111-1687646', 206), ('GET', '/r.json.gz?…', 'bytes=2035831-2101366', 206), ('GET', '/r.json.gz?…', 'bytes=2449551-2515086', 206), ('GET', '/r.json.gz?…', 'bytes=2863271-2928806', 206), ('GET', '/r.json.gz?…', 'bytes=3276991-3342526', 206)]
+   row 1 done/toc reval=0 val=None size=316 err=None
+   row 2 done/in_network reval=0 val="g" size=3723479 err=None
+   row 3 skipped/duplicate reval=0 val=None size=None err='checksum-equal to http://127.0.0.1:43787/r.json.gz, already loaded — same size, same first 1 MB, same last 1 MB and 8 sa'
+   rates by month: [('2026-05', 1500)]; files: [('7c90319b_r.json.gz', 1500)]
+   bytes the server sent for the child during the refresh: 5296343
+
+== case_h
+----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 45646)
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.13/socketserver.py", line 697, in process_request_thread
+    self.finish_request(request, client_address)
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.13/socketserver.py", line 362, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+    ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.13/socketserver.py", line 766, in __init__
+    self.handle()
+    ~~~~~~~~~~~^^
+  File "/usr/local/lib/python3.13/http/server.py", line 453, in handle
+    self.handle_one_request()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/usr/local/lib/python3.13/http/server.py", line 419, in handle_one_request
+    self.raw_requestline = self.rfile.readline(65537)
+                           ~~~~~~~~~~~~~~~~~~~^^^^^^^
+  File "/usr/local/lib/python3.13/socket.py", line 723, in readinto
+    return self._sock.recv_into(b)
+           ~~~~~~~~~~~~~~~~~~~~^^^
+ConnectionResetError: [Errno 104] Connection reset by peer
+----------------------------------------
+
+   -- H. same size, same ETag, one rate changed (the honest residual)
+   requests: [('GET', '/index.json', None, 200), ('GET', '/r.json.gz', 'bytes=0-0', 206)]
+   row 1 done/toc reval=0 val=None size=267 err=None
+   row 2 done/in_network reval=0 val="same" size=25294 err=None
+   rates by month: [('2026-05', 50)]; files: [('078d3ff7_r.json.gz', 50)]
+
+== case_i
+   requeue_urls(child): 1
+
+   -- I. the CHILD link re-queued (revalidate=1), same size, no validator, bytes changed
+   requests: [('GET', '/r.json.gz', 'bytes=0-0', 206)]
+   row 1 done/toc reval=0 val=None size=267 err=None
+   row 2 done/in_network reval=0 val=None size=25294 err='checked again: the payer still publishes the same file — already loaded, nothing downloaded'
+   rates by month: [('2026-05', 50)]; files: [('dd6efb83_r.json.gz', 50)]
+exit 0

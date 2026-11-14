@@ -28,15 +28,20 @@ for correctness of the numbers.
 
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/pip install -e .
 .venv/bin/mrfx serve                       # dashboard http://localhost:8377 + inbox watcher + URL worker
-.venv/bin/python -m pytest tests/ -q       # the suite: real end-to-end drains against local HTTP servers
+.venv/bin/python -m pytest tests/ -q       # the suite: real end-to-end drains against local HTTP servers (~48 min, 1390 tests)
+.venv/bin/python -m pytest tests/ -q -m quick   # inner loop, ~4 min (499 tests): skips tests/slow_tests.txt
 .venv/bin/ruff check mrfx/ tests/          # lint gate: narrow by design (see pyproject), stays at ZERO
 .venv/bin/pip-audit -r requirements.txt    # dependency CVEs: was 25 across 5 packages, now clean
 ```
 
-Other commands: `mrfx add <url>… [--file links.txt] [--known] [--retry-failed]`,
-`mrfx preflight <path>`, `mrfx ingest [path] [--force]`, `mrfx status`,
+Other commands: `mrfx add <url>… [--file links.txt] [--known [--states MO,KS]] [--retry-failed]`,
+`mrfx sources [--check] [--states …] [--report out.csv]` (the tested-sources catalog; `--check`
+re-audits it live, read-only, as MRF Explorer — OK / NEEDS-BROWSER / PORTAL / CHANGED / DEAD),
+`mrfx preflight <path>`, `mrfx ingest [path] [--force]`, `mrfx status [--analytics]` (`--analytics`: the dashboard's Analytics activity panel as text — what is being added to the numbers, what waits and why),
 `mrfx export out.csv [--cpt … --payer … --grain tin]`, `mrfx outreach`,
 `mrfx forget <filename>`, `mrfx speedtest <url>`,
+`mrfx fastcheck <file>…` (run real files through the fast AND classic parsers;
+confirms identical rows/QA and reports both timings),
 `mrfx orgreport <subject>` (one-practice bundle for the Medicare Order &
 Referring Tracker), `mrfx medicare --from-tracker` (find the Tracker's data
 folder and import everything new; `--eligibility/--referrals <path>` point at
@@ -54,10 +59,15 @@ reactivated — a closed referral source or a closed competitor),
 commercial rate), `mrfx enrich --weekly <NPPES weekly>` (fold a week's NPPES
 changes into the cache), `mrfx hospital <file> [--state … --parity <practice>]` (a hospital's CMS
 standard-charges file + what the same payer pays the hospital vs the practice),
+`mrfx dac [--file … --release … --refresh]` (the CMS Doctors and Clinicians file: names practices with no organization NPI — mrfx/naming.py; `serve` fetches it monthly),
+`mrfx cmsref [--refresh]` (CMS hospital / nursing-home address lists + Medicare therapy rows → each practice's `practice_type`; the default "Compare against" group is outpatient rehab clinics; `serve` fetches them monthly),
 `mrfx inflation [--year YYYY --value N]` (the price index behind real-terms
 erosion; a year with no value is refused, never estimated),
-`mrfx packets` (monthly client packets), `mrfx renewals [--clients]`,
-`mrfx backup <zip>` / `mrfx verify [zip]` (checksummed store backup + integrity check),
+`mrfx packets [--pdf]` (monthly client packets; `--pdf` prints each beside it), `mrfx renewals [--clients]`,
+`mrfx backup <zip>` / `mrfx verify [zip]` (checksummed store backup + integrity check; with
+`backup_dir` set, `serve` takes the same backup weekly without stopping — mrfx/backup.py),
+`mrfx update <new build zip>` (install a newer build; never writes data/, .venv/ or the user's
+config/mrfx.yaml — see mrfx/updater.py; `Update MRF Explorer.bat` is the drag-and-drop form),
 `mrfx reset --confirm`.
 Config: `config/mrfx.yaml`.
 
@@ -78,7 +88,8 @@ NOT run `playwright install` here.
    drug/allowed-amounts files with the reason; 0-row files stay 0; SSN-pattern
    TINs are masked everywhere; exports carry a methodology sidecar (ZIP/CLI).
 5. **Numbers correctness IS the product** — bundle/capitation excluded; modifiers
-   sorted+deduped; `file_month` = header→filename→ingest; untyped 10-digit TIN is
+   sorted+deduped+split, POS codes published as modifiers moved to POS, ONE
+   "base" rule (all in `mrfx/modifiers.py`); `file_month` = header→filename→ingest; untyped 10-digit TIN is
    an NPI-in-the-slot; entity rate = median of member-TIN rates.
 6. **Idempotency / crash-resume** — kill at any instant; re-ingest atomically
    replaces a file's part (never duplicates rows); content-sha dedup skips

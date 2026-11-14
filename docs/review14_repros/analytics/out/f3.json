@@ -1,0 +1,746 @@
+{
+ "killed_after": {
+  "t": 1794472900.4320824,
+  "pid": 7203,
+  "ev": "slice_done",
+  "idx": 23,
+  "n": 58,
+  "t_": "spine",
+  "payer": "Blue Cross Blue Shield of Wyoming",
+  "took": 0.22789335250854492
+ },
+ "catchup_failed_at_s": 0.0,
+ "link_added_s": 0.0,
+ "failure_cleared_s": 0.0,
+ "slow_file_done_s": null,
+ "plan_resumed_s": null,
+ "current_at_s": 1200.9,
+ "header": [
+  [
+   0.0,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   10.0,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   20.0,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   30.0,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   40.0,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   50.0,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   60.0,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   70.0,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   80.0,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   90.0,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   100.1,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   110.1,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   120.1,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   130.1,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   140.1,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   150.1,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   160.1,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   170.1,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   180.1,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   190.1,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   200.1,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   210.1,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   220.1,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   230.1,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   240.1,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   250.1,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   260.1,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   270.1,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   280.1,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   290.1,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   300.1,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   310.2,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   320.2,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   330.2,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   340.2,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   350.2,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   360.2,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   370.2,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   380.2,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   390.2,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   400.2,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   410.2,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   420.2,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   430.3,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   440.3,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   450.3,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   460.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   470.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   480.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   490.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   500.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   510.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   520.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   530.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   540.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   550.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   560.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   570.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   580.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   590.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   600.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   610.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   620.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   630.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   640.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   650.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   660.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   670.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   680.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   690.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   700.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   710.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   720.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   730.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   740.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   750.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   760.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   770.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   780.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   790.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   800.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   810.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   820.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   830.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   840.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   850.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   860.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   870.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   880.4,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   890.5,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   900.5,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   910.5,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   920.5,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   930.5,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   940.5,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   950.5,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   960.5,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   970.5,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   980.5,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   990.5,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   1000.5,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   1010.5,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   1020.5,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   1030.5,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   1040.5,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   1050.5,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   1060.5,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   1070.5,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   1080.5,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   1090.5,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   1100.5,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   1110.5,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   1120.5,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   1130.5,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   1140.5,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   1150.5,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   1160.5,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   1170.5,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   1180.5,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   1190.5,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ],
+  [
+   1200.5,
+   "failed",
+   "Analytics cover 1 of 7 payers (1 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_"
+  ]
+ ],
+ "events": [
+  [
+   -0.6,
+   "incr_enter"
+  ],
+  [
+   -0.5,
+   "incr_raise"
+  ],
+  [
+   -0.5,
+   "full_enter"
+  ],
+  [
+   -0.4,
+   "slice_fail_injected"
+  ],
+  [
+   -0.4,
+   "slice_fail_injected"
+  ],
+  [
+   -0.4,
+   "slice_fail_injected"
+  ],
+  [
+   -0.4,
+   "slice_fail_injected"
+  ],
+  [
+   -0.3,
+   "slice_fail_injected"
+  ],
+  [
+   -0.3,
+   "slice_fail_injected"
+  ],
+  [
+   -0.3,
+   "slice_fail_injected"
+  ],
+  [
+   -0.3,
+   "slice_fail_injected"
+  ],
+  [
+   -0.3,
+   "slice_fail_injected"
+  ],
+  [
+   -0.3,
+   "slice_fail_injected"
+  ],
+  [
+   -0.3,
+   "slice_fail_injected"
+  ],
+  [
+   -0.3,
+   "full_raise"
+  ]
+ ],
+ "log": [
+  "08:41:42 INFO    mrfx.cli: opening the store at /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/F3/store \u2026",
+  "08:41:42 INFO    mrfx.store: analytics memory budget: 2 GB (1.9 GiB, as DuckDB reports it) \u2014 set by duckdb_memory_gb; raise duckdb_memory_gb in config/mrfx.yaml if rebuilds run out",
+  "08:41:42 INFO    mrfx.cli: analytics are behind the ingested files \u2014 catching up in the background. Reason: an analytics build is part-way (24 of 58 parts saved) \u2014 it continues where it stopped",
+  "08:41:42 INFO    mrfx.cli: watching /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/F3/inbox",
+  "08:41:42 INFO    mrfx.cli: incremental analytics catch-up unavailable (rollup tables were built by an older version (or never built)) \u2014 running a full rebuild",
+  "08:41:42 INFO    mrfx.store: analytics build: resuming at part 25 of 58 (Blue Cross Blue Shield of Wyoming \u00b7 92605)",
+  "08:41:42 WARNING mrfx.store: analytics build: Blue Cross Blue Shield of Wyoming \u00b7 92605 ran out of memory \u2014 cutting it in two and trying again",
+  "08:41:42 WARNING mrfx.store: analytics build: Blue Cross Blue Shield of Wyoming \u00b7 92605, part 1 of 2 ran out of memory \u2014 cutting it in two and trying again",
+  "08:41:42 WARNING mrfx.store: analytics build: Blue Cross Blue Shield of Wyoming \u00b7 92605, part 1 of 4 ran out of memory \u2014 cutting it in two and trying again",
+  "08:41:42 WARNING mrfx.store: analytics build: Blue Cross Blue Shield of Wyoming \u00b7 92605, part 1 of 8 ran out of memory \u2014 cutting it in two and trying again",
+  "08:41:42 WARNING mrfx.store: analytics build: Blue Cross Blue Shield of Wyoming \u00b7 92605, part 1 of 16 ran out of memory \u2014 cutting it in two and trying again",
+  "08:41:42 WARNING mrfx.store: analytics build: Blue Cross Blue Shield of Wyoming \u00b7 92605, part 1 of 32 ran out of memory \u2014 cutting it in two and trying again",
+  "08:41:42 WARNING mrfx.store: analytics build: Blue Cross Blue Shield of Wyoming \u00b7 92605, part 1 of 64 ran out of memory \u2014 cutting it in two and trying again",
+  "08:41:42 WARNING mrfx.store: analytics build: Blue Cross Blue Shield of Wyoming \u00b7 92605, part 1 of 128 ran out of memory \u2014 cutting it in two and trying again",
+  "08:41:42 WARNING mrfx.store: analytics build: Blue Cross Blue Shield of Wyoming \u00b7 92605, part 1 of 256 ran out of memory \u2014 cutting it in two and trying again",
+  "08:41:42 WARNING mrfx.store: analytics build: Blue Cross Blue Shield of Wyoming \u00b7 92605, part 1 of 512 ran out of memory \u2014 cutting it in two and trying again",
+  "  store: /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/F3/store  (8 file(s) ingested)",
+  "  inbox: /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/F3/inbox  (drop .json / .json.gz / .zip here)",
+  "  if the app ever freezes: open /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/F3/store/diagnostics/stacks_latest.txt",
+  "Exception in thread mrfx-rollup-catchup:",
+  "  File \"/home/user/Claudevideo/mrfx/cli.py\", line 263, in _catch_up",
+  "    if store.update_rollups_incremental(skip_if_busy=True) == ROLLUP_SKIPPED:",
+  "  File \"/tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/hooks/sitecustomize.py\", line 54, in incr",
+  "  File \"/home/user/Claudevideo/mrfx/store.py\", line 4557, in update_rollups_incremental",
+  "  File \"/home/user/Claudevideo/mrfx/store.py\", line 4566, in update_rollups_incremental",
+  "    raise RuntimeError(\"rollup tables were built by an older \"",
+  "RuntimeError: rollup tables were built by an older version (or never built)",
+  "  File \"/home/user/Claudevideo/mrfx/cli.py\", line 271, in _catch_up",
+  "    store.rebuild_rollups(skip_if_busy=True)",
+  "  File \"/tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/hooks/sitecustomize.py\", line 70, in full",
+  "  File \"/home/user/Claudevideo/mrfx/store.py\", line 4465, in rebuild_rollups",
+  "  File \"/tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/hooks/sitecustomize.py\", line 83, in run_slice"
+ ],
+ "truth": {
+  "done_files": 8,
+  "raw_rows": 6768604,
+  "spine_rows": 72398,
+  "expected_rows": 444992,
+  "missing": 372594,
+  "extra": 0,
+  "files_fully_in_spine": 1,
+  "files_rowcount_mismatch": [],
+  "spine_payers": [
+   "Blue Cross Blue Shield of North Dakota",
+   "Blue Cross Blue Shield of Wyoming"
+  ],
+  "raw_payers": [
+   "Blue Cross Blue Shield of North Dakota",
+   "Blue Cross Blue Shield of Wyoming",
+   "HEALTHSCOPE BENEFITS",
+   "Highmark WV",
+   "Moda",
+   "Security Health Plan of Wisconsin, Inc,",
+   "Tufts Health Public Plans, Inc."
+  ],
+  "hash_spine": null,
+  "hash_dir": null
+ }
+}

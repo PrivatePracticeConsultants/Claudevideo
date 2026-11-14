@@ -9,24 +9,32 @@ ships with a methodology sidecar (§7A.6). The default analytical grain is
 from __future__ import annotations
 
 import contextlib
+import functools
 import datetime as dt
 import io
 import json
+import math
 import logging
 import os
 import re
+import shutil
 import tempfile
 import threading
 import time
 import zipfile
 from pathlib import Path
 
+import duckdb
 from fastapi import BackgroundTasks, Body, FastAPI, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTextResponse,
+                               StreamingResponse)
+from starlette.background import BackgroundTask
 from fastapi.staticfiles import StaticFiles
 
+from .rounding import half_up
 from . import __version__
 from .benchmark import (
+    PRACTICE_RATE_RULE,
     BenchmarkError,
     clean_volumes,
     compute_benchmark,
@@ -42,7 +50,7 @@ from .catalog import (THERAPY_MIN_SHARE_PCT, THERAPY_SMALL_PRACTICE_NPIS,
                       catalog_json, therapy_taxonomy_sql)
 from .config import MrfxConfig
 from .enrich import use_bulk_enrichment
-from .leads import (compute_leaderboard, compute_leads, compute_payer_roster,
+from .leads import (LEADS_LIMIT, compute_leaderboard, compute_leads, compute_payer_roster,
                     leads_csv, payer_roster_csv)
 from .market import (
     assistant_pos_diff,
@@ -50,6 +58,7 @@ from .market import (
     medicare_index,
     negotiability,
 )
+from .modifiers import BASE_RULE_TEXT, MODIFIER_INGEST_NOTE, base_sql
 from .monitor import compute_payer_trajectory, compute_rate_changes, rate_changes_csv
 from .schedule import (
     compute_fee_schedule,
@@ -60,9 +69,14 @@ from .schedule import (
 from .entities import sync_entity_map, update_entity
 from .ingest import ingest_file, scan_inbox, thread_stacks_text
 from .registry import Registry
-from .store import Store, mask_tin, sql_path
+from . import progress as _progress
+from .store import SSN_PREFIXES, Store, mask_tin, sql_path
 
 log = logging.getLogger(__name__)
+
+# How long a header poll (/api/stats) waits for a fresh body before it answers
+# with the last one (0.8.1 — it never waits on an analytics update).
+STATS_WAIT_S = 8.0
 
 WEB_DIR = Path(__file__).parent / "web"
 
@@ -95,8 +109,8 @@ UPLOAD_LIMIT_BYTES = 1 << 30  # browser uploads capped at 1 GB (§5.4)
 
 OUTLIER_RULE = "hide rows >5x or <0.2x of the code's median within the current filter"
 
-_SSN_PREFIXES = ("('00','07','08','09','17','18','19','28','29','49',"
-                 "'69','70','78','79','89','96','97')")
+# the SQL twin of store.looks_like_ssn, from the same prefix set
+_SSN_PREFIXES = "(" + ",".join(f"'{p}'" for p in SSN_PREFIXES) + ")"
 
 # the no-name fallback label must never surface a raw SSN-pattern TIN — it is
 # rendered as display_name in the UI, CSV exports, and outreach ORG_NAME
@@ -118,9 +132,20 @@ _THERAPY_N = therapy_taxonomy_sql("n.taxonomy_code")     # NPI grain
 # directory). Split into projection + joins so the table endpoint can attach them
 # AFTER sorting+limiting the base rows to one page — joining 100 rows instead of
 # the whole store (see api.rates()'s late-join path). `t` is the base relation.
+# The PRACTICE-level columns: each reads only t.tin_value / t.tin_is_really_npi
+# and the three dimension tables, so it is constant across a practice's rows.
+# One definition, used by the full projection and by the unit lookup that
+# filters on them (_tin_rows_by_unit) — the two must never disagree.
+_UNIT_COLS = {
+    "display_name": f"coalesce(em.entity_name, td.display_name, nn.org_name, {_TIN_LABEL_SQL})",
+    "states": "coalesce(td.states, CASE WHEN nn.state IS NULL THEN [] ELSE [nn.state] END)",
+    "cities": "coalesce(td.cities, CASE WHEN nn.city IS NULL THEN [] ELSE [nn.city] END)",
+    # PT/OT/SLP practice? from tin_directory (EIN TINs) or, for an NPI-in-the-
+    # TIN-slot row, that NPI's own taxonomy.
+    "is_therapy": f"coalesce(td.is_therapy, {_THERAPY_NN}, FALSE)",
+}
 _TIN_PROJECTION = f"""
-    coalesce(em.entity_name, td.display_name, nn.org_name,
-             {_TIN_LABEL_SQL}) AS display_name,
+    {_UNIT_COLS["display_name"]} AS display_name,
     t.tin_value AS unit_id, t.tin_value,
     em.entity_name IS NOT NULL AS is_mapped_entity,
     t.tin_is_really_npi,
@@ -129,35 +154,214 @@ _TIN_PROJECTION = f"""
     t.modifier_set, t.billing_class, t.service_code_set, t.file_month,
     t.negotiated_rate, t.negotiated_type, t.is_dollar_rate,
     t.source_count, t.source_files, t.schema_version, t.last_updated_on,
-    coalesce(td.states, CASE WHEN nn.state IS NULL THEN [] ELSE [nn.state] END) AS states,
-    coalesce(td.cities, CASE WHEN nn.city IS NULL THEN [] ELSE [nn.city] END) AS cities,
-    -- PT/OT/SLP practice? from tin_directory (EIN TINs) or, for an NPI-in-the-
-    -- TIN-slot row, that NPI's own taxonomy.
-    coalesce(td.is_therapy, {_THERAPY_NN}, FALSE) AS is_therapy
+    {_UNIT_COLS["states"]} AS states,
+    {_UNIT_COLS["cities"]} AS cities,
+    {_UNIT_COLS["is_therapy"]} AS is_therapy,
+    -- for the entity key only (see _ENTITY_KEY_SQL): is the display name an
+    -- ORGANIZATION's (an NPI-2), and the practice's main state
+    coalesce(td.entity_kind = 'org', nn.entity_type = 'NPI-2', FALSE) AS name_is_org,
+    coalesce(td.primary_state, nn.state) AS primary_state
 """
 _TIN_JOINS = """
     LEFT JOIN tin_directory td USING (tin_value)
     LEFT JOIN entity_map em USING (tin_value)
     -- payers that set tin.type='npi' publish an NPI in the TIN slot: name and
-    -- locate those rows from the NPI directory instead of leaving raw numbers
-    LEFT JOIN npi_directory nn ON t.tin_is_really_npi AND nn.npi = t.tin_value
+    -- locate those rows from the NPI directory instead of leaving raw numbers.
+    -- The key is an EXPRESSION equality on purpose: written as
+    -- `ON t.tin_is_really_npi AND nn.npi = t.tin_value`, the one-sided
+    -- predicate made DuckDB fall back to a nested-loop join (BLOCKWISE_NL_JOIN:
+    -- every spine row against every named provider — 1.41M x 93k on the real
+    -- store, 529 thread-seconds; the Explorer's table took 158 s and the Code
+    -- page 10 s once practice names were loaded, 0.9 s / 0.1 s before). The
+    -- CASE yields NULL for an EIN row, which matches nothing — the same rows,
+    -- hash-joined.
+    LEFT JOIN npi_directory nn ON nn.npi = CASE WHEN t.tin_is_really_npi THEN t.tin_value END
 """
 _TIN_REL = f"SELECT {_TIN_PROJECTION} FROM rates_by_tin t {_TIN_JOINS}"
 
-_ENTITY_REL = f"""
-    SELECT any_value(display_name) AS display_name,
+
+def _tin_rows_by_unit(where_key: str, where_unit: str, latest: bool,
+                      units: str | None = None) -> str:
+    """The TIN relation's rows whose contract passes `where_key` and whose
+    PRACTICE passes `where_unit` — the same rows as
+    `SELECT * FROM (_TIN_REL[_LATEST]) WHERE key AND unit`, found the other way
+    round. Joining the three dimension tables onto every spine row and only
+    then testing state / city / therapy / a name was most of a filtered
+    Explorer view's cost (round 5, P1.4: a state filter 2.9 s and a name
+    search 3.9 s at 99M rates). Here the practice columns are computed once
+    per (tin_value, tin_is_really_npi) — from _UNIT_COLS, the projection's own
+    expressions — the passing practices are found, and only their rows are
+    read and joined. Binds the key params, then the unit params (bucket order)."""
+    spine = "rates_by_tin WHERE " + ("is_latest AND " if latest else "") + where_key
+    # `units`: every practice of the spine, kept once per spine generation
+    # (FilterSet.units_rel -> Store.spine_materialised). A superset of k's
+    # practices, so the SEMI JOIN below keeps exactly the same rows — without
+    # re-reading the 79M-row spine to list them in every statement (review 10
+    # item 1.3: 2.2-3.2 thread-s per statement, four statements per search)
+    units = units or "(SELECT DISTINCT tin_value, tin_is_really_npi FROM k)"
+    unit_cols = ", ".join(f"{sql} AS {name}" for name, sql in _UNIT_COLS.items())
+    return f"""
+        WITH k AS NOT MATERIALIZED (SELECT * FROM {spine}),
+        u AS (
+            SELECT tin_value, tin_is_really_npi FROM (
+                SELECT t.tin_value, t.tin_value AS unit_id, t.tin_is_really_npi,
+                       {unit_cols}
+                FROM {units} t {_TIN_JOINS})
+            WHERE {where_unit})
+        SELECT {_TIN_PROJECTION}
+        FROM k t SEMI JOIN u ON u.tin_value = t.tin_value
+                            AND u.tin_is_really_npi = t.tin_is_really_npi
+        {_TIN_JOINS}"""
+
+
+def _spine_rows_by_unit(where_key: str, where_unit: str, latest: bool,
+                        units: str | None = None) -> str:
+    """The SPINE rows (no names joined) of the practices passing
+    `where_unit` — _tin_rows_by_unit without its outer three joins. The
+    practices are found on the per-generation practice list; the spine is read
+    once. Used where no joined column is read afterwards: the page's Top-N
+    (names attached to the 100 kept rows after), the count, the strip."""
+    spine = "rates_by_tin WHERE " + ("is_latest AND " if latest else "") + where_key
+    units = units or "(SELECT DISTINCT tin_value, tin_is_really_npi FROM k)"
+    unit_cols = ", ".join(f"{sql} AS {name}" for name, sql in _UNIT_COLS.items())
+    return f"""
+        WITH k AS NOT MATERIALIZED (SELECT * FROM {spine}),
+        u AS (
+            SELECT tin_value, tin_is_really_npi FROM (
+                SELECT t.tin_value, t.tin_value AS unit_id, t.tin_is_really_npi,
+                       {unit_cols}
+                FROM {units} t {_TIN_JOINS})
+            WHERE {where_unit})
+        SELECT t.*, t.tin_value AS unit_id
+        FROM k t SEMI JOIN u ON u.tin_value = t.tin_value
+                            AND u.tin_is_really_npi = t.tin_is_really_npi"""
+
+
+# each contract's newest month only: the spine's stored flag (store.SPINE_QUERY)
+# — a filter DuckDB applies in the scan, under the joins
+_TIN_REL_LATEST = _TIN_REL + " WHERE t.is_latest"
+
+# The entity a TIN rolls up to. A manual entity_map name wins. Otherwise an
+# ORGANIZATION name (from an NPI-2) plus the practice's main state: two TINs of
+# "GREATER BOSTON WELLNESS PHYSICIANS" in MA are one entity, an unrelated
+# "ACTIVE PHYSICAL THERAPY" in KS is another. A TIN with no organization NPI is
+# named after one of its clinicians — and that clinician often bills under
+# several unrelated TINs (real store: 462 person-names shared by 1,008 TINs),
+# so such a TIN is its OWN entity (key = tin_value), as is a no-name TIN.
+_ENTITY_KEY_SQL = """coalesce(
+    s2.entity_name,
+    CASE WHEN NOT s.name_is_org OR s.display_name LIKE 'TIN %' THEN s.tin_value
+         ELSE s.display_name || coalesce(' · ' || s.primary_state, '') END)"""
+
+
+def _entity_keyed(tin_rows: str) -> str:
+    """TIN rows (the _TIN_REL column set) + their entity_key."""
+    return (f"SELECT s.*, {_ENTITY_KEY_SQL} AS entity_key FROM ({tin_rows}) s "
+            "LEFT JOIN entity_map s2 ON s2.tin_value = s.tin_value")
+
+
+def _entity_units_keyed(units: str | None = None) -> str:
+    """Every PRACTICE of the spine (tin_value, tin_is_really_npi) with its
+    display name and entity key — the SAME expressions _TIN_PROJECTION and
+    _ENTITY_KEY_SQL give each spine row, computed once per practice from the
+    practice list instead of on every spine row (review 13 item 3.1: the
+    drawer's key lookups each aggregated the whole 79M-row spine)."""
+    units = units or "(SELECT DISTINCT tin_value, tin_is_really_npi FROM rates_by_tin)"
+    return f"""
+        SELECT s.tin_value, s.tin_is_really_npi, s.display_name,
+               {_ENTITY_KEY_SQL} AS entity_key
+        FROM (SELECT t.tin_value, t.tin_is_really_npi,
+                     {_UNIT_COLS["display_name"]} AS display_name,
+                     coalesce(td.entity_kind = 'org', nn.entity_type = 'NPI-2', FALSE) AS name_is_org,
+                     coalesce(td.primary_state, nn.state) AS primary_state
+              FROM {units} t {_TIN_JOINS}) s
+        LEFT JOIN entity_map s2 ON s2.tin_value = s.tin_value"""
+
+
+def _member_tin_rows(tins_param: str = "?", latest: bool = False) -> str:
+    """_TIN_REL[_LATEST] restricted to a list of member TINs (one VARCHAR[]
+    parameter) — the spine is clustered by (code, TIN), so this prunes."""
+    where = " WHERE t.tin_value IN (SELECT unnest(" + tins_param + "::VARCHAR[]))"
+    if latest:
+        where += " AND t.is_latest"
+    return f"SELECT {_TIN_PROJECTION} FROM rates_by_tin t {_TIN_JOINS}{where}"
+
+
+def _resolve_entity_key(con, key: str, units: str | None = None) -> str:
+    """An entity drawer link may carry a bare organization name (a bookmark,
+    an older build's link, a hand-typed URL) where the key is now "NAME · ST".
+    Exactly one entity of that name -> its key; several -> say which (never
+    pick one); none -> the key as given (the caller 404s)."""
+    keyed = _entity_units_keyed(units)
+    if con.execute(f"SELECT 1 FROM ({keyed}) WHERE entity_key = ? LIMIT 1",
+                   [key]).fetchone():
+        return key
+    keys = [r[0] for r in con.execute(
+        f"SELECT DISTINCT entity_key FROM ({keyed}) "
+        "WHERE display_name = ? AND entity_key <> tin_value ORDER BY 1", [key]).fetchall()]
+    if len(keys) > 1:
+        raise HTTPException(409, f"several practices are named {key!r}: "
+                                 + "; ".join(keys) + " — open the one you mean")
+    return keys[0] if keys else key
+
+
+def _entity_rel(tin_rows: str, latest: bool = False) -> str:
+    """Entity grain over the given TIN rows: one row per entity x payer x code x
+    modifier set x class x POS set (x month, unless `latest`). Under `latest`
+    each member TIN has ALREADY been reduced to its own newest month (rel_sql),
+    so the entity rate is the median over every member's current rate — the
+    Benchmark's rule. Grouping by month first and then keeping the entity's
+    newest month dropped a member whose payer hadn't republished it yet
+    (A: July $55, B: June $40 -> $55 from A alone, vs the Benchmark's $47.50)."""
+    month_col = "max(file_month) AS file_month" if latest else "file_month"
+    month_key = "" if latest else " file_month,"
+    # The DISTINCT counts and lists are taken from ONE list() per column
+    # (list_distinct + len / list_sort + array_to_string — the same values as
+    # count(DISTINCT x) / string_agg(DISTINCT x ORDER BY x), NULLs ignored
+    # alike). A DISTINCT aggregate builds its own hash table over every group
+    # key plus the value, per thread: four of them over an unfiltered spine
+    # (1.4M groups of long string keys) ran the whole-store entity view out
+    # of memory once "latest" stopped being a window that happened to feed
+    # the aggregate pre-clustered rows (old plan 19 s; this one: see
+    # tests/mrfx/test_known_answer_entity.py and the round-4 report).
+    return f"""
+    SELECT display_name, unit_id,
+           CASE WHEN len(tins) > 0 THEN array_to_string(tins, '; ') END AS tin_value,
+           is_mapped_entity, tin_is_really_npi,
+           len(tins) AS tin_count,
+           npi_count,
+           -- ONE meaning: how many different member-TIN rates the shown
+           -- median is taken over (rate_min/rate_max still span every
+           -- published value of every member)
+           len(list_distinct(rates)) AS rate_variants,
+           rate_min, rate_max,
+           payer, billing_code, billing_code_type,
+           discipline, is_timed,
+           modifier_set, billing_class, service_code_set, file_month,
+           negotiated_rate, negotiated_type, is_dollar_rate,
+           -- files behind the line: members of one payer usually share ONE
+           -- file, so summing per-member counts multiplied it (2 TINs from one
+           -- file read "2 files"). Distinct representative files, never less
+           -- than any single member's count — exact whenever each member's
+           -- line comes from one file (the export methodology says so)
+           greatest(max_source_count, len(files)) AS source_count,
+           CASE WHEN len(files) > 0 THEN array_to_string(files, ';') END AS source_files,
+           schema_version, last_updated_on, states, cities, is_therapy
+    FROM (
+    SELECT min(display_name) AS display_name,
            entity_key AS unit_id,
-           string_agg(DISTINCT tin_value, '; ') AS tin_value,
+           list_sort(list_distinct(list(tin_value))) AS tins,
            bool_or(is_mapped_entity) AS is_mapped_entity,
            bool_or(tin_is_really_npi) AS tin_is_really_npi,
-           count(DISTINCT tin_value) AS tin_count,
+           -- member TINs' NPI counts summed: an NPI listed under two member
+           -- TINs counts twice (the rollup keeps per-TIN counts, not the NPIs;
+           -- stated in the export methodology)
            sum(npi_count) AS npi_count,
-           CASE WHEN count(DISTINCT negotiated_rate) > 1 THEN count(DISTINCT negotiated_rate)
-                ELSE max(rate_variants) END AS rate_variants,
+           list(negotiated_rate) AS rates,
            min(rate_min) AS rate_min, max(rate_max) AS rate_max,
-           payer, billing_code, any_value(billing_code_type) AS billing_code_type,
-           discipline, any_value(is_timed) AS is_timed,
-           modifier_set, billing_class, service_code_set, file_month,
+           payer, billing_code, min(billing_code_type) AS billing_code_type,
+           discipline, min(is_timed) AS is_timed,
+           modifier_set, billing_class, service_code_set, {month_col},
            -- Re-median across the entity's member TINs — but a placeholder-ONLY
            -- TIN carries its 0.01 as its per-TIN "median" (store.BY_TIN_QUERY's
            -- coalesce fallback), so folding it in would drag a multi-TIN entity
@@ -171,30 +375,112 @@ _ENTITY_REL = f"""
                median(negotiated_rate) FILTER (NOT is_dollar_rate OR negotiated_rate > 0.01),
                median(negotiated_rate)
            ), 4) AS negotiated_rate,
-           any_value(negotiated_type) AS negotiated_type, is_dollar_rate,
-           sum(source_count) AS source_count,
-           string_agg(DISTINCT source_files, ';') AS source_files,
-           any_value(schema_version) AS schema_version,
+           min(negotiated_type) AS negotiated_type, is_dollar_rate,
+           max(source_count) AS max_source_count,
+           list_sort(list_distinct(list(source_files))) AS files,
+           min(schema_version) AS schema_version,
            max(last_updated_on) AS last_updated_on,
            list_sort(list_distinct(flatten(list(states)))) AS states,
            list_sort(list_distinct(flatten(list(cities)))) AS cities,
            bool_or(is_therapy) AS is_therapy   -- entity is therapy if any TIN is
-    FROM (
-        -- Group on the entity NAME, but a no-name SSN-pattern TIN falls back to
-        -- the literal 'TIN MASKED-SSN' label — identical for EVERY such TIN — so
-        -- grouping on it would merge unrelated sole-proprietor practices into one
-        -- bogus entity. Fall back to the (unique) tin_value in that case so each
-        -- stays its own entity; the masked label is still what renders.
-        SELECT s.*, coalesce(
-            s2.entity_name,
-            CASE WHEN s.display_name = 'TIN MASKED-SSN' THEN s.tin_value
-                 ELSE s.display_name END
-        ) AS entity_key
-        FROM ({_TIN_REL}) s LEFT JOIN entity_map s2 ON s2.tin_value = s.tin_value
-    )
+    FROM ({_entity_keyed(tin_rows)})
     GROUP BY entity_key, payer, billing_code, discipline, modifier_set,
-             billing_class, service_code_set, file_month, is_dollar_rate
+             billing_class, service_code_set,{month_key} is_dollar_rate
+    )
 """
+
+
+# Review 10 item 1.7 — the entity page in two passes. One pass built EVERY
+# entity group of the spine with five list() columns (TINs, rates, files,
+# states, cities) and sorted the lists, then kept 100: on a 32M-rate store
+# 1,350,747 rows -> 1,348,421 groups, 3.9-4.9 s a page, 7-13 s for page 2.
+# The light pass carries only what the filters, the sort, the count and the
+# page cut read — the TIN list included, because it is a tiebreak of every
+# order (_ORDER_TIEBREAK) — so the page holds exactly the rows the full
+# relation would put there; the full row is then built for those groups only.
+_ENTITY_HEAVY = ("rate_variants", "source_count", "source_files", "states", "cities")
+_ENTITY_GROUP = ("entity_key", "payer", "billing_code", "discipline", "modifier_set",
+                 "billing_class", "service_code_set", "is_dollar_rate")
+
+
+def _entity_light(tin_rows: str, latest: bool) -> str:
+    """_entity_rel's columns minus the heavy list ones (_ENTITY_HEAVY), the
+    same expressions, one row per the same group. `tin_rows` must carry
+    entity_key (_entity_keyed)."""
+    month_col = "max(file_month) AS file_month" if latest else "file_month"
+    month_key = "" if latest else " file_month,"
+    return f"""
+    SELECT min(display_name) AS display_name, entity_key AS unit_id,
+           CASE WHEN len(list_distinct(list(tin_value))) > 0
+                THEN array_to_string(list_sort(list_distinct(list(tin_value))), '; ') END AS tin_value,
+           bool_or(is_mapped_entity) AS is_mapped_entity,
+           bool_or(tin_is_really_npi) AS tin_is_really_npi,
+           count(DISTINCT tin_value) AS tin_count,
+           sum(npi_count) AS npi_count,
+           min(rate_min) AS rate_min, max(rate_max) AS rate_max,
+           payer, billing_code, min(billing_code_type) AS billing_code_type,
+           discipline, min(is_timed) AS is_timed,
+           modifier_set, billing_class, service_code_set, {month_col},
+           round(coalesce(
+               median(negotiated_rate) FILTER (NOT is_dollar_rate OR negotiated_rate > 0.01),
+               median(negotiated_rate)), 4) AS negotiated_rate,
+           min(negotiated_type) AS negotiated_type, is_dollar_rate,
+           min(schema_version) AS schema_version,
+           max(last_updated_on) AS last_updated_on,
+           bool_or(is_therapy) AS is_therapy
+    FROM ({tin_rows})
+    GROUP BY entity_key, payer, billing_code, discipline, modifier_set,
+             billing_class, service_code_set,{month_key} is_dollar_rate"""
+
+
+def _entity_inner(fs: "FilterSet") -> str:
+    """The member TIN rows rel_sql's entity branch aggregates (key + unit
+    filters; latest = each member's own newest month)."""
+    by_unit = fs.selective_dims and not fs.codes
+    if by_unit and fs.has("unit"):
+        return _tin_rows_by_unit(fs.where_of("key"), fs.where_of("unit"), fs.latest_only,
+                                 fs.units_rel())
+    tin_rel = _TIN_REL_LATEST if fs.latest_only else _TIN_REL
+    return f"SELECT * FROM ({tin_rel}) WHERE {fs.where_of('key', 'unit')}"
+
+
+def entity_two_pass_ok(fs: "FilterSet", sort: str = "negotiated_rate") -> bool:
+    """No filter, sort or outlier band reads a heavy list column."""
+    if fs.hide_outliers or sort in _ENTITY_HEAVY:
+        return False
+    where = fs.where_of("ident", "row")
+    return not any(c in where for c in _ENTITY_HEAVY)
+
+
+def entity_light_rel(fs: "FilterSet") -> str:
+    """The filtered entity groups, light columns: count, strip and page cut.
+    Binds fs.params (key, unit, ident, row)."""
+    w = fs.where_of("ident", "row")
+    if fs.ident_kind:
+        w = w.replace(_IDENT_TOKEN, f"({_ident_clause('entity', fs.ident_kind)})")
+    return (f"SELECT * FROM ({_entity_light(_entity_keyed(_entity_inner(fs)), fs.latest_only)}) "
+            f"WHERE {w}")
+
+
+def entity_page_sql(fs: "FilterSet", order: str) -> str:
+    """The entity page in two passes; binds fs.params, then LIMIT, OFFSET.
+    Same rows, same order as `rel_sql('entity', fs) {order} LIMIT ? OFFSET ?`."""
+    w = fs.where_of("ident", "row")
+    if fs.ident_kind:
+        w = w.replace(_IDENT_TOKEN, f"({_ident_clause('entity', fs.ident_kind)})")
+    keys = list(_ENTITY_GROUP) + ([] if fs.latest_only else ["file_month"])
+    on = " AND ".join(f"s.{k} IS NOT DISTINCT FROM pg.{k}" for k in keys)
+    pg_cols = ", ".join(("unit_id AS entity_key" if k == "entity_key" else k) for k in keys)
+    full = _entity_rel("SELECT * EXCLUDE (entity_key) FROM (SELECT s.* FROM kk s "
+                       f"SEMI JOIN pg ON {on})", fs.latest_only)
+    return (f"WITH kk AS MATERIALIZED ({_entity_keyed(_entity_inner(fs))}), "
+            f"pg AS MATERIALIZED (SELECT {pg_cols} FROM ("
+            f"SELECT * FROM ({_entity_light('SELECT * FROM kk', fs.latest_only)}) WHERE {w} "
+            f"{order} LIMIT ? OFFSET ?)) "
+            f"SELECT * FROM ({full}) {order}")
+
+
+_ENTITY_REL = _entity_rel(_TIN_REL)
 
 _NPI_REL = f"""
     SELECT coalesce(n.org_name, 'NPI ' || d.npi) AS display_name,
@@ -216,9 +502,48 @@ _NPI_REL = f"""
 GRAIN_REL = {"tin": _TIN_REL, "entity": _ENTITY_REL, "npi": _NPI_REL}
 
 
+# Store size (done in-network rates) above which the NPI / entity views need a
+# narrowing filter — see create_app's _require_narrowing for the measurements.
+NARROW_REQUIRED_ROWS = 40_000_000
+# The NPI view aggregates rates_dedup (every published line): on a 32M-rate
+# store, under the 40M guard, it ran 5-16 s and then answered "needs more
+# memory" — and knocked a concurrent narrow request out with it (review 10
+# item 1.8). Its guard follows the memory budget: rates per GB it measured to
+# finish in, ~2.5M (6 GB -> 15M).
+NPI_ROWS_PER_GB = 2_500_000
+
+# Placeholder for an exact NPI/TIN search clause; rel_sql substitutes the
+# grain's single-column predicate (see FilterSet's q handling).
+_IDENT_TOKEN = "(__IDENT_MATCH__)"
+
+
+def _ident_clause(grain: str, kind: str) -> str:
+    """One-parameter exact match for an NPI (kind 'npi') or TIN ('tin')."""
+    if grain == "npi":
+        return "unit_id = ?" if kind == "npi" else "tin_value = ?"
+    if grain == "tin":
+        return "tin_value = ?"          # a 10-digit value = an NPI in the TIN slot
+    # entity grain: tin_value is the '; '-joined list of member TINs
+    return "list_contains(string_split(tin_value, '; '), ?)"
+
+
+def _lit(v) -> str:
+    """A user's text as a LIKE literal: `%` and `_` typed into a search or
+    modifier box matched anything (`q=_` and `modifier=%` returned every row
+    — review 10 item 1.9). Paired with ESCAPE '\\' in every such clause."""
+    return str(v).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 class FilterSet:
     """Query params -> parameterized WHERE over the uniform grain relation.
     Shared by table, summary, and CSV export so the numbers always agree."""
+
+    # the app's per-generation practice list (create_app sets it per request;
+    # the CLI and scripts leave it None and read the practices off the spine)
+    units_provider = None
+
+    def units_rel(self) -> str | None:
+        return self.units_provider() if self.units_provider else None
 
     def __init__(self, qp: dict):
         split = lambda s: [x.strip() for x in s.split(",") if x.strip()] if s else []  # noqa: E731
@@ -243,68 +568,97 @@ class FilterSet:
                 return [x.strip() for x in v if x and x.strip()]
             return split(v)
 
-        clauses, params = [], []
+        # Every clause lands in ONE bucket; rel_sql needs to know which:
+        #  key   — payer / code / pinned month: pick whole contracts
+        #  unit  — state, city, therapy-practice, hide-TIN=NPI: attributes of
+        #          the practice (constant across its rows)
+        #  ident — the search box: picks units (NPI / TIN / entity)
+        #  row   — everything else (modifier, class, POS, rate bounds,
+        #          dollar-only, discipline): picks rows WITHIN a contract
+        # "latest" must be decided over key/unit/ident-filtered rows ONLY: a
+        # row filter applied first removes the newest row and promotes a
+        # superseded month (rate_max=41 showed May's $40 instead of June's $42).
+        # Params are kept in bucket order key, unit, ident, row — the order
+        # every query assembles them in (see rel_sql / where_of).
+        self._buckets: dict[str, tuple[list, list]] = {
+            k: ([], []) for k in ("key", "unit", "ident", "row")}
+
+        def put(kind, clause, *ps):
+            self._buckets[kind][0].append(clause)
+            self._buckets[kind][1].extend(ps)
         self.described: dict = {}
+        self.ident_kind: str | None = None   # set by an exact NPI/TIN search
+        self.ident_value: str | None = None
         # True once a filter references a column that only exists AFTER the
         # name/geo joins (states, cities, display_name). The table endpoint can
         # take its fast late-join path only when this stays False.
         self.uses_dim_cols = False
+        # a practice attribute that usually keeps a SMALL share of practices
+        # (state, city, a name or partial-ID search): rel_sql then finds those
+        # practices first (_tin_rows_by_unit). "Therapy practices only" alone
+        # keeps most of a therapy store — listing practices first only added
+        # a scan there (99M rates: 0.77 -> 1.41 s), so it stays a join filter.
+        self.selective_dims = False
 
         def add(desc_key, desc_val):
             self.described[desc_key] = desc_val
 
         payers = multi("payer")
         if payers:
-            clauses.append(f"payer IN ({', '.join('?' for _ in payers)})")
-            params += payers
+            put("key", f"payer IN ({', '.join('?' for _ in payers)})", *payers)
             add("payers", payers)
         codes = split(qp.get("cpt") or qp.get("code"))
+        self.codes = codes
         if codes:
-            clauses.append(f"billing_code IN ({', '.join('?' for _ in codes)})")
-            params += codes
+            put("key", f"billing_code IN ({', '.join('?' for _ in codes)})", *codes)
             add("codes", codes)
         disciplines = split(qp.get("discipline"))
         if disciplines:
-            clauses.append(f"discipline IN ({', '.join('?' for _ in disciplines)})")
-            params += disciplines
-            add("disciplines", disciplines)
+            # + 'unspecified', the Benchmark's rule (_market_where): a shared
+            # code (97110, 97530...) the payer prices without GP/GO/GN is ONE
+            # rate for every discipline — excluding it showed "PT 97110" as
+            # only the few GP-tagged lines (PT $70 + untagged $65: Explorer 70,
+            # Benchmark 67.5)
+            put("row", f"(discipline IN ({', '.join('?' for _ in disciplines)}) "
+                "OR discipline = 'unspecified')", *disciplines)
+            add("disciplines", f"{', '.join(disciplines)} (plus lines the payer did not tag "
+                "with a discipline: a shared code priced without GP/GO/GN applies to every "
+                "discipline)")
         modifier = qp.get("modifier")
         if modifier == "base":
-            clauses.append("(modifier_set = '' OR modifier_set IN ('GP','GO','GN'))")
-            add("modifier", "base only (no modifiers, or discipline GP/GO/GN only)")
+            put("row", base_sql("modifier_set"))
+            add("modifier", BASE_RULE_TEXT)
         elif modifier == "assistant":
-            clauses.append("(modifier_set LIKE '%CQ%' OR modifier_set LIKE '%CO%')")
+            put("row", "(modifier_set LIKE '%CQ%' OR modifier_set LIKE '%CO%')")
             add("modifier", "assistant-provided only (CQ/CO)")
         elif modifier:
-            clauses.append("('|' || modifier_set || '|') LIKE ('%|' || ? || '|%')")
-            params.append(modifier)
+            put("row", "('|' || modifier_set || '|') LIKE ('%|' || ? || '|%') ESCAPE '\\'",
+                _lit(modifier))
             add("modifier", f"contains {modifier}")
         for m in split(qp.get("mod_has")):
-            clauses.append("('|' || modifier_set || '|') LIKE ('%|' || ? || '|%')")
-            params.append(m)
+            put("row", "('|' || modifier_set || '|') LIKE ('%|' || ? || '|%') ESCAPE '\\'", _lit(m))
             add(f"mod_has:{m}", True)
         for m in split(qp.get("mod_not")):
-            clauses.append("('|' || modifier_set || '|') NOT LIKE ('%|' || ? || '|%')")
-            params.append(m)
+            put("row", "('|' || modifier_set || '|') NOT LIKE ('%|' || ? || '|%') ESCAPE '\\'",
+                _lit(m))
             add(f"mod_not:{m}", True)
         if qp.get("billing_class"):
-            clauses.append("billing_class = ?")
-            params.append(qp["billing_class"])
+            put("row", "billing_class = ?", qp["billing_class"])
             add("billing_class", qp["billing_class"])
         if qp.get("pos"):
-            clauses.append("('|' || service_code_set || '|') LIKE ('%|' || ? || '|%')")
-            params.append(qp["pos"])
+            put("row", "('|' || service_code_set || '|') LIKE ('%|' || ? || '|%') ESCAPE '\\'",
+                _lit(qp["pos"]))
             add("place_of_service", qp["pos"])
         if qp.get("state"):
-            clauses.append("list_contains(states, ?)")
-            params.append(qp["state"].upper())
+            put("unit", "list_contains(states, ?)", qp["state"].upper())
             add("state", qp["state"].upper())
             self.uses_dim_cols = True  # `states` is a joined column
+            self.selective_dims = True
         if qp.get("city"):
-            clauses.append("len(list_filter(cities, c -> upper(c) = upper(?))) > 0")
-            params.append(qp["city"])
+            put("unit", "len(list_filter(cities, c -> upper(c) = upper(?))) > 0", qp["city"])
             add("city", qp["city"])
             self.uses_dim_cols = True  # `cities` is a joined column
+            self.selective_dims = True
         if qp.get("month"):
             if str(qp["month"]).strip().lower() == "latest":
                 # the report tabs' "latest" sentinel is not a real file_month —
@@ -313,17 +667,43 @@ class FilterSet:
                 raise ValueError(
                     "the explorer month filter takes a real month like 2026-07 "
                     "(leave it empty to see all months)")
-            clauses.append("file_month = ?")
-            params.append(qp["month"])
+            put("key", "file_month = ?", qp["month"])
             add("as_of_month", qp["month"])
         q = qp.get("q")
-        if q:
-            clauses.append(
-                "(unit_id LIKE ? OR upper(display_name) LIKE upper(?) OR tin_value LIKE ?)"
-            )
-            params += [f"%{q}%", f"%{q}%", f"%{q}%"]
+        ident = re.sub(r"[\s-]", "", q) if q else ""
+        if q and ident.isdigit():
+            # An NPI / TIN search (the product's core lookup) matches the ID
+            # columns ONLY. Both are grouping keys of every grain relation, so
+            # DuckDB applies the filter to the raw rows BEFORE the NPI dedup
+            # aggregation. ORing in display_name (a joined column) blocked that
+            # pushdown: at 306M rows the NPI search aggregated the whole store
+            # first and died out of temp disk after 30 s. Digits never occur in
+            # a real name; a nameless TIN's label "TIN 123…" is its tin_value.
+            if len(ident) in (9, 10):
+                # a complete TIN (9) / NPI (10): an exact match on ONE column,
+                # which DuckDB pushes into the parquet scan itself (measured at
+                # 306M rows: 0.5 s, vs 9.8 s for `npi = ? OR tin_value = ?` —
+                # an OR across columns is evaluated only after reading every
+                # row). Which column depends on the grain, so rel_sql swaps
+                # this token for the grain's clause (exactly one parameter).
+                put("ident", _IDENT_TOKEN, ident)
+                self.ident_value = ident
+                self.ident_kind = "npi" if len(ident) == 10 else "tin"
+            else:   # a partial number while typing
+                put("ident", "(unit_id LIKE ? ESCAPE '\\' OR tin_value LIKE ? ESCAPE '\\')",
+                    f"%{_lit(ident)}%", f"%{_lit(ident)}%")
+                self.selective_dims = True
+            add("search", q)
+            # unit_id is a projected name (tin_value / npi / entity), not a
+            # base-table column: keep the TIN grain off the late-join path
+            self.uses_dim_cols = True
+        elif q:
+            put("ident", "(unit_id LIKE ? ESCAPE '\\' OR upper(display_name) LIKE upper(?) "
+                         "ESCAPE '\\' OR tin_value LIKE ? ESCAPE '\\')",
+                f"%{_lit(q)}%", f"%{_lit(q)}%", f"%{_lit(q)}%")
             add("search", q)
             self.uses_dim_cols = True  # searches display_name (a joined column)
+            self.selective_dims = True
         dollar_only = qp.get("dollar_only", "1") not in ("0", "false")
         if dollar_only:
             # exclude $0/$0.01/negative DOLLAR placeholders here too, so the
@@ -332,16 +712,16 @@ class FilterSet:
             # Without this the same store shows a lower median on one screen than
             # another. The per-file zero_rates QA count still reports how many
             # placeholders a payer published (transparency preserved there).
-            clauses.append("is_dollar_rate AND negotiated_rate > 0.01")
+            put("row", "is_dollar_rate AND negotiated_rate > 0.01")
         add("dollar_rates_only", dollar_only)
         if qp.get("hide_tin_npi", "0") in ("1", "true"):
-            clauses.append("NOT tin_is_really_npi")
+            put("unit", "NOT tin_is_really_npi")
             add("hide_tin_is_really_npi", True)
         if qp.get("therapy_only", "0") in ("1", "true"):
             # STRICT outpatient-practice test (tin_directory.is_therapy) — the
             # description below ships verbatim in every export's methodology
             # sidecar, so it must state the rule the query ACTUALLY applied.
-            clauses.append("is_therapy")
+            put("unit", "is_therapy")
             add("therapy_practices_only",
                 f"outpatient PT/OT/SLP practices only: >= {THERAPY_MIN_SHARE_PCT}% of the "
                 "practice's identified CLINICIANS are PT/OT/SLP (incl. PTA/OTA/SLPA); "
@@ -366,13 +746,75 @@ class FilterSet:
                 val = float(raw)
             except (TypeError, ValueError):
                 continue  # junk numeric input is ignored, not a 500
-            clauses.append(f"negotiated_rate {op} ?")
-            params.append(val)
+            put("row", f"negotiated_rate {op} ?", val)
             add(bound, val)
+        # "newest file per contract" — the report tabs' LATEST rule, for the
+        # explorer-shaped views: payers republish monthly, so with no month
+        # pinned every contract appears once per ingested month. A pinned
+        # month wins (it is already single-vintage).
+        self.latest_only = (not qp.get("month")
+                            and str(qp.get("latest", "0")).lower() in ("1", "true"))
+        if self.latest_only:
+            add("as_of_month", "latest")
         self.hide_outliers = qp.get("hide_outliers", "0") in ("1", "true")
         add("hide_outliers", f"ON — {OUTLIER_RULE}" if self.hide_outliers else "off")
-        self.where = " AND ".join(clauses) if clauses else "1=1"
-        self.params = params
+        self.where = self.where_of("key", "unit", "ident", "row")
+        self.params = [p for k in ("key", "unit", "ident", "row") for p in self._buckets[k][1]]
+
+    def has(self, kind: str) -> bool:
+        """Whether any clause landed in bucket `kind`."""
+        return bool(self._buckets[kind][0])
+
+    def where_of(self, *kinds: str) -> str:
+        """AND of the named buckets' clauses, in the canonical bucket order
+        (so a query assembling buckets in that order binds fs.params as-is)."""
+        cl = [c for k in ("key", "unit", "ident", "row") if k in kinds
+              for c in self._buckets[k][0]]
+        return " AND ".join(cl) if cl else "1=1"
+
+
+_PATHISH = re.compile(r"(?:[A-Za-z]:[\\/]|/)(?:[^\s'\"]+[\\/])+[^\s'\"]*")
+
+
+def _plain(text: str) -> str:
+    """An error sentence for the client with no file-system path in it (a
+    300-character upload name answered "File name too long: '<the whole inbox
+    path>'" — review 9 item 4.7). The full text is in the log."""
+    return _PATHISH.sub("<path>", str(text))[:600]
+
+
+def _str_list(v, field: str, *, cap: int = 5000) -> list[str]:
+    """A list of names/ids off the wire: one string is a list of one, a number
+    is refused in words (`{"tins": 5}` answered 500 TypeError; a 20,000-
+    character `subjects` string was iterated per character and stalled the
+    server for minutes — review 9 item 4.7)."""
+    if v in (None, "", []):
+        return []
+    if isinstance(v, str):
+        v = [v]
+    if not isinstance(v, (list, tuple)) or any(isinstance(x, (dict, list, tuple)) for x in v):
+        raise HTTPException(422, f"{field} must be a list of text values")
+    if len(v) > cap:
+        raise HTTPException(422, f"{field} lists more than {cap:,} values")
+    return [str(x).strip() for x in v if x is not None and str(x).strip()]
+
+
+# a file name the app writes under its own folders: Windows' 260-character
+# path limit bites well before Linux's 255-byte name limit
+MAX_NAME_CHARS = 150
+
+
+def _import_path(body: dict, missing: str) -> str:
+    """A path to a file on this computer, from an import request."""
+    v = body.get("path")
+    if v is not None and not isinstance(v, str):
+        raise HTTPException(422, "path must be text — the location of the file")
+    path = (v or "").strip()
+    if not path:
+        raise HTTPException(422, missing)
+    if len(path) > 1000 or "\x00" in path:
+        raise HTTPException(422, "that is not a file path this computer can open")
+    return path
 
 
 def _qp(request: "Request") -> dict:
@@ -414,17 +856,131 @@ def grain_of(qp: dict, cfg: MrfxConfig, store: Store) -> str:
     return grain if grain in GRAIN_REL else "tin"
 
 
+# "latest" = each CONTRACT's newest month — a contract is a payer x provider x
+# code line, the Benchmark's rule (benchmark._rates_relation). tin_is_really_npi
+# is part of the identity: an EIN and a same-digits npi-typed TIN are different
+# providers and must never supersede each other. The TIN and entity grains read
+# it from the spine's stored is_latest (store.LATEST_PARTITION, the same key).
+# An NPI billing under two TINs holds two contracts, and an NPI's newest month
+# under a TIN can be older than the TIN's (it left the roster), so the NPI
+# grain — live over the raw rows, always narrowed by an exact ID or payer+code
+# — keeps its own window.
+_NPI_LATEST_QUALIFY = ("QUALIFY file_month = max(file_month) OVER "
+                       "(PARTITION BY payer, unit_id, tin_value, tin_is_really_npi, billing_code)")
+
+
 def rel_sql(grain: str, fs: FilterSet) -> str:
-    base = f"WITH base AS ({GRAIN_REL[grain]}) SELECT * FROM base WHERE {fs.where}"
-    if fs.hide_outliers:
-        # The reference median must exclude $0/$0.01 placeholders: with
-        # "dollar rates only" OFF, fs.where no longer strips them, and a
-        # placeholder-heavy code's median collapsed toward $0.01 — the 0.2x-5x
-        # band then hid most REAL rates. And the band is denominated in
-        # dollars, so percentage/per-diem rows (rate ~1.5) must be exempt from
-        # it — hiding them was exactly what unchecking dollar-only asked to
-        # undo.
-        base = f"""
+    """The filtered grain relation. Binds fs.params in bucket order (key, unit,
+    ident, row) — every branch below assembles the WHERE in that order.
+
+    Under "latest" the newest month is decided over the WHOLE contract, never
+    over the rows a filter left: a row filter (rate bounds, modifiers, POS,
+    class, dollar-only, discipline) applied first removed a contract's newest
+    row and promoted a superseded month — rate_max=41 showed May's $40 under
+    'latest' while June's $42 was the payer's current rate. At the TIN and
+    entity grains the spine's stored is_latest IS that whole-contract answer
+    (key/unit/ident filters select whole contracts, so it equals the window
+    over the filtered rows); the NPI grain filters by key/unit/ident first and
+    windows, then applies row filters."""
+    def sub(w: str) -> str:
+        if fs.ident_kind:
+            return w.replace(_IDENT_TOKEN, f"({_ident_clause(grain, fs.ident_kind)})")
+        return w
+    # a selective practice-attribute filter (state, city, a name or partial-ID
+    # search) finds its practices first, then reads only their rows; an exact
+    # ID alone stays a plain spine predicate (pushed into the scan already),
+    # and so does "therapy only" alone (see FilterSet.selective_dims)
+    # ... unless a code filter already narrowed the rows: the join over one
+    # code's rows is cheaper than listing practices first (round 6 A/B at 99M
+    # rates: the Code page with a state 0.54 s joined vs 0.72 s practices-first)
+    by_unit = fs.selective_dims and not fs.codes and grain in ("tin", "entity")
+    if grain == "entity":
+        # member TINs are filtered by contract and practice attributes FIRST —
+        # a state=MO filter keeps the entity's MO TINs, not every TIN of an
+        # entity that has one MO TIN (that showed a MO+KS blend under "MO") —
+        # and, under latest, each member is reduced to ITS newest month before
+        # the member rates are combined
+        if by_unit and fs.has("unit"):
+            inner = _tin_rows_by_unit(fs.where_of("key"), fs.where_of("unit"), fs.latest_only,
+                                      fs.units_rel())
+        else:
+            tin_rel = _TIN_REL_LATEST if fs.latest_only else _TIN_REL
+            inner = f"SELECT * FROM ({tin_rel}) WHERE {fs.where_of('key', 'unit')}"
+        base = (f"SELECT * FROM ({_entity_rel(inner, fs.latest_only)}) "
+                f"WHERE {sub(fs.where_of('ident', 'row'))}")
+    elif by_unit and (fs.has("unit") or not fs.ident_kind):
+        rows = _tin_rows_by_unit(fs.where_of("key"), sub(fs.where_of("unit", "ident")),
+                                 fs.latest_only, fs.units_rel())
+        base = f"WITH base AS ({rows}) SELECT * FROM base WHERE {fs.where_of('row')}"
+    elif fs.latest_only and grain == "tin":
+        base = f"WITH base AS ({_TIN_REL_LATEST}) SELECT * FROM base WHERE {sub(fs.where)}"
+    elif fs.latest_only:
+        pre = sub(fs.where_of("key", "unit", "ident"))
+        base = (f"SELECT * FROM (WITH base AS ({GRAIN_REL[grain]}) SELECT * FROM base "
+                f"WHERE {pre} {_NPI_LATEST_QUALIFY}) "
+                f"WHERE {fs.where_of('row')}")
+    else:
+        base = f"WITH base AS ({GRAIN_REL[grain]}) SELECT * FROM base WHERE {sub(fs.where)}"
+    return _outlier_band(base) if fs.hide_outliers else base
+
+
+# how long a JOINED view's summary strip is reused (a spine-only strip lives
+# for its data generation — see the summary endpoint)
+SUMMARY_TTL_SECONDS = 30.0
+
+
+def spine_where(fs: FilterSet) -> str:
+    """WHERE over the BARE spine (rates_by_tin, no joins) equal to the TIN
+    relation's filter — valid only when no filter touches a joined column
+    (not fs.uses_dim_cols). Binds fs.params."""
+    return f"is_latest AND {fs.where}" if fs.latest_only else fs.where
+
+
+def spine_by_unit_ok(grain: str, fs: FilterSet) -> bool:
+    """Exactly rel_sql's practices-first branch, at the TIN grain."""
+    return (grain == "tin" and fs.selective_dims and not fs.codes
+            and (fs.has("unit") or not fs.ident_kind))
+
+
+def spine_rel_by_unit(fs: FilterSet) -> str:
+    """rel_sql's rows for a practices-first TIN view, spine columns only
+    (+ unit_id). Binds fs.params (key, unit, ident, row)."""
+    w_unit = fs.where_of("unit", "ident")
+    if fs.ident_kind:
+        w_unit = w_unit.replace(_IDENT_TOKEN, f"({_ident_clause('tin', fs.ident_kind)})")
+    return (f"SELECT * FROM ({_spine_rows_by_unit(fs.where_of('key'), w_unit, fs.latest_only, fs.units_rel())}) "
+            f"WHERE {fs.where_of('row')}")
+
+
+def stat_rel(grain: str, fs: FilterSet) -> str:
+    """The relation the AGGREGATE views read — the summary strip and its
+    by-code rows, the Code page's histogram and payer leaderboard, the trend:
+    rel_sql's rows. At the TIN grain with no name/geo/search filter they come
+    straight off the spine: the three LEFT JOINs match at most one row each,
+    so they never add or drop a row, and none of these aggregates reads a
+    joined column — joining names onto every spine row only to count and
+    median the rates was most of their cost. Same rows, same columns used."""
+    if spine_by_unit_ok(grain, fs):
+        base = spine_rel_by_unit(fs)
+        return _outlier_band(base) if fs.hide_outliers else base
+    if grain == "entity" and entity_two_pass_ok(fs):
+        return entity_light_rel(fs)
+    if grain != "tin" or fs.uses_dim_cols:
+        return rel_sql(grain, fs)
+    base = f"SELECT *, tin_value AS unit_id FROM rates_by_tin WHERE {spine_where(fs)}"
+    return _outlier_band(base) if fs.hide_outliers else base
+
+
+def _outlier_band(base: str) -> str:
+    """`base` without rows >5x or <0.2x of their code's median within it.
+
+    The reference median must exclude $0/$0.01 placeholders: with "dollar
+    rates only" OFF, the filter no longer strips them, and a placeholder-heavy
+    code's median collapsed toward $0.01 — the 0.2x-5x band then hid most REAL
+    rates. And the band is denominated in dollars, so percentage/per-diem rows
+    (rate ~1.5) must be exempt from it — hiding them was exactly what
+    unchecking dollar-only asked to undo."""
+    return f"""
         WITH filtered AS ({base}),
         med AS (
             SELECT billing_code, median(negotiated_rate) AS m
@@ -435,22 +991,52 @@ def rel_sql(grain: str, fs: FilterSet) -> str:
         WHERE NOT is_dollar_rate OR m IS NULL
            OR (negotiated_rate <= 5 * m AND negotiated_rate >= 0.2 * m)
         """
-    return base
 
 
-def order_sql(sort: str, direction: str) -> str:
+def practice_basis(fs: FilterSet) -> tuple[str, str]:
+    """(SQL predicate, plain-words label) for "a practice's rate" in the
+    Code page's payer leaderboard and the summary's by-code strip — the
+    Benchmark's basis (benchmark._market_where), so the same store and month
+    give the same median on every screen: dollar rates without $0/$0.01
+    placeholders, no NPI-in-the-TIN-slot rows, professional class and base
+    modifiers — unless the user's own filter picked a class or a modifier,
+    which then wins (the relation is already restricted to it)."""
+    preds = ["is_dollar_rate", "negotiated_rate > 0.01", "NOT tin_is_really_npi"]
+    notes = ["dollar rates (no $0/$0.01 placeholders)", "no NPI-in-the-TIN-slot rows"]
+    if "billing_class" not in fs.described:
+        preds.append("billing_class = 'professional'")
+        notes.append("professional class")
+    if not any(k == "modifier" or k.startswith(("mod_has:", "mod_not:")) for k in fs.described):
+        preds.append(base_sql("modifier_set"))
+        notes.append(BASE_RULE_TEXT)
+    return " AND ".join(preds), "; ".join(notes)
+
+
+# The tiebreaker must be a TOTAL order over the grain's row identity:
+# LIMIT/OFFSET pages are independent queries, and DuckDB (with
+# preserve_insertion_order off) may order still-tied rows differently per page —
+# rows silently duplicated on one page and MISSING from another. Multi-month
+# stores are tie-dense (a TIN's rate for a code is usually unchanged month over
+# month), so every identity column joins the order. tin_value + negotiated_rate
+# complete it: at NPI grain an NPI under two TINs ties on every other key (an
+# export came back ...13 before ...12 on one run, and a paged view could show
+# one twice and drop the other).
+_ORDER_TIEBREAK = ("unit_id", "billing_code", "modifier_set", "payer", "file_month",
+                   "billing_class", "service_code_set", "is_dollar_rate", "tin_value",
+                   "tin_is_really_npi", "negotiated_rate")
+
+
+def order_sql(sort: str, direction: str, src: str = "") -> str:
+    """`src` qualifies every column ("src."): the export's select list re-uses
+    the names unit_id / tin_value / payer for MASKED or formula-defused values,
+    and an unqualified ORDER BY binds to those aliases — every SSN-pattern TIN
+    then tied as 'MASKED-SSN' and the export came out in thread order, a
+    different file on each download (and not the screen's order)."""
     if sort not in SORTABLE:
         sort = "negotiated_rate"
     direction = "ASC" if direction.lower() == "asc" else "DESC"
-    # The tiebreaker must be a TOTAL order over the grain's row identity:
-    # LIMIT/OFFSET pages are independent queries, and DuckDB (with
-    # preserve_insertion_order off) may order still-tied rows differently per
-    # page — rows silently duplicated on one page and MISSING from another.
-    # Multi-month stores are tie-dense (a TIN's rate for a code is usually
-    # unchanged month over month), so every identity column joins the order.
-    return (f"ORDER BY {sort} {direction} NULLS LAST, unit_id ASC, billing_code ASC, "
-            "modifier_set ASC, payer ASC, file_month ASC, billing_class ASC, "
-            "service_code_set ASC, is_dollar_rate ASC")
+    return (f"ORDER BY {src}{sort} {direction} NULLS LAST, "
+            + ", ".join(f"{src}{c} ASC" for c in _ORDER_TIEBREAK))
 
 
 def _mask_tin_sql(col: str) -> str:
@@ -486,7 +1072,7 @@ def _as_int(v, default: int) -> int:
         return default
     try:
         return int(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):   # int(inf), int("x"), int([])
         raise BenchmarkError(f"expected a whole number, got {v!r}")
 
 
@@ -498,13 +1084,37 @@ def _bounded_int(v, default, lo, hi):
     return max(lo, min(_as_int(v, default), hi))
 
 
+def _radius_arg(v) -> float | None:
+    """A radius off the wire: finite, 0.1–500 miles; absent -> None. "NaN"
+    parsed as a float and failed deep in the query (a 500 — review 10)."""
+    if v in (None, "", 0):
+        return None
+    return max(0.1, min(_as_float(v, 25.0), 500.0))
+
+
 def _as_float(v, default):
     if v is None or v == "":
         return default
     try:
-        return float(v)
+        x = float(v)
     except (TypeError, ValueError):
         raise BenchmarkError(f"expected a number, got {v!r}")
+    if math.isnan(x) or math.isinf(x):        # "NaN" / 1e999 parse as floats
+        raise BenchmarkError(f"expected a finite number, got {v!r}")
+    return x
+
+
+def _comparables_arg(v) -> list[str] | None:
+    """Comparable practices off the wire: a LIST of names. A bare string used
+    to be iterated letter by letter ("Acme" -> columns A, c, m, e) and a
+    number raised TypeError (HTTP 500) in the proposal endpoints."""
+    if v in (None, "", []):
+        return None
+    if not isinstance(v, list):
+        raise BenchmarkError("comparables must be a list of practice names, "
+                             'e.g. ["Acme PT", "431234567"]')
+    out = [str(c).strip() for c in v if c is not None and str(c).strip()]
+    return out or None
 
 
 def _state_arg(v):
@@ -547,16 +1157,125 @@ def export_select(grain: str, fs: FilterSet, sort: str, direction: str) -> tuple
                {d('schema_version')} AS schema_version,
                source_count,
                {d('source_files')} AS source_files
-        FROM ({rel_sql(grain, fs)}) {order_sql(sort, direction)}
+        FROM ({rel_sql(grain, fs)}) src {order_sql(sort, direction, "src.")}
     """
     return sql, fs.params
+
+
+def outreach_methodology(store: Store, grain: str, fs: FilterSet, market: dict) -> str:
+    """The outreach file's OWN methodology (review 9 item 4.8). It reused the
+    Explorer's, which described a different file: "one row per payer x
+    billing_code x entity x … x month" and "ALL months pooled" above columns
+    that are one row per organization on the latest month — and it listed a
+    billing_class filter as if it changed numbers that stay professional.
+    Here the dashboard's filters choose WHICH organizations are listed; the
+    basis of every number is stated once."""
+    from .outreach import OUTREACH_COLUMNS_NOTE
+    month = market.get("month") or "latest"
+    payers = market.get("payers") or []
+    with store.connect() as con:
+        # the month each file is FILED under (file_month — what every number
+        # is grouped by), not the header's date (review 10 item 3.13)
+        files = con.execute(
+            "SELECT filename, payer, file_month "
+            "FROM files WHERE status = 'done' AND file_type = 'in_network' "
+            "ORDER BY filename").fetchall()
+    unit = "organization (entity)" if grain == "entity" else "billing tax ID (TIN)"
+    return "\n".join([
+        f"MRF Explorer v{__version__} outreach file methodology",
+        f"Generated: {dt.datetime.now(dt.timezone.utc).isoformat()}",
+        f"Rows: one row per {unit}, with its name, address and contact fields and "
+        "per-code columns. One row per organization — not one per payer, code or month.",
+        "Which organizations are listed: those with at least one published rate "
+        "matching the dashboard's filters at export time "
+        f"({filters_in_words(fs.described)}). These filters choose the LIST; "
+        "they do not change the numbers below.",
+        "The numbers (every C<code>_* column) are on one basis: "
+        + ("the newest published month of each payer's contract (latest)"
+           if str(month).lower() == "latest" else f"the published month {month}")
+        + (f", payers {', '.join(payers)}" if payers else ", every payer")
+        + ", dollar rates, base modifiers, professional claims, $0/$0.01 "
+        "placeholders excluded — whatever class, modifier or outlier filter "
+        "chose the list.",
+        "",
+        OUTREACH_COLUMNS_NOTE,
+        "",
+        "SSN-pattern tax IDs are masked. Names and addresses come from NPPES.",
+        *store.analytics_note(),
+        "Rate files in the store at export time: "
+        + ("; ".join(f"{f[0]} ({f[1]}, month {f[2]})" for f in files) or "none"),
+        "Caveats: a negotiated rate is not per-visit revenue (timed 15-minute "
+        "units, MPPR, CQ/CO reductions, cost-share); payers publish rates for "
+        "codes a practice never bills; a published rate is not proof of collection.",
+    ])
+
+
+_FILTER_WORDS = {
+    "payers": "payers", "codes": "codes", "disciplines": "disciplines",
+    "modifier": "modifiers", "billing_class": "billing class",
+    "place_of_service": "place of service", "state": "state", "city": "city",
+    "as_of_month": "month", "search": "search text",
+    "dollar_rates_only": "dollar rates only", "hide_tin_is_really_npi":
+    "hide NPI-in-the-tax-ID-slot rows", "therapy_practices_only": "therapy practices only",
+    "hide_outliers": "hide outliers",
+}
+
+
+def filters_in_words(described: dict) -> str:
+    """The Explorer's filters as a sentence for an export sidecar — it printed
+    raw JSON (review 10 item 3.13)."""
+    out = []
+    for k, v in described.items():
+        label = _FILTER_WORDS.get(k)
+        if label is None and k.startswith(("mod_has:", "mod_not:")):
+            label = ("modifier must include " if k.startswith("mod_has:")
+                     else "modifier must not include ") + k.split(":", 1)[1]
+            out.append(label)
+            continue
+        if isinstance(v, bool):
+            v = "yes" if v else "no"
+        elif isinstance(v, (list, tuple)):
+            v = ", ".join(str(x) for x in v)
+        out.append(f"{label or k.replace('_', ' ')}: {v}")
+    return "; ".join(out) or "none"
+
+
+SLOW_CALL_LOG_SECONDS = 5.0
+
+
+def _log_if_slow(label: str):
+    """Log a call slower than SLOW_CALL_LOG_SECONDS to serve.log: the 38-60 s
+    first /api/stats seen twice in round 10 left no trace (review 12 4.1i)."""
+    import functools
+
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*a, **k):
+            t0 = time.monotonic()
+            try:
+                return fn(*a, **k)
+            finally:
+                took = time.monotonic() - t0
+                if took > SLOW_CALL_LOG_SECONDS:
+                    log.warning("%s took %.1f s", label, took)
+        return wrapper
+    return deco
+
+
+def _pooled_line(store: Store) -> str | None:
+    """The pooled-months sentence (review 12 item 2.5); cosmetic tier."""
+    try:
+        from .quality import pooled_files_sentence, pooled_month_files
+        return pooled_files_sentence(pooled_month_files(store))
+    except Exception:  # noqa: BLE001 — a methodology line never fails an export
+        return None
 
 
 def methodology_text(cfg: MrfxConfig, store: Store, grain: str, fs: FilterSet,
                      sort: str, direction: str, view: str) -> str:
     with store.connect() as con:
         files = con.execute(
-            "SELECT filename, payer, substr(coalesce(last_updated_on, ''), 1, 7), "
+            "SELECT filename, payer, file_month, "
             "last_updated_on FROM files WHERE status = 'done' "
             "AND file_type = 'in_network' ORDER BY filename"
         ).fetchall()
@@ -564,20 +1283,34 @@ def methodology_text(cfg: MrfxConfig, store: Store, grain: str, fs: FilterSet,
         f"MRF Explorer v{__version__} export methodology — view: {view}",
         f"Generated: {dt.datetime.now(dt.timezone.utc).isoformat()}",
         f"Grain: {grain} (one row per payer x billing_code x {grain} x modifier-set x class x POS-set x month)",
-        f"Filters: {json.dumps(fs.described, default=str)}",
+        "Month (file_month): the payer's own date in the file (header last_updated_on), "
+        "else the date in the file name, else the month the file was read. A header "
+        "dated AFTER the file was read is not trusted: the file is filed under its "
+        "name's month (or the month read) and its Files-tab line says so. Payers' "
+        "clocks differ — one payer's October files can carry an August date — so a "
+        "pinned month compares payers' own statements of vintage.",
+        f"Filters: {filters_in_words(fs.described)}.",
         f"Sort: {sort} {direction}",
         "Dedup rule: distinct negotiated facts per grain tuple. A TIN rate is the "
         "median of its distinct published values EXCLUDING $0/$0.01 dollar "
         "placeholders (rate_variants still counts them, and rate_min/rate_max "
         "still show them); an ENTITY rate is the median of its member TINs' "
-        "rates, and entity npi_count/source_count sum members (an NPI shared by "
-        "two member TINs counts twice).",
+        "rates (under 'latest', each member TIN at ITS newest month); an entity "
+        "is an organization (NPI-2) name plus the practice's main state (where "
+        "most of its NPIs are), a TIN named only after a clinician is its own "
+        "entity, and entity_map.yaml overrides both; entity npi_count sums members (an NPI listed under two member TINs "
+        "counts twice); entity source_count counts distinct files (exact when "
+        "each member's line comes from one file, otherwise a minimum); entity "
+        "rate_variants = how many different member-TIN rates the median is over.",
         f"Outlier handling: {fs.described.get('hide_outliers')}",
         # honesty: with no month filter the grain keeps each file_month as its
         # own row, so a rate republished monthly appears once per month and the
         # medians/counts pool every vintage. Say so, or an exported median reads
         # as one number when it blends several months.
-        ("As-of month: " + str(fs.described["as_of_month"]) + " (only this month's rates)."
+        ("As-of month: latest — each contract's NEWEST ingested month only "
+         "(an older month's rate a payer has since republished is superseded)."
+         if fs.described.get("as_of_month") == "latest" else
+         "As-of month: " + str(fs.described["as_of_month"]) + " (only this month's rates)."
          if "as_of_month" in fs.described else
          "As-of month: ALL months pooled (no month filter was set) — a rate "
          "republished across months is counted once per month, so these "
@@ -586,8 +1319,12 @@ def methodology_text(cfg: MrfxConfig, store: Store, grain: str, fs: FilterSet,
         "Non-dollar negotiated_type rows (percentage, per diem) are excluded when "
         f"dollar_rates_only is true (currently: {fs.described.get('dollar_rates_only')}).",
         "SSN-pattern TINs are masked in every export.",
+        MODIFIER_INGEST_NOTE,
         "Per-row provenance: source_files names ONE representative file per row; "
         "source_count is the number of distinct files behind that row.",
+        *([_pooled] if (_pooled := _pooled_line(store)) else []),
+        *store.analytics_note(),
+        PRACTICE_RATE_RULE,
         "Rate files in the store at export time (the export above draws on the "
         "subset matching its filters, NOT necessarily all of these): "
         f"{'; '.join(f'{f[0]} ({f[1]}, month {f[2]}, updated {f[3]})' for f in files) or 'none'}",
@@ -607,6 +1344,96 @@ def _mask_row_tins(rows: list[dict]) -> list[dict]:
         # unit_id stays raw in JSON — it is the drill-down key, never displayed;
         # the UI renders display_name + the masked tin_value column instead.
     return rows
+
+
+# Export sizing (round 7 P1.1). Measured on the named store: the all-latest
+# CSV is 342 MB for 1.41M rows = 243 bytes a row. A ZIP needs the CSV AND the
+# archive on disk at once; DEFLATE takes a rate CSV to well under a quarter.
+EXPORT_BYTES_PER_ROW = 243
+EXPORT_ZIP_FACTOR = 1.25
+# never fill the drive to the last byte: the store, its spill and Windows
+# itself live there too
+EXPORT_FREE_HEADROOM = 1 << 30
+_BOM = b"\xef\xbb\xbf"
+
+
+class ExportSpaceError(Exception):
+    """Not enough free space for an export — a plain sentence for the user."""
+
+
+def _export_dir(store) -> Path:
+    """Exports are built in the STORE's temp folder (the drive the user put
+    the data on, already chosen for free space) — never the system temp
+    folder: %LOCALAPPDATA%\\Temp is on C: whatever drive the store is on, and
+    a whole-store export is tens of GB."""
+    d = Path(store._tmp_dir) / "exports"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _safe_view(view) -> str:
+    """`view` names the download (Content-Disposition) and the ZIP members:
+    letters, digits, - and _ only, 40 at most (audit 8 P2-G — a quote or a
+    newline in it broke the header and the archive names)."""
+    v = re.sub(r"[^A-Za-z0-9_-]+", "", str(view or ""))[:40]
+    return v or "explorer"
+
+
+def _sweep_stale_exports(store, older_than_s: float = 6 * 3600) -> None:
+    """A killed server leaves its half-built export behind; one sweep at
+    start-up. Only OLD files: a second app on the same store (tests, a
+    double-click) may be streaming one right now. Cosmetic tier."""
+    try:
+        now = time.time()
+        for f in _export_dir(store).glob("*mrfx-export-*"):
+            try:
+                if now - f.stat().st_mtime > older_than_s:
+                    f.unlink()
+            except OSError:
+                continue
+    except OSError:
+        pass
+
+
+def _export_need(rows: int, factor: float, memory_bytes: float) -> int:
+    """Bytes an export of `rows` needs on the temp drive: the CSV (x1.25 for
+    a ZIP, which holds the CSV and the archive at once) plus, when the sorted
+    result cannot be held in memory, DuckDB's sort spill — about the data
+    size again, in the SAME folder (measured on the 99M store: a 7.2 GB
+    export failed with 9 GB free, the spill and the CSV together)."""
+    csv_bytes = rows * EXPORT_BYTES_PER_ROW
+    spill = csv_bytes if csv_bytes > memory_bytes / 2 else 0
+    return int(csv_bytes * factor + spill)
+
+
+def _check_export_space(where: Path, rows: int, factor: float = 1.0,
+                        memory_bytes: float = 4e9) -> int:
+    """Refuse BEFORE writing when the export cannot fit. Returns the estimate."""
+    need = _export_need(rows, factor, memory_bytes)
+    try:
+        free = shutil.disk_usage(where).free
+    except OSError:
+        return need          # can't tell — let the write itself report it
+    if need + EXPORT_FREE_HEADROOM > free:
+        raise ExportSpaceError(
+            f"This export needs about {_gb(need)} of working space ({rows:,} rows), "
+            "but the drive that "
+            f"holds the program's temporary folder ({where}) has only {_gb(free)} free "
+            "(1 GB is always left for the database and Windows). Narrow the export "
+            "with the filters (a state, a payer or a few codes), or free space on that "
+            "drive — or point `duckdb_temp_dir:` in config/mrfx.yaml at a drive with "
+            "more room — and try again.")
+    return need
+
+
+def _gb(n: float) -> str:
+    return f"{n / 1e9:.1f} GB" if n >= 1e8 else f"{n / 1e6:.0f} MB"
+
+
+def _is_disk_full(e: BaseException) -> bool:
+    t = str(e).lower()
+    return ("no space left" in t or "disk full" in t or "not enough space" in t
+            or "could not write file" in t or getattr(e, "errno", None) == 28)
 
 
 def _bg_safe(fn, *args) -> None:
@@ -629,6 +1456,175 @@ def _fs(qp: dict) -> FilterSet:
         raise HTTPException(422, str(e))
 
 
+# The dashboard is served on the user's own machine, to the user's own
+# browser. Any other web page that browser opens can still SEND requests to
+# localhost: a cross-site <form> or a no-cors fetch is a CORS "simple
+# request" that goes out without a preflight, so the server ran it and only
+# the reply was hidden — a drive-by page could drop a file into the ingest
+# pipeline (overwriting a real payer's rates by filename), replace the
+# Medicare anchor, queue the whole catalog or wipe the queue; a DNS-rebinding
+# page could also READ everything. Round 7 P1.16: every request must name
+# this machine in its Host header, and a state-changing request that carries
+# an Origin must come from this same origin. Requests without an Origin (the
+# CLI's hand-off, scripts, tests) are unaffected.
+TRUSTED_HOSTS = {"localhost", "127.0.0.1", "::1"}
+_UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+class LocalOnlyMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1")
+                   for k, v in scope.get("headers") or []}
+        host = headers.get("host", "")
+        hostname = host.rsplit(":", 1)[0] if not host.startswith("[") else host[1:].split("]")[0]
+        why = None
+        if hostname.lower() not in TRUSTED_HOSTS:
+            why = "this dashboard only answers requests addressed to this computer (localhost)"
+        elif scope.get("method", "GET").upper() in _UNSAFE_METHODS:
+            origin = headers.get("origin")
+            site = headers.get("sec-fetch-site", "")
+            same = origin is None or origin.lower() in (
+                f"http://{host}".lower(), f"https://{host}".lower())
+            if not same or site == "cross-site":
+                why = ("changes can only be made from this dashboard's own page — "
+                       "a request from another web site was refused")
+        if why is None:
+            return await self.app(scope, receive, send)
+        body = json.dumps({"detail": why}).encode()
+        await send({"type": "http.response.start", "status": 403,
+                    "headers": [(b"content-type", b"application/json"),
+                                (b"content-length", str(len(body)).encode())]})
+        await send({"type": "http.response.body", "body": body})
+
+
+def _part_swap_race(exc: BaseException) -> bool:
+    """A read that met a rates part being swapped under it (review 11 item
+    1.8): DuckDB reads a part's footer when it plans a query and opens the
+    path again to scan it — a re-ingest replacing that part in between gives
+    "Parquet file is likely corrupted, dictionary offset out of range" (one
+    version's footer with the other's bytes). The rows are never wrong; the
+    question just has to be asked again."""
+    import duckdb
+    if not isinstance(exc, duckdb.Error):
+        return False
+    low = str(exc).lower()
+    return any(k in low for k in (
+        "likely corrupted", "dictionary offset", "invalid magic", "no magic bytes",
+        "parquet file is", "could not open file", "no such file or directory"))
+
+
+class SwapRetryMiddleware:
+    """Ask a dashboard question again, once, when it lost a race with a part
+    swap (`_part_swap_race`). Only before any byte of the answer was sent,
+    and only for requests whose body is small enough to replay (never an
+    upload)."""
+    REPLAY_MAX = 1 << 20
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1")
+                   for k, v in scope.get("headers") or []}
+        try:
+            clen = int(headers.get("content-length") or 0)
+        except ValueError:
+            clen = self.REPLAY_MAX + 1
+        if clen > self.REPLAY_MAX or "multipart" in headers.get("content-type", ""):
+            return await self.app(scope, receive, send)
+        body = b""
+        more = True
+        while more:
+            msg = await receive()
+            if msg["type"] != "http.request":
+                return await self.app(scope, receive, send)
+            body += msg.get("body", b"")
+            more = msg.get("more_body", False)
+        for attempt in (0, 1):
+            started = False
+            delivered = False
+
+            async def replay():
+                nonlocal delivered
+                if not delivered:
+                    delivered = True
+                    return {"type": "http.request", "body": body, "more_body": False}
+                return await receive()
+
+            async def tracked(message):
+                nonlocal started
+                if message["type"] == "http.response.start":
+                    started = True
+                await send(message)
+            try:
+                return await self.app(scope, replay, tracked)
+            except Exception as e:  # noqa: BLE001 — re-raised unless it is the race
+                if attempt or started or not _part_swap_race(e):
+                    raise
+                log.info("%s: a rates part was swapped during the query — asking again",
+                         scope.get("path"))
+
+
+class ProgressMiddleware:
+    """A request carrying `X-Mrfx-Progress: <token>` (or `?progress=<token>`,
+    the iframe downloads) gets a Progress registered under the token and set
+    as the current one for the request's context — the sync route runs in a
+    worker thread that inherits the context (anyio copies it), and the route's
+    `_progress_route` decorator gives it its plan and finishes it. A request
+    without a token passes through untouched (review 13 Group 2)."""
+
+    def __init__(self, app, registry=None):
+        self.app = app
+        self.registry = registry
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or self.registry is None:
+            return await self.app(scope, receive, send)
+        token = None
+        try:
+            for k, v in scope.get("headers") or []:
+                if k.lower() == b"x-mrfx-progress":
+                    token = v.decode("latin-1").strip()
+                    break
+            if token is None and scope.get("query_string"):
+                from urllib.parse import parse_qs
+                got = parse_qs(scope["query_string"].decode("latin-1")).get("progress")
+                token = got[0] if got else None
+        except Exception:  # noqa: BLE001
+            token = None
+        if not token or not _progress.TOKEN_RE.match(token):
+            return await self.app(scope, receive, send)
+        try:
+            p = _progress.Progress(token)
+            self.registry.add(p)
+        except Exception:  # noqa: BLE001 — the bar is cosmetic: answer without it
+            return await self.app(scope, receive, send)
+        ctx_tok = _progress.set_current(p)
+        status = {"code": 0}
+
+        async def tracked(message):
+            if message["type"] == "http.response.start":
+                status["code"] = message.get("status", 0)
+            await send(message)
+        try:
+            await self.app(scope, receive, tracked)
+        except BaseException:
+            p.finish("stopped" if p.cancelled else "failed")
+            raise
+        finally:
+            _progress.reset_current(ctx_tok)
+            if p.ended is None:      # a route without the decorator
+                p.finish("done" if 0 < status["code"] < 400 else
+                         ("stopped" if p.cancelled or status["code"] == 409 else "failed"))
+
+
 def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     # Startup work is collected here and run by the lifespan handler below.
     # `@app.on_event("startup")` is deprecated and slated for removal, but the
@@ -646,8 +1642,127 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         yield
 
     app = FastAPI(title="MRF Explorer", docs_url="/api/docs", lifespan=lifespan)
+    progress_registry = _progress.Registry()
+    app.state.progress_registry = progress_registry
+    app.add_middleware(ProgressMiddleware, registry=progress_registry)
+    app.add_middleware(SwapRetryMiddleware)
+    app.add_middleware(LocalOnlyMiddleware)
+
+    def _progress_route(plan: str):
+        """Mark an output route (review 13 Group 2): with a token the run gets
+        its plan, a Stop answers 409 "stopped" and never a partial document,
+        and the run is finished when the body is built. Without a token it is
+        a plain call — the same bytes (test_progress pins it)."""
+        def deco(fn):
+            @functools.wraps(fn)
+            def wrapper(*a, **k):
+                p = _progress.current()
+                if p is _progress._NOOP:
+                    return fn(*a, **k)
+                try:
+                    if p.ended is not None and not p.cancelled:   # SwapRetry asked again
+                        p.state, p.ended = "running", None
+                    p.label = p.label or plan
+                    p.plan_from(plan)
+                    if p.plan and p._stage_i < 0:
+                        p.stage(p.plan[0][0])     # the bar moves from the first word
+                except Exception:  # noqa: BLE001
+                    pass
+
+                def stopped():
+                    p.finish("stopped", "stopped by you"
+                             if getattr(p, "cancel_reason", "") != "superseded" else "superseded")
+                    if getattr(p, "cancel_reason", "") == "superseded":
+                        return HTTPException(409, "superseded by a newer search")
+                    return HTTPException(409, "stopped")
+                try:
+                    out = fn(*a, **k)
+                except HTTPException:
+                    if p.cancelled:
+                        raise stopped() from None
+                    p.finish("failed")
+                    raise
+                except Exception:
+                    if p.cancelled:
+                        raise stopped() from None
+                    p.finish("failed")
+                    raise
+                if p.cancelled:
+                    # a built file the Stop keeps from being sent is not kept
+                    # either (review 14 Group 3: the zip stayed 6 h in temp)
+                    path = getattr(out, "path", None)
+                    if path:
+                        try:
+                            Path(path).unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                    raise stopped()
+                p.finish("done")
+                return out
+            wrapper._mrfx_progress = plan
+            return wrapper
+        return deco
+
+    def _html_or_pdf(html: str, fmt: str, base: str, headers: dict | None = None):
+        """A printable report as its HTML page, or — `?format=pdf` — printed
+        to PDF by the optional headless browser (review 13 Group 6.1). No
+        browser is a 422 sentence: the HTML is still one click away."""
+        # invariant 4 at the last step: no SSN-pattern tax ID in a report's
+        # page, its title or the PDF printed from it (review 14 item 2.5)
+        from .store import mask_ssn_text
+        html = mask_ssn_text(html)
+        if str(fmt or "").lower() != "pdf":
+            return HTMLResponse(html, headers=headers or None)
+        from fastapi.responses import Response
+
+        from .pdf import FAILED, PdfRefused, PdfUnavailable, html_to_pdf
+        try:
+            data = html_to_pdf(cfg, html)
+        except (PdfUnavailable, PdfRefused) as e:
+            raise HTTPException(422, str(e))
+        except _progress.Stopped:
+            raise
+        except Exception as e:  # noqa: BLE001 — a print failure is a sentence, never a bare 500
+            log.exception("PDF print failed")
+            raise HTTPException(422, FAILED.format(why=type(e).__name__))
+        name = f"{base}_{dt.date.today().isoformat()}.pdf"
+        return Response(data, media_type="application/pdf", headers={
+            "Content-Disposition": f'attachment; filename="{name}"', **(headers or {})})
+
+    @app.get("/api/progress/{token}")
+    async def progress_poll(token: str):
+        """How far a run is (review 13 Group 2). async on purpose: it must
+        answer while every worker thread is busy — it reads one in-memory
+        object under a lock held for microseconds, never the store."""
+        if not _progress.TOKEN_RE.match(token or ""):
+            raise HTTPException(422, "not a progress token")
+        p = progress_registry.get(token)
+        if p is None:
+            raise HTTPException(404, "unknown run (never started, or finished a minute ago)")
+        return p.snapshot()
+
+    @app.delete("/api/progress/{token}")
+    async def progress_stop(token: str):
+        """Stop a run: its running statement is interrupted and it opens no
+        other; the request answers 409 "stopped". Idempotent."""
+        if not _progress.TOKEN_RE.match(token or ""):
+            raise HTTPException(422, "not a progress token")
+        p = progress_registry.get(token)
+        if p is None:
+            raise HTTPException(404, "unknown run")
+        if p.ended is not None and not p.cancelled:
+            # it already finished: the Stop changed nothing (review 14 Group 3,
+            # P3 — it answered {"stopped": true} and the document arrived)
+            return {"stopped": False, "state": p.state}
+        p.cancel("stopped")
+        return {"stopped": True}
     registry = Registry(cfg)
     sync_entity_map(cfg, store)
+    try:   # the code list loaded files are compared with (review 13 item 5.2.4)
+        from .ingest import code_set_key
+        store.stamp_code_sets(code_set_key(cfg))
+    except Exception:  # noqa: BLE001
+        log.debug("code list not stamped", exc_info=True)
     if cfg.mpfs_path and Path(cfg.mpfs_path).exists():
         try:
             _load_mpfs_csv(store, Path(cfg.mpfs_path).read_bytes(), str(cfg.mpfs_path))
@@ -656,6 +1771,71 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 "mpfs_path %s could not be loaded — %% -of-Medicare anchors are "
                 "off until the file is fixed (code,locality,non_facility_rate)",
                 cfg.mpfs_path)
+
+    # every practice of the spine, once per spine generation (review 10 1.3)
+    def _units_rel():
+        try:
+            if store.rollups_stale():
+                return None
+            return store.spine_materialised(
+                "spine_units_v1", "SELECT DISTINCT tin_value, tin_is_really_npi FROM rates_by_tin")
+        except Exception:  # noqa: BLE001 — an optimisation never fails a search
+            log.debug("practice list unavailable", exc_info=True)
+            return None
+
+    def _fs_app(qp: dict) -> FilterSet:
+        fs = _fs(qp)
+        fs.units_provider = _units_rel
+        return fs
+
+    # one running query per (page, view) — review 10 item 1.1. The page sends
+    # X-Mrfx-View: <page id>:<view>; a newer request under the same key
+    # interrupts the older one's DuckDB statement (its answer would be thrown
+    # away by the page anyway) so superseded scans never pile up.
+    _views: dict[str, dict] = {}
+    _views_lock = threading.Lock()
+
+    class _Superseded(Exception):
+        pass
+
+    @contextlib.contextmanager
+    def _view_query(request: Request, con):
+        key = request.headers.get("x-mrfx-view")
+        if not key:
+            yield lambda: None
+            return
+        me = {"con": con, "dead": False, "p": _progress.current()}
+        with _views_lock:
+            old = _views.get(key)
+            _views[key] = me
+            if len(_views) > 256:
+                for k in [k for k, v in _views.items() if v is not me][:128]:
+                    _views.pop(k, None)
+        if old is not None:
+            old["dead"] = True
+            # the older run's Progress (when it has one) is cancelled — that
+            # interrupts every connection it opened, not only this one — and
+            # its own connection is interrupted as before (one mechanism)
+            if old.get("p") is not None and old["p"] is not _progress._NOOP:
+                old["p"].cancel("superseded")
+            try:
+                old["con"].interrupt()
+            except Exception:  # noqa: BLE001
+                pass
+
+        def alive():
+            if me["dead"]:
+                raise _Superseded()
+        try:
+            yield alive
+        except duckdb.InterruptException:
+            raise HTTPException(409, "superseded by a newer search")
+        except _Superseded:
+            raise HTTPException(409, "superseded by a newer search")
+        finally:
+            with _views_lock:
+                if _views.get(key) is me:
+                    _views.pop(key, None)
 
     # -- rates table ---------------------------------------------------------
 
@@ -680,12 +1860,14 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         `1 AS tin_count` (sorting the base table by it was a BinderException →
         500). Every other ORDER BY tiebreaker is a base rates_by_tin column, so
         the page — and its order — is byte-identical to the full-join query,
-        just far cheaper."""
+        just far cheaper. "Latest" qualifies too: it is the spine's own stored
+        is_latest column (store.SPINE_QUERY), see spine_where."""
         return (grain == "tin" and not fs.hide_outliers
                 and not fs.uses_dim_cols and sort not in ("display_name", "tin_count"))
 
     def _filtered_count(con, grain: str, fs: FilterSet) -> int:
-        key = (grain, fs.where, tuple(fs.params), fs.hide_outliers, store.data_generation)
+        key = (grain, fs.where, tuple(fs.params), fs.hide_outliers, fs.latest_only,
+               store.data_generation)
         hit = _count_cache.get(key)
         now = time.monotonic()
         if hit is not None and now - hit[0] < _COUNT_TTL:
@@ -696,7 +1878,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         # (indexed on the materialized table) and needs no single-flight.
         if _tin_late_join_ok(grain, fs, "negotiated_rate"):
             total = con.execute(
-                f"SELECT count(*) FROM rates_by_tin WHERE {fs.where}", fs.params).fetchone()[0]
+                f"SELECT count(*) FROM rates_by_tin WHERE {spine_where(fs)}",
+                fs.params).fetchone()[0]
             _count_cache[key] = (now, total)
             return total
         # The heavy path (entity/NPI grain, or dim-filtered) is a full-store
@@ -704,6 +1887,11 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         # cold cache don't each launch a whole-store scan (a stampede that
         # thrashes the HDD at 300M rows). One computes; the rest serve the last
         # value (or wait) rather than piling on.
+        # a practices-first view is counted off the spine (the joins
+        # match at most one row each: same count)
+        count_rel = (spine_rel_by_unit(fs) if spine_by_unit_ok(grain, fs) and not fs.hide_outliers
+                     else entity_light_rel(fs) if grain == "entity" and entity_two_pass_ok(fs)
+                     else rel_sql(grain, fs))
         if not _count_lock.acquire(blocking=False):
             if hit is not None:
                 return hit[1]
@@ -712,7 +1900,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 if hit is not None and time.monotonic() - hit[0] < _COUNT_TTL:
                     return hit[1]
                 total = con.execute(
-                    f"SELECT count(*) FROM ({rel_sql(grain, fs)})", fs.params).fetchone()[0]
+                    f"SELECT count(*) FROM ({count_rel})", fs.params).fetchone()[0]
                 _count_cache[key] = (time.monotonic(), total)
                 return total
         try:
@@ -720,7 +1908,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             if hit is not None and time.monotonic() - hit[0] < _COUNT_TTL:
                 return hit[1]
             total = con.execute(
-                f"SELECT count(*) FROM ({rel_sql(grain, fs)})", fs.params).fetchone()[0]
+                f"SELECT count(*) FROM ({count_rel})", fs.params).fetchone()[0]
             if len(_count_cache) > 512:
                 _count_cache.clear()  # crude but fine: keys churn as filters change
             _count_cache[key] = (time.monotonic(), total)
@@ -728,17 +1916,68 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         finally:
             _count_lock.release()
 
+    # NPI and entity grains are LIVE aggregations over the whole store (the NPI
+    # dedup, the entity rollup): ORDER BY … LIMIT 100 still aggregates every
+    # row a filter can't remove first. Measured on a 306M-row store:
+    #   NPI view    exact NPI/TIN search 0.6-1.2 s · payer+code 2-3 s ·
+    #               code only 30-41 s · payer only 51 s · name search / no
+    #               filter: out of temp disk after ~30 s
+    #   Entity view payer+code 3.5 s · code only / TIN search / no filter:
+    #               out of temp disk (membership resolves after aggregation)
+    # On a big store, ask for a filter that keeps it fast instead of a long
+    # hang that ends in a 500. Small stores are unaffected (NARROW_REQUIRED_ROWS).
+    def _require_narrowing(grain: str, fs: FilterSet) -> None:
+        if grain not in ("npi", "entity"):
+            return
+        d = fs.described
+        payer_and_code = bool(d.get("payers")) and bool(d.get("codes"))
+        if payer_and_code or (grain == "npi" and fs.ident_kind):
+            return
+        try:
+            with store.connect() as con:
+                n = con.execute("SELECT coalesce(sum(rows_emitted), 0) FROM files "
+                                "WHERE status = 'done' AND file_type = 'in_network'"
+                                ).fetchone()[0]
+        except Exception:  # noqa: BLE001 — the guard is advisory
+            return
+        limit = NARROW_REQUIRED_ROWS
+        code_alone_ok = False
+        if grain == "npi":
+            gb = float(getattr(store, "_memory_limit_gb", 4) or 4)
+            limit = min(limit, int(gb * NPI_ROWS_PER_GB))
+            # between the memory guard and the big-store guard a code alone
+            # is narrow enough (1.3-1.9 s on a 32M-rate store); at 306M rows
+            # it was not (payer AND code, as before)
+            code_alone_ok = n < NARROW_REQUIRED_ROWS and bool(d.get("codes"))
+        if n < limit or code_alone_ok:
+            return
+        if grain == "npi":
+            msg = (f"Your store is large ({n:,} rates), so the NPI view needs a "
+                   "narrower question: type a full 10-digit NPI (or 9-digit TIN) "
+                   "in the search box, or pick "
+                   + ("a code" if n < NARROW_REQUIRED_ROWS else "BOTH a payer and a code")
+                   + ". To find a practice by NAME, use the TIN view's search, then "
+                   "click it.")
+        else:
+            msg = (f"Your store is large ({n:,} rates), so the Entity view needs "
+                   "BOTH a payer and a code picked. To look up one practice, use "
+                   "the TIN view's search (name or TIN), then click it.")
+        raise HTTPException(422, msg)
+
     @app.get("/api/rates")
+    @_progress_route("rates")
     def rates(
         request: Request,
         sort: str = "negotiated_rate",
         dir: str = "desc",
-        page: int = Query(1, ge=1),
+        # bounded: page=10**30 overflowed the BIGINT OFFSET into a 500 (audit 8 P3)
+        page: int = Query(1, ge=1, le=10_000_000),
         page_size: int = Query(100, ge=1, le=1000),
     ):
         qp = _qp(request)
         grain = grain_of(qp, cfg, store)
-        fs = _fs(qp)
+        fs = _fs_app(qp)
+        _require_narrowing(grain, fs)
         order = order_sql(sort, dir)
         limit_params = [*fs.params, page_size, (page - 1) * page_size]
         if _tin_late_join_ok(grain, fs, sort):
@@ -749,15 +1988,40 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             # join would be ambiguous for a sort column that also exists in a
             # dimension table (e.g. npi_count lives in tin_directory too).
             sql = (f"WITH page AS (SELECT *, tin_value AS unit_id FROM rates_by_tin "
-                   f"WHERE {fs.where} {order} LIMIT ? OFFSET ?) "
+                   f"WHERE {spine_where(fs)} {order} LIMIT ? OFFSET ?) "
                    f"SELECT * FROM (SELECT {_TIN_PROJECTION} FROM page t {_TIN_JOINS}) {order}")
+        elif (spine_by_unit_ok(grain, fs) and not fs.hide_outliers
+              and sort not in ("display_name", "tin_count")):
+            # a name / state / city search keeps its practices' SPINE
+            # rows, sorts and cuts the page there, and only then attaches names
+            # to the 100 rows kept — the same late join as the unfiltered table
+            sql = (f"WITH page AS (SELECT * FROM ({spine_rel_by_unit(fs)}) {order} LIMIT ? OFFSET ?) "
+                   f"SELECT * FROM (SELECT {_TIN_PROJECTION} FROM page t {_TIN_JOINS}) {order}")
+        elif grain == "entity" and entity_two_pass_ok(fs, sort):
+            sql = entity_page_sql(fs, order)
         else:
             sql = f"{rel_sql(grain, fs)} {order} LIMIT ? OFFSET ?"
-        with store.connect() as con:
+        with store.connect() as con, _view_query(request, con) as alive:
+            alive()
             rows = _dicts(con.execute(sql, limit_params))
+            alive()
             total = _filtered_count(con, grain, fs)
-        return {"rows": _mask_row_tins(rows), "total": total, "page": page,
-                "page_size": page_size, "grain": grain}
+            hint = None
+            if not total and fs.ident_kind == "npi" and grain != "npi":
+                # an NPI at the TIN / entity grain matches only an NPI in the
+                # TIN slot: say which practices it bills under instead of a
+                # bare "No rates match" (review 10 item 1.7)
+                ident = fs.ident_value
+                # only the parts holding the NPI, not every rate row
+                tins = [mask_tin(t) for t in store.tins_billing_npi(str(ident))[:5]]
+                if tins:
+                    hint = (f"NPI {ident} bills under tax ID {', '.join(tins)} — search that, "
+                            "or switch to the NPI view.")
+        out = {"rows": _mask_row_tins(rows), "total": total, "page": page,
+               "page_size": page_size, "grain": grain}
+        if hint:
+            out["hint"] = hint
+        return out
 
     # The summary strip is a heavy whole-store aggregation (5 quantiles + 2
     # count-distinct). Cache it on (grain, filter, data_generation) with a
@@ -767,52 +2031,140 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     # this collapses repeated identical loads and stops stacking.
     _summary_cache: dict[tuple, tuple[float, dict]] = {}
     _summary_lock = threading.Lock()
-    _SUMMARY_TTL = 30.0
+    app.state.summary_lock = _summary_lock      # (tests hold it: the waiting state)
     # the market overview does several whole-spine GROUP BYs — heavy at book
     # scale — so cache per (state, data_generation); it changes only on a rebuild.
     _overview_cache: dict[tuple, dict] = {}
     _overview_lock = threading.Lock()
 
+    # A per-generation strip (off the bare spine, a pure function of it) is
+    # kept on disk too, named by the spine's content (Store.spine_key, like
+    # the materialised medians): the unfiltered strip was recomputed after
+    # every restart — 8.5-11.5 s on a 99M-rate store (review 10 item 1.4).
+    _strip_disk_lock = threading.Lock()
+
+    def _strip_disk_file():
+        return store.dir / f"summary_strips.v2.{store.spine_key()}.json"
+
+    def _strip_disk_id(grain, fs) -> str:
+        import hashlib
+        return hashlib.sha1(json.dumps(
+            [grain, fs.where, [str(x) for x in fs.params], fs.hide_outliers, fs.latest_only],
+            default=str).encode()).hexdigest()
+
+    def _strip_disk_get(grain, fs):
+        try:
+            if store.rollups_stale():
+                return None
+            f = _strip_disk_file()
+            if f.exists():
+                return json.loads(f.read_text()).get(_strip_disk_id(grain, fs))
+        except Exception:  # noqa: BLE001 — a cache never fails the strip
+            log.debug("stored summary strip unreadable", exc_info=True)
+        return None
+
+    def _strip_disk_put(grain, fs, scanned) -> None:
+        try:
+            if store.rollups_stale():
+                return
+            with _strip_disk_lock:
+                f = _strip_disk_file()
+                data = json.loads(f.read_text()) if f.exists() else {}
+                if len(data) > 64:
+                    data = {}
+                data[_strip_disk_id(grain, fs)] = scanned
+                tmp = f.with_name(f.name + f".{os.getpid()}.tmp")
+                tmp.write_text(json.dumps(data, default=float))
+                os.replace(tmp, f)
+                for old in store.dir.glob("summary_strips.*.json"):
+                    if old != f:
+                        old.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            log.debug("summary strip not stored", exc_info=True)
+
     @app.get("/api/summary")
+    @_progress_route("summary")
     def summary(request: Request):
         qp = _qp(request)
         grain = grain_of(qp, cfg, store)
-        fs = _fs(qp)
+        fs = _fs_app(qp)
+        _require_narrowing(grain, fs)
         # hide_outliers is applied inside rel_sql but is NOT part of fs.where/
         # params — omitting it from the key served the unfiltered stats to the
         # outlier-hidden view (and vice versa) for a TTL: the strip disagreed
         # with the table it sits above (caught by the verification audit,
         # reproduced live: max=$9000 shown with the outlier "hidden")
-        key = (grain, fs.where, tuple(fs.params), fs.hide_outliers,
+        key = (grain, fs.where, tuple(fs.params), fs.hide_outliers, fs.latest_only,
                store.data_generation)
+        # Off the bare spine (stat_rel's own test) the strip is a pure function
+        # of the key: the spine changes only with data_generation, which every
+        # rollup write bumps after its commit. So it lives for the generation,
+        # not 30 s — the Explorer opens on the pooled, unfiltered strip (9.1 s
+        # cold at 99M rates) and recomputed it on every visit to the tab more
+        # than 30 s after the last (round 5, P1.3). A joined view (names, state,
+        # therapy) reads tables enrichment updates between generations: TTL.
+        per_generation = grain == "tin" and not fs.uses_dim_cols
+
+        def fresh(h):
+            return h is not None and (per_generation
+                                      or time.monotonic() - h[0] < SUMMARY_TTL_SECONDS)
+
         hit = _summary_cache.get(key)
-        now = time.monotonic()
-        if hit is not None and now - hit[0] < _SUMMARY_TTL:
-            return hit[1]
-        if not _summary_lock.acquire(blocking=False):
+        if hit is None and per_generation:
+            stored = _strip_disk_get(grain, fs)
+            if stored is not None:
+                hit = _summary_cache[key] = (time.monotonic(), stored)
+        if fresh(hit):
+            return _with_anchor(hit[1], fs)
+        # this page view's older summary (if any) is interrupted
+        # first, so the lock it holds is released in a moment — wait for it
+        # instead of answering "busy" to the search the user actually meant
+        if not request.headers.get("x-mrfx-view"):
+            return _summary_locked(fs, grain, key, hit, fresh, None, lambda: None, False)
+        with store.connect() as vcon, _view_query(request, vcon) as alive:
+            return _summary_locked(fs, grain, key, hit, fresh, vcon, alive, True)
+
+    def _summary_locked(fs, grain, key, hit, fresh, vcon, alive, wait):
+        with _progress.current().waiting("Waiting for an earlier summary to finish"):
+            got = (_summary_lock.acquire(timeout=8.0) if wait
+                   else _summary_lock.acquire(blocking=False))
+        if not got:
             # a heavy scan is already running — serve the last value for THIS
             # key, else say "busy" honestly (serving another filter's numbers
             # under this view's label would be a wrong number; and iterating
             # the cache dict here races the winner's insert/clear)
             if hit is not None:
-                return hit[1]
+                return _with_anchor(hit[1], fs)
             raise HTTPException(503, "summary is busy — it will load on the next refresh")
         try:
             hit = _summary_cache.get(key)  # re-check under the lock
-            if hit is not None and time.monotonic() - hit[0] < _SUMMARY_TTL:
-                return hit[1]
-            with store.connect() as con:
+            if fresh(hit):
+                return _with_anchor(hit[1], fs)
+            # the strip and the by-code rows read only spine columns: off the
+            # bare spine when no name/geo filter needs the joins (stat_rel)
+            srel = stat_rel(grain, fs)
+            alive()
+            with (contextlib.nullcontext(vcon) if vcon is not None else store.connect()) as con:
                 row = con.execute(
                     f"""
+                    -- ONE list-form quantile, not median + two quantile_cont:
+                    -- each exact quantile aggregate holds its own copy of every
+                    -- value in memory (not spillable). At 306M rows the three
+                    -- copies peaked the server at 11.2 GB RSS; one state gives
+                    -- the identical exact values (median == quantile_cont .5).
+                    -- rounded HERE, half-up to the cent (DuckDB round = half_up):
+                    -- the browser rounded raw doubles its own way, $70.70 on
+                    -- the Explorer vs $70.69 on Markets (review 10 item 3.2)
+                    SELECT n, entities, codes, round(mn, 2), round(q[1], 2), round(q[2], 2),
+                           round(q[3], 2), round(mx, 2) FROM (
                     SELECT count(*) AS n,
                            count(DISTINCT unit_id) AS entities,
                            count(DISTINCT billing_code) AS codes,
-                           min(negotiated_rate) FILTER (is_dollar_rate AND negotiated_rate > 0.01) AS min,
-                           quantile_cont(negotiated_rate, .25) FILTER (is_dollar_rate AND negotiated_rate > 0.01) AS p25,
-                           median(negotiated_rate) FILTER (is_dollar_rate AND negotiated_rate > 0.01) AS median,
-                           quantile_cont(negotiated_rate, .75) FILTER (is_dollar_rate AND negotiated_rate > 0.01) AS p75,
-                           max(negotiated_rate) FILTER (is_dollar_rate AND negotiated_rate > 0.01) AS max
-                    FROM ({rel_sql(grain, fs)})
+                           min(negotiated_rate) FILTER (is_dollar_rate AND negotiated_rate > 0.01) AS mn,
+                           quantile_cont(negotiated_rate, [0.25, 0.5, 0.75])
+                               FILTER (is_dollar_rate AND negotiated_rate > 0.01) AS q,
+                           max(negotiated_rate) FILTER (is_dollar_rate AND negotiated_rate > 0.01) AS mx
+                    FROM ({srel}))
                     """,
                     fs.params,
                 ).fetchone()
@@ -820,52 +2172,102 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 # is analytically meaningless (different services), so give a row
                 # per code — median, spread (IQR), practice count, and % of
                 # Medicare / below-Medicare flag when an MPFS anchor is loaded.
+                # Practice basis = the Benchmark's (practice_basis): each
+                # practice's own median first, then the spread ACROSS
+                # practices — a raw-row quantile let a TIN publishing many
+                # variants outvote the rest, and blended professional with
+                # institutional and NPI-slot rows the Benchmark excludes.
+                basis, basis_text = practice_basis(fs)
+                alive()
                 by_code = _dicts(con.execute(
                     f"""
-                    WITH r AS (SELECT billing_code, negotiated_rate, unit_id
-                               FROM ({rel_sql(grain, fs)})
-                               WHERE is_dollar_rate AND negotiated_rate > 0.01)
+                    WITH r AS (SELECT billing_code, unit_id, median(negotiated_rate) AS negotiated_rate
+                               FROM ({srel})
+                               WHERE {basis}
+                               GROUP BY billing_code, unit_id)
+                    SELECT billing_code, round(q[2], 2) AS median, round(q[1], 2) AS p25,
+                           round(q[3], 2) AS p75, entities FROM (
                     SELECT r.billing_code,
-                           median(r.negotiated_rate)             AS median,
-                           quantile_cont(r.negotiated_rate, .25) AS p25,
-                           quantile_cont(r.negotiated_rate, .75) AS p75,
-                           count(DISTINCT r.unit_id)             AS entities,
-                           m.mc                                  AS mpfs_rate
-                    FROM r LEFT JOIN (SELECT code, median(non_facility_rate) AS mc
-                                      FROM mpfs GROUP BY code) m ON m.code = r.billing_code
-                    GROUP BY r.billing_code, m.mc
-                    ORDER BY r.billing_code
+                           quantile_cont(r.negotiated_rate, [0.25, 0.5, 0.75]) AS q,
+                           count(DISTINCT r.unit_id)             AS entities
+                    FROM r GROUP BY r.billing_code)
+                    ORDER BY billing_code
                     """,
                     fs.params,
                 ))
-            for c in by_code:
-                mc = c.pop("mpfs_rate", None)
-                c["pct_medicare"] = (round(100 * c["median"] / mc)
-                                     if mc and c.get("median") else None)
-                c["below_medicare"] = bool(mc and c.get("median") is not None
-                                           and c["median"] < mc)
             keys = ["n", "entities", "codes", "min", "p25", "median", "p75", "max"]
-            result = {**dict(zip(keys, row)), "grain": grain, "by_code": by_code,
-                      "mpfs_loaded": any(c["pct_medicare"] is not None for c in by_code)}
+            scanned = {**dict(zip(keys, row)), "grain": grain, "by_code": by_code,
+                       "by_code_basis": basis_text}
             if len(_summary_cache) > 256:
                 _summary_cache.clear()
-            _summary_cache[key] = (time.monotonic(), result)
-            return result
+            _summary_cache[key] = (time.monotonic(), scanned)
+            if grain == "tin" and not fs.uses_dim_cols:
+                _strip_disk_put(grain, fs, scanned)
+            return _with_anchor(scanned, fs)
         finally:
             _summary_lock.release()
+
+    def _with_anchor(scanned: dict, fs: FilterSet) -> dict:
+        """The cached scan + the Medicare comparison, applied per request: an
+        MPFS import changes the anchor without a new data generation, and a
+        per-generation strip must not keep the old percentages."""
+        # the Medicare anchor for THIS view's state (store.medicare_anchor):
+        # one locality applied to another state's practices misstates the %
+        anchor = store.medicare_anchor(fs.described.get("state"))
+        by_code = []
+        for c0 in scanned["by_code"]:
+            c = dict(c0)
+            mc = anchor["rates"].get(c["billing_code"])
+            c["pct_medicare"] = (half_up(100 * c["median"] / mc)
+                                 if mc and c.get("median") else None)
+            c["below_medicare"] = bool(mc and c.get("median") is not None
+                                       and c["median"] < mc)
+            by_code.append(c)
+        return {**scanned, "by_code": by_code,
+                "medicare_anchor": anchor["label"], "medicare_refusal": anchor["refusal"],
+                "mpfs_loaded": any(c["pct_medicare"] is not None for c in by_code)}
 
     # -- detail views -----------------------------------------------------------
 
     @app.get("/api/entity/{grain}/{unit_id:path}")
+    @_progress_route("entity")
     def entity_detail(grain: str, unit_id: str):
         if grain not in GRAIN_REL:
             raise HTTPException(404, "grain must be entity|tin|npi")
         with store.connect() as con:
-            rows = _dicts(con.execute(
-                f"SELECT * FROM ({GRAIN_REL[grain]}) WHERE unit_id = ? "
-                "ORDER BY billing_code, payer, modifier_set, file_month",
-                [unit_id],
-            ))
+            members: list[str] = []
+            if grain == "entity":
+                # review 13 item 3.1: the member TINs FIRST (from the practice
+                # list), then only their spine rows — the entity relation used
+                # to aggregate the whole spine into entities before filtering
+                # (30.4 s cold / 15.9 s warm on a 99M-rate store)
+                units = _units_rel()
+                unit_id = _resolve_entity_key(con, unit_id, units)
+                members = [r[0] for r in con.execute(
+                    f"SELECT DISTINCT tin_value FROM ({_entity_units_keyed(units)}) "
+                    "WHERE entity_key = ? ORDER BY tin_value", [unit_id]).fetchall()]
+                rows = _dicts(con.execute(
+                    f"SELECT * FROM ({_entity_rel(_member_tin_rows())}) WHERE unit_id = ? "
+                    "ORDER BY billing_code, payer, modifier_set, file_month, billing_class, "
+                    "service_code_set, is_dollar_rate, tin_value, negotiated_rate",
+                    [members, unit_id])) if members else []
+            else:
+                rel = GRAIN_REL[grain]
+                if grain == "npi":
+                    # only the parts that can hold this NPI (Store.npi_parts):
+                    # rates_dedup over every part read 1.19 B rates for one
+                    # NPI (7 s with the store in memory; minutes from disk)
+                    src = store.npi_rates_source(unit_id)
+                    if src != "rates":
+                        from .store import DEDUP_QUERY
+                        dedup = DEDUP_QUERY.replace("FROM rates\n", f"FROM {src}\n", 1)
+                        rel = rel.replace("FROM rates_dedup d", f"FROM ({dedup}) d", 1)
+                rows = _dicts(con.execute(
+                    f"SELECT * FROM ({rel}) WHERE unit_id = ? "
+                    "ORDER BY billing_code, payer, modifier_set, file_month, billing_class, "
+                    "service_code_set, is_dollar_rate, tin_value, negotiated_rate",
+                    [unit_id],
+                ))
             if not rows:
                 raise HTTPException(404, f"no rates for {grain} {unit_id}")
             if grain == "npi":
@@ -877,24 +2279,15 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 if grain == "tin":
                     tin_list = [unit_id]  # unit_id IS the tax id
                 else:
-                    # Entity: resolve EVERY tax id that rolls up to this entity,
-                    # whether by a manual entity_map name or by the automatic
-                    # NPPES-name grouping. The TIN relation's display_name IS the
-                    # entity_key the grain groups on (it already coalesces the
-                    # manual map over the NPPES name), so matching on it here
-                    # yields exactly the members the entity row aggregated —
-                    # without this, an auto-grouped org showed an empty drawer.
-                    # `OR tin_value = ?`: a NO-NAME entity's key falls back to
-                    # the raw tin_value while its display_name is the masked
-                    # 'TIN …' label — display_name alone can't match, and the
-                    # drawer showed rates with no member table.
-                    tin_list = [r[0] for r in con.execute(
-                        f"SELECT DISTINCT tin_value FROM ({GRAIN_REL['tin']}) "
-                        "WHERE display_name = ? OR tin_value = ?",
-                        [unit_id, unit_id],
-                    ).fetchall()]
+                    # Entity: resolve EVERY tax id that rolls up to this entity
+                    # through the SAME key the grain groups on (_ENTITY_KEY_SQL:
+                    # manual map name, else NPPES name + state(s), else the raw
+                    # TIN for a no-name SSN-pattern TIN) — so the drawer lists
+                    # exactly the members the entity row aggregated.
+                    tin_list = members
                 tins = _dicts(con.execute(
-                    f"SELECT * FROM tin_directory WHERE tin_value IN ({', '.join('?' for _ in tin_list)})",
+                    f"SELECT * FROM tin_directory WHERE tin_value IN ({', '.join('?' for _ in tin_list)}) "
+                    "ORDER BY npi_count DESC NULLS LAST, tin_value",
                     tin_list,
                 )) if tin_list else []
                 for _t in tins:  # SSN-pattern TINs masked on every surface
@@ -902,21 +2295,43 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 member_npis = _dicts(con.execute(
                     f"""
                     SELECT DISTINCT r.npi, n.org_name, n.entity_type, n.city, n.state, n.taxonomy_desc
-                    FROM rates r LEFT JOIN npi_directory n USING (npi)
+                    FROM {store.pairs_relation()} r LEFT JOIN npi_directory n USING (npi)
                     WHERE r.tin_value IN ({', '.join('?' for _ in tin_list)})
                       AND r.npi IS NOT NULL  -- TIN-only rows have no NPI to list
                     ORDER BY r.npi
                     """,
                     tin_list,
                 )) if tin_list else []
+            # the CURRENT rate on the house basis — each contract's newest
+            # month, professional, base modifiers — the Benchmark's rule. It
+            # was a median over every month, modifier, class and POS: "$50.00"
+            # above a table whose current row is $55.00 (two superseded
+            # months outvoted it — review 10 item 2.5)
+            # The NPI grain takes the SAME contract window as the Explorer
+            # (_NPI_LATEST_QUALIFY: payer x NPI x TIN x code, tin_is_really_npi
+            # in the identity) and only THEN the house-basis filter below — the
+            # order rel_sql uses. A per-modifier window kept May's bare row
+            # beside June's GP row of the same contract (review 12 item 1.1:
+            # $41 here vs $42 on the TIN drawer, the Explorer and the Code page).
+            if grain == "npi":
+                # `rel`: the NPI relation over only the parts that can hold
+                # it (above) — the window partitions by NPI, so the same rows
+                chart_rel = (f"SELECT * FROM ({rel}) WHERE unit_id = ? "
+                             f"{_NPI_LATEST_QUALIFY}")
+            elif grain == "entity":
+                chart_rel = (f"SELECT * FROM ({_entity_rel(_member_tin_rows(latest=True), True)}) "
+                             "WHERE unit_id = ?")
+            else:
+                chart_rel = f"SELECT * FROM ({_TIN_REL_LATEST}) WHERE unit_id = ?"
             chart = _dicts(con.execute(
                 f"""
-                SELECT billing_code, payer, median(negotiated_rate) AS median_rate
-                FROM ({GRAIN_REL[grain]})
-                WHERE unit_id = ? AND is_dollar_rate AND negotiated_rate > 0.01
+                SELECT billing_code, payer, round(median(negotiated_rate), 2) AS median_rate
+                FROM ({chart_rel})
+                WHERE is_dollar_rate AND negotiated_rate > 0.01
+                  AND billing_class = 'professional' AND {base_sql("modifier_set")}
                 GROUP BY billing_code, payer ORDER BY billing_code, payer
                 """,
-                [unit_id],
+                [members, unit_id] if grain == "entity" else [unit_id],
             ))
         variance = [r for r in rows if (r.get("rate_variants") or 1) > 1]
         # website: the user-verified URL (if any of this org's TINs has one) +
@@ -982,37 +2397,69 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             return None
 
     @app.get("/api/code/{code}")
+    @_progress_route("code")
     def code_detail(code: str, request: Request):
         qp = _qp(request)
         qp["code"] = code
+        # Payers republish every month, so with no month pinned the relation
+        # holds one row per contract PER INGESTED MONTH. Pooling them blended
+        # May's $40 and June's $42 into a "$41" median nobody published, and
+        # counted the same NPIs once per month. Default to each contract's
+        # NEWEST month (FilterSet.latest_only) unless a month is pinned; the
+        # page's export button sends the same latest=1, so the export holds
+        # exactly the rows this page summarises. It is NOT the page itself:
+        # the page shows medians per practice/payer, the export is those
+        # rows one per contract line (each POS set separately), rate-sorted,
+        # so a reader can recompute every median shown.
+        qp.setdefault("latest", "1")
         grain = grain_of(qp, cfg, store)
-        fs = _fs(qp)
+        fs = _fs_app(qp)
+        # the same guard as the table: an entity/NPI-grain code view on a big
+        # store is a whole-store live aggregation (temp-disk 500 at 306M rows)
+        _require_narrowing(grain, fs)
+        rel = rel_sql(grain, fs)
+        # histogram + payer leaderboard read only spine columns (stat_rel);
+        # the ranking needs the practice names, so it reads `rel`
+        srel = stat_rel(grain, fs)
+        as_of = qp.get("month") or ("latest" if fs.latest_only else "all")
         with store.connect() as con:
             ranked = _dicts(con.execute(
                 f"""
-                SELECT unit_id, any_value(display_name) AS display_name,
+                SELECT unit_id, min(display_name) AS display_name,
                        payer, modifier_set, billing_class,
-                       any_value(discipline) AS discipline,
+                       min(discipline) AS discipline,
                        -- is_dollar_rate in the GROUP BY: under dollar_only=0 a
                        -- unit holding $85 AND a 150% percentage row must not
                        -- blend them into one median that matches no published
                        -- number (dollars and percentages are incommensurable)
                        is_dollar_rate,
-                       median(negotiated_rate) AS median_rate,
+                       round(median(negotiated_rate), 2) AS median_rate,
                        min(negotiated_rate) AS min_rate, max(negotiated_rate) AS max_rate,
-                       sum(npi_count) AS npi_count, count(*) AS n
-                FROM ({rel_sql(grain, fs)})
+                       -- MAX, not SUM: the grouped rows are the same
+                       -- practice's place-of-service variants, which share
+                       -- one roster — summing counted each NPI per variant
+                       max(npi_count) AS npi_count, count(*) AS n
+                FROM ({rel})
                 GROUP BY unit_id, payer, modifier_set, billing_class, is_dollar_rate
-                ORDER BY median_rate DESC, unit_id, payer, modifier_set LIMIT 500
+                ORDER BY median_rate DESC, unit_id, payer, modifier_set, billing_class,
+                         is_dollar_rate LIMIT 500
                 """,
                 fs.params,
             ))
+            # EVERY bucket between the lowest and highest, empty ones as 0: the
+            # chart draws one evenly spaced bar per entry, so leaving the empty
+            # ones out squeezed the axis ($85.72 next to $300.03) and drew a
+            # different distribution than the data's. Same buckets, same counts.
             hist = _dicts(con.execute(
                 f"""
-                WITH r AS (SELECT negotiated_rate FROM ({rel_sql(grain, fs)}) WHERE is_dollar_rate AND negotiated_rate > 0.01)
-                SELECT floor(negotiated_rate / g.w) * g.w AS bucket, count(*) AS n
-                FROM r, (SELECT greatest((max(negotiated_rate) - min(negotiated_rate)) / 20, 0.01) AS w FROM r) g
-                GROUP BY 1 ORDER BY 1
+                WITH r AS (SELECT negotiated_rate FROM ({srel}) WHERE is_dollar_rate AND negotiated_rate > 0.01),
+                g AS (SELECT w, floor(lo / w)::BIGINT AS k0, floor(hi / w)::BIGINT AS k1 FROM (
+                        SELECT greatest((max(negotiated_rate) - min(negotiated_rate)) / 20, 0.01) AS w,
+                               min(negotiated_rate) AS lo, max(negotiated_rate) AS hi FROM r)),
+                c AS (SELECT floor(negotiated_rate / g.w)::BIGINT AS k, count(*) AS n FROM r, g GROUP BY 1)
+                SELECT t.k * g.w AS bucket, coalesce(c.n, 0) AS n
+                FROM g, range(g.k0, g.k1 + 1) t(k) LEFT JOIN c ON c.k = t.k
+                ORDER BY t.k
                 """,
                 fs.params,
             ))
@@ -1024,12 +2471,16 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             # Benchmark/Markets/report grain — not a raw-row median that
             # over-weights variant-heavy TINs). Placeholders ($0/$0.01) excluded
             # even when the user turns dollar-only off.
+            # basis = the Benchmark's (practice_basis): a practice billing
+            # professional $50 and institutional $100 was one $75 "practice
+            # rate" here while the Benchmark said $50
+            basis, basis_text = practice_basis(fs)
             payer_rank = _dicts(con.execute(
                 f"""
                 WITH per_unit AS (
                     SELECT payer, unit_id, median(negotiated_rate) AS rate
-                    FROM ({rel_sql(grain, fs)})
-                    WHERE is_dollar_rate AND negotiated_rate > 0.01
+                    FROM ({srel})
+                    WHERE {basis}
                     GROUP BY payer, unit_id
                 )
                 SELECT payer,
@@ -1044,49 +2495,76 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 """,
                 fs.params,
             ))
-            base = con.execute(
-                "SELECT median(non_facility_rate) FROM mpfs WHERE code = ?", [code]
-            ).fetchone()[0]
+            anchor = store.medicare_anchor(fs.described.get("state"))
+            base = anchor["rates"].get(code)
         # % of Medicare per payer when an MPFS anchor is loaded; the key is
         # always present (None without an anchor) so the frontend never reads
         # undefined — matching /api/summary by_code.
         for p in payer_rank:
-            p["pct_medicare"] = (round(100 * p["median_rate"] / base)
+            p["pct_medicare"] = (half_up(100 * p["median_rate"] / base)
                                  if base and p.get("median_rate") else None)
         info = catalog_json().get(code, {})
-        return {"billing_code": code, "grain": grain, **info, "ranked": ranked,
-                "histogram": hist, "payer_rank": payer_rank,
-                "mpfs_rate": round(base, 2) if base else None}
+        return {"billing_code": code, "grain": grain, "as_of": as_of, **info, "ranked": ranked,
+                "histogram": hist, "payer_rank": payer_rank, "payer_rank_basis": basis_text,
+                "medicare_anchor": anchor["label"], "medicare_refusal": anchor["refusal"],
+                "mpfs_rate": half_up(base, 2) if base else None}
 
     @app.get("/api/trend")
+    @_progress_route("trend")
     def trend(request: Request):
         qp = _qp(request)
         qp.pop("month", None)  # trend spans months by definition
         grain = grain_of(qp, cfg, store)
-        fs = _fs(qp)
+        fs = _fs_app(qp)
+        _require_narrowing(grain, fs)
+        # the payer table's basis (practice_basis: professional, base
+        # modifiers, no NPI-in-the-TIN-slot rows) and ONE rate per practice
+        # per month — a raw line median gave Moda $25.38 here and $26.17 in the
+        # payer table for the same single file (review 10 item 3.1); a payer
+        # appears only with two or more months (a "trend" of one point is not)
+        basis, basis_text = practice_basis(fs)
         with store.connect() as con:
             rows = _dicts(con.execute(
                 f"""
+                WITH r AS (
+                    SELECT billing_code, payer, file_month, unit_id,
+                           median(negotiated_rate) AS rate
+                    FROM ({stat_rel(grain, fs)}) WHERE {basis}
+                    GROUP BY billing_code, payer, file_month, unit_id
+                )
                 SELECT billing_code, payer, file_month,
-                       median(negotiated_rate) AS median_rate,
-                       count(DISTINCT unit_id) AS entities
-                FROM ({rel_sql(grain, fs)}) WHERE is_dollar_rate AND negotiated_rate > 0.01
+                       round(median(rate), 2) AS median_rate,
+                       count(*) AS entities
+                FROM r
+                WHERE (billing_code, payer) IN (
+                    SELECT billing_code, payer FROM r GROUP BY billing_code, payer
+                    HAVING count(DISTINCT file_month) >= 2)
                 GROUP BY billing_code, payer, file_month
                 ORDER BY billing_code, payer, file_month
                 """,
                 fs.params,
             ))
-        return {"rows": rows}
+        return {"rows": rows, "basis": basis_text}
 
     @app.get("/api/months")
     def months():
-        with store.connect() as con:
-            rows = con.execute(
-                "SELECT DISTINCT file_month FROM rates_by_tin "
-                "WHERE file_month IS NOT NULL AND file_month <> '' "
-                "ORDER BY file_month DESC"
-            ).fetchall()
-        return {"months": [r[0] for r in rows]}
+        # a whole-store DISTINCT that every tab entry asked for — it changes
+        # only with a data generation (Store.cached)
+        def compute():
+            with store.connect() as con:
+                rows = con.execute(
+                    "SELECT DISTINCT file_month FROM rates_by_tin "
+                    "WHERE file_month IS NOT NULL AND file_month <> '' "
+                    "ORDER BY file_month DESC"
+                ).fetchall()
+            return {"months": [r[0] for r in rows]}
+        got = store.cached("api.months", None, compute)
+        # loaded months the analytics do not hold yet are listed too, marked
+        # (review 13 item 1.2)
+        covered = got["months"]
+        inv = store.loaded_inventory()
+        months = sorted(set(covered) | set(inv.get("months") or []), reverse=True)
+        return {"months": months, "covered": covered}
 
     # -- validation cross-check (§7A.10) -----------------------------------------
 
@@ -1098,6 +2576,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     # "API unreachable" until the work finishes. Enforced by a test that walks
     # every route and rejects coroutine endpoints.
     @app.post("/api/validate")
+    @_progress_route("validate")
     def validate(body: dict = Body(...)):
         ident = str(body.get("id", "")).replace("-", "").strip()
         code = str(body.get("code", "")).strip()
@@ -1111,23 +2590,39 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 raise HTTPException(422, "expected_rate must be a number")
         else:
             expected = None
+        # only the parts that hold this id (the kept per-part TIN / NPI sets)
+        parts = store.parts_holding(ident)
+        if parts is None:
+            src = "rates"
+        elif parts:
+            src = "read_parquet([" + ", ".join(f"'{sql_path(p)}'" for p in parts) + "])"
+        else:
+            src = "(SELECT * FROM rates WHERE FALSE)"
         with store.connect() as con:
             rows = _dicts(con.execute(
-                """
+                f"""
                 SELECT payer, tin_value, npi, billing_code,
                        coalesce(array_to_string(billing_code_modifier, '|'), '') AS modifiers,
                        negotiated_rate, negotiated_type, billing_class,
                        file_month, source_file
-                FROM rates
+                FROM {src}
                 WHERE billing_code = ? AND (tin_value = ? OR npi = ?)
-                ORDER BY payer, file_month, negotiated_rate
+                -- unique (invariant 7): payer+month+rate tied across TINs,
+                -- NPIs, modifiers, classes and files; two identical requests
+                -- came back in different orders on the 99M store
+                ORDER BY payer, file_month, negotiated_rate, tin_value, npi, modifiers,
+                         billing_class, negotiated_type, source_file
                 """,
                 [code, ident, ident],
             ))
+        from .config import DOLLAR_TYPES
+        dollar = {*DOLLAR_TYPES, ""}
         for r in rows:
             r["tin_value"] = mask_tin(r["tin_value"])
-            if expected is not None and r["negotiated_rate"]:
-                r["delta_vs_expected"] = round(r["negotiated_rate"] - float(expected), 2)
+            # a percentage / per-diem row has no dollar delta (round 7 P1.24)
+            if (expected is not None and r["negotiated_rate"]
+                    and str(r.get("negotiated_type") or "").strip().lower() in dollar):
+                r["delta_vs_expected"] = half_up(r["negotiated_rate"] - float(expected), 2)
         return {"rows": rows, "expected_rate": expected,
                 "match": any(abs(r.get("delta_vs_expected", 1)) < 0.005 for r in rows)
                 if expected is not None else None}
@@ -1157,7 +2652,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         so it shows on the org however a later view resolves it. Accepts only
         http(s) URLs; anything else is rejected rather than stored as a bad
         link."""
-        tins = [str(t).strip() for t in (body.get("tins") or []) if str(t).strip()]
+        tins = _str_list(body.get("tins"), "tins")
         url = str(body.get("url") or "").strip()
         if not tins:
             raise HTTPException(422, "at least one tax id (tins) is required")
@@ -1169,11 +2664,37 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     # -- files -----------------------------------------------------------------------
 
     @app.get("/api/files")
-    def files():
+    def files(limit: int = Query(500, ge=1, le=10_000_000),
+              offset: int = Query(0, ge=0, le=10_000_000)):
+        # polled every 4 s while the Files tab is open: never the whole table
+        # with every preflight blob (audit 8 P1-C). Rows that need the user or
+        # are in progress (waiting for "ingest anyway", held for a choice,
+        # queued, processing, failed…) come FIRST and are never paged away —
+        # paging by date pushed them off the list on a store of > 500 files
+        # (review 9 item 2.4); then the loaded files, newest first.
+        limit = min(int(limit), 5000)
         with store.connect() as con:
-            rows = _dicts(con.execute(
-                "SELECT * FROM files ORDER BY coalesce(finished_at, started_at) DESC NULLS LAST"
-            ))
+            total = con.execute("SELECT count(*) FROM files").fetchone()[0]
+            attention = _dicts(con.execute(
+                "SELECT * EXCLUDE (preflight) FROM files WHERE status <> 'done' "
+                "ORDER BY CASE status WHEN 'needs_choice' THEN 0 "
+                "WHEN 'pending_confirmation' THEN 1 WHEN 'processing' THEN 2 "
+                "WHEN 'queued' THEN 3 WHEN 'failed' THEN 4 ELSE 5 END, "
+                "coalesce(finished_at, started_at) DESC NULLS LAST, filename LIMIT 2000"))
+            rows = attention + _dicts(con.execute(
+                "SELECT * EXCLUDE (preflight) FROM files WHERE status = 'done' "
+                "ORDER BY coalesce(finished_at, started_at) DESC NULLS LAST, filename "
+                "LIMIT ? OFFSET ?", [limit, offset]))
+            # files loaded before identities were kept (review 13 item 5.2.6)
+            named = {r[0] for r in con.execute(
+                "SELECT filename FROM content_fingerprints WHERE full_sha IS NOT NULL "
+                "OR mtime_ns IS NOT NULL").fetchall()}
+        for r in rows:
+            if r.get("status") == "done" and r.get("filename") not in named:
+                r["identity_note"] = ("loaded before file identities were kept — a "
+                                      "same-size file dropped under this name cannot be "
+                                      "told apart from it, so you will be asked "
+                                      "(Replace or Keep both)")
         for r in rows:
             for k in ("started_at", "finished_at"):
                 if r.get(k) is not None:
@@ -1183,7 +2704,113 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                     r["qa"] = json.loads(r["qa"])
                 except json.JSONDecodeError:
                     pass
-        return {"files": rows}
+        try:
+            from .quality import POOLED_FILES_NOTE, pooled_month_files
+            pooled = pooled_month_files(store)     # cached per data generation
+        except Exception:  # noqa: BLE001 — a note never fails the Files poll
+            pooled = []
+        return {"files": rows, "total": total, "limit": limit, "offset": offset,
+                "attention": len(attention),
+                "pooled_months": pooled[:20],
+                "pooled_note": POOLED_FILES_NOTE if pooled else None,
+                # the one-time stored-row update still running behind the
+                # dashboard (review 12 item 2.9)
+                "rows_update": store.rows_update,
+                # where the analytics stand (review 13 items 1.2/1.3): the
+                # build's progress, or the sentence of a failed attempt
+                "analytics": _analytics_public(),
+                # loaded files read without billing codes the list now has
+                # (review 13 item 5.2.4): the Files tab offers to read them again
+                "reread": _reread_summary(),
+                # automatic backups (review 13 Group 6.3): off, or the last one
+                "backup": _backup_line(),
+                # older files being named by content (review 14 item 2.2)
+                "content_backfill": _content_backfill_line()}
+
+    def _content_backfill_line() -> dict | None:
+        try:
+            from .ingest import CONTENT_BACKFILL as cb
+            if cb.get("running") and cb.get("total"):
+                pct = int(100 * cb["done"] / max(1, cb["total"]))
+                return {"running": True, "pct": pct, "done": cb["done"], "total": cb["total"],
+                        "sentence": f"Naming {cb['total']:,} older file"
+                                    f"{'s' if cb['total'] != 1 else ''} by content (so a copy "
+                                    f"of one in another format is recognised) — {pct} %"}
+            if cb.get("no_copy"):
+                k = int(cb["no_copy"])
+                return {"running": False, "no_copy": k,
+                        "sentence": f"{k:,} file{'s' if k != 1 else ''} loaded before 0.7.7 "
+                                    f"{'have' if k != 1 else 'has'} no kept copy, so a copy of "
+                                    f"{'one' if k != 1 else 'it'} saved in another format "
+                                    "(decompressed, or compressed differently) cannot be "
+                                    "recognised and would load twice — remove such a second "
+                                    "copy from the Files list if one appears."}
+        except Exception:  # noqa: BLE001 — a note never fails the poll
+            pass
+        return None
+
+    def _backup_line() -> dict:
+        try:
+            from .backup import backup_status
+            return backup_status(cfg, store)
+        except Exception:  # noqa: BLE001 — a note never fails the poll
+            return {"on": False, "sentence": ""}
+
+    @app.post("/api/backup")
+    @_progress_route("backup")
+    def backup_now():
+        """Take a backup now (review 13 Group 6.3) — the store keeps answering;
+        new data waits only while the database itself is copied."""
+        from .backup import BackupRefused, hot_backup
+        try:
+            res = hot_backup(cfg, store)
+        except BackupRefused as e:
+            raise HTTPException(422, f"backup not taken: {e}")
+        return {"ok": True, "path": res["path"], "bytes": res["bytes"],
+                "files": res["files"], "verdict": res["verdict"], "deleted": res["deleted"]}
+
+    def _reread_summary() -> dict:
+        try:
+            from .ingest import code_set_key
+            store.current_code_set = code_set_key(cfg)
+            rows = store.files_missing_codes()
+        except Exception:  # noqa: BLE001 — a note never fails the poll
+            return {"count": 0, "added": []}
+        added = sorted({c for r in rows for c in r["added"]})
+        # only files the button CAN read again: a kept copy, or a link to
+        # download it from (review 14 Group 3, P3 — it offered N files and
+        # one of them had neither); the others are named
+        def readable(fn: str) -> bool:
+            if any((d / fn).exists() for d in (cfg.processed_dir, cfg.inbox_dir, cfg.downloads_dir)):
+                return True
+            try:
+                return bool(store.url_for_filename(fn))
+            except Exception:  # noqa: BLE001
+                return False
+        can = [r for r in rows if readable(r["filename"])]
+        cannot = [r["filename"] for r in rows if r not in can]
+        return {"count": len(can), "added": added[:20], "running": bool(reread_job.get("running")),
+                "cannot": cannot[:20], "cannot_count": len(cannot)}
+
+    reread_job: dict = {"running": False, "result": None}
+
+    @app.post("/api/files/reread")
+    def files_reread():
+        """Read again every loaded file that was read without billing codes the
+        list now has (review 13 item 5.2.4) — in the background, one file at a
+        time; links whose download is gone are downloaded again."""
+        from .ingest import reread_for_new_codes
+        if reread_job.get("running"):
+            raise HTTPException(409, "already re-reading files for the new codes")
+        reread_job.update(running=True, result=None)
+
+        def run():
+            try:
+                reread_job["result"] = reread_for_new_codes(cfg, store)
+            finally:
+                reread_job["running"] = False
+        threading.Thread(target=_bg_safe, args=(run,), name="mrfx-reread", daemon=True).start()
+        return {"started": True, "files": len(store.files_missing_codes())}
 
     @app.post("/api/files/scan")
     def files_scan():
@@ -1203,7 +2830,11 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         st = store.file_status(filename)
         if not st:
             raise HTTPException(404, "no such file in the store")
-        if st.get("status") in ("processing", "queued"):
+        from .ingest import ingest_in_progress
+        if st.get("status") == "processing" or (
+                st.get("status") == "queued" and ingest_in_progress(filename)):
+            # (a 'queued' row nobody is loading — a "Keep both" whose load never
+            # ran — CAN be removed: it was stuck for good, review 11 item 1.3)
             # forgetting mid-parse would silently lose the race: the ingest
             # keeps reading its open file handle and re-creates every record
             # minutes after this endpoint returned "forgotten"
@@ -1235,7 +2866,10 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             # one link per line — commas are legal INSIDE URLs (signed query
             # strings), so never split on them
             raw = raw.splitlines()
-        counts = add_urls(store, [str(u) for u in raw])
+        if not isinstance(raw, list):
+            # {"urls": 5} iterated an int into a 500 (audit 8 P3)
+            raise HTTPException(422, "urls must be a list of links, or text with one link per line")
+        counts = add_urls(store, [u for u in raw if isinstance(u, str)])
         return counts
 
     @app.post("/api/urls/retry-failed")
@@ -1249,15 +2883,35 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         # (retryable), nothing destroyed.
         return {"cleared": store.clear_queued()}
 
+    @app.post("/api/urls/resume-stopped")
+    def urls_resume_stopped():
+        # bulk undo of "Clear queue" / "Stop downloads" (rows parked as skipped)
+        return {"resumed": store.resume_canceled()}
+
     @app.post("/api/urls/stop-downloads")
     def urls_stop_downloads():
         # abort in-flight downloads mid-stream to free the slots; partial files
-        # are kept so a later retry resumes them.
+        # are kept so a later retry resumes them (a SEGMENTED download's holey
+        # .part cannot be resumed and is discarded — the confirm says so)
         return {"stopped": store.cancel_all_downloading()}
 
     @app.get("/api/urls")
     def urls_list():
-        return {"urls": store.list_urls(), "counts": store.url_queue_counts()}
+        return {"urls": store.list_urls(), "counts": store.url_queue_counts(),
+                "settings": _download_settings()}
+
+    def _download_settings() -> dict:
+        """What the downloader is set to, for the Files tab's one-line
+        summary (audit 8 P1-D: the duplicate check and the size lanes had
+        no visible setting). Changed in config/mrfx.yaml."""
+        from .fetch import resolve_download_count
+        n = resolve_download_count(cfg)
+        small = min(cfg.small_file_downloads, n - 1) if n > 1 else 0
+        return {"downloads": n, "small_file_downloads": small,
+                "small_file_mb": cfg.small_file_mb,
+                "early_dedup_mb": cfg.early_dedup_mb,
+                "monthly_recheck": bool(getattr(cfg, "monthly_recheck", True)),
+                "config_file": "config/mrfx.yaml"}
 
     @app.get("/api/known-sources")
     def known_sources():
@@ -1266,11 +2920,16 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return {"sources": load_known_sources(cfg.known_sources_path)}
 
     @app.post("/api/urls/known")
-    def urls_add_known():
+    def urls_add_known(body: dict | None = Body(None)):
         from .fetch import add_urls
-        from .known_sources import load_known_sources
+        from .known_sources import for_states, load_known_sources
 
-        sources = load_known_sources(cfg.known_sources_path)
+        # {"states": ["MO", "KS"]} queues only those states' payers plus the
+        # national ones — not all 104 indexes (hundreds of thousands of files)
+        states = (body or {}).get("states") or []
+        if isinstance(states, str):
+            states = [x for x in states.replace(",", " ").split() if x]
+        sources = for_states(load_known_sources(cfg.known_sources_path), states)
         counts = add_urls(store, [s["url"] for s in sources if s["queueable"]])
         counts["portals"] = sum(1 for s in sources if not s["queueable"])
         return counts
@@ -1288,6 +2947,22 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(409, "only queued, failed, or too-big links can be skipped "
                                      "(this row may have just started or already finished)")
         return {"status": "skipped"}
+
+    @app.post("/api/urls/{url_id}/stop")
+    def urls_stop(url_id: int):
+        """Stop a link whose file is being PROCESSED (the download is kept;
+        retry re-processes it without downloading again)."""
+        from .fetch import filename_for
+        url = store.url_of(url_id)
+        if not url or not store.request_parse_stop(filename_for(url)):
+            raise HTTPException(409, "this link's file isn't being processed right now")
+        return {"status": "stopping"}
+
+    @app.post("/api/files/{filename}/stop")
+    def files_stop(filename: str):
+        if not store.request_parse_stop(filename):
+            raise HTTPException(409, "this file isn't being processed right now")
+        return {"status": "stopping"}
 
     @app.post("/api/urls/{url_id}/force-size")
     def urls_force_size(url_id: int):
@@ -1317,6 +2992,11 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         # collapse to "" → dest would be the inbox dir itself; fall back to a
         # safe name so the temp/rename never targets a directory
         safe = Path(file.filename or "upload.json").name or "upload.json"
+        if len(safe) > MAX_NAME_CHARS:
+            # the OS refusal named the whole inbox path (review 9 item 4.7),
+            # and Windows refuses far earlier than Linux
+            raise HTTPException(422, f"that file name is {len(safe)} characters long — "
+                                f"rename it to under {MAX_NAME_CHARS} and drop it again")
         dest = cfg.inbox_dir / safe
         # stream to a name the inbox scanner ignores, rename when COMPLETE —
         # the watcher fires on creation and would otherwise preflight (and
@@ -1333,45 +3013,181 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                     if size > UPLOAD_LIMIT_BYTES:
                         raise HTTPException(413, "over 1 GB — drop the file into data/inbox/ instead")
                     out.write(chunk)
+            # an upload under a name the store already holds (review 9 1.2 /
+            # 4.5): the same bytes are reported as already loaded; different
+            # bytes for the same payer and month are HELD for the user's
+            # choice (Replace / Keep both) — never blended into every number
+            # silently; anything else is loaded under a content-tagged name
+            from .ingest import (NEEDS_CHOICE, _sha_of, hold_for_choice, same_name_verdict,
+                                 unique_inbox_name)
+            prior = store.file_status(safe)
+            renamed_from = None
+            # the same BYTES already loaded under another name (a second
+            # browser download "x (1).json.gz", a copy): not loaded twice —
+            # every raw count doubled before (review 11 item 1.1)
+            sha0 = _sha_of(tmp)
+            twin = store.done_file_with_sha(sha0) if sha0 else None
+            if twin and twin != safe:
+                return {"status": "duplicate", "filename": safe, "bytes": size,
+                        "note": (f"{safe} is the same file as {twin}, which is already "
+                                 "loaded — it was not loaded a second time")}
+            if prior and prior.get("status") in ("done", "processing", "queued"):
+                verdict, sha = same_name_verdict(cfg, store, tmp, safe, prior)
+                if verdict == "same":
+                    return {"status": "duplicate", "filename": safe, "bytes": size,
+                            "note": f"{safe} is already loaded — this upload is the same file"}
+                if verdict == "replace":
+                    held = hold_for_choice(cfg, store, tmp, safe, sha)
+                    return {"status": NEEDS_CHOICE, "filename": held, "replaces": safe,
+                            "bytes": size,
+                            "note": (f"{safe} is already loaded and this is a DIFFERENT file "
+                                     "for the same payer and month. Choose Replace (use only "
+                                     "this one) or Keep both (both count toward every number).")}
+                renamed_from = safe
+                dest = cfg.inbox_dir / unique_inbox_name(cfg.inbox_dir, safe, store,
+                                                         (sha or _uuid.uuid4().hex)[:8])
+            elif dest.exists():
+                # an earlier drop of this name not loaded yet
+                sha = _sha_of(tmp)
+                if sha and sha == _sha_of(dest):
+                    return {"status": "duplicate", "filename": safe, "bytes": size,
+                            "note": f"{safe} is already waiting to be loaded — the same file"}
+                renamed_from = safe
+                dest = cfg.inbox_dir / unique_inbox_name(cfg.inbox_dir, safe, store,
+                                                         (sha or _uuid.uuid4().hex)[:8])
             tmp.replace(dest)
         finally:
             tmp.unlink(missing_ok=True)
         threading.Thread(target=_bg_safe, args=(scan_inbox, cfg, store),
                          name="mrfx-upload-scan", daemon=True).start()
-        return {"status": "queued", "filename": dest.name, "bytes": size}
+        out = {"status": "queued", "filename": dest.name, "bytes": size}
+        if renamed_from:
+            out["renamed_from"] = renamed_from
+            out["note"] = (f"a file named {renamed_from} is already in MRF Explorer (another "
+                           f"month or payer) — this one is loaded beside it as {dest.name}")
+        return out
+
+    @app.post("/api/files/{filename}/choose")
+    def files_choose(filename: str, body: dict = Body(...)):
+        """The user's answer for a held same-name file: {"action": "replace"}
+        or {"action": "keep"}."""
+        from .ingest import resolve_choice
+        action = str((body or {}).get("action") or "")
+        try:
+            r = resolve_choice(cfg, store, filename, action)
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+        threading.Thread(target=_bg_safe, args=(ingest_file, cfg, store, r["path"]),
+                         name="mrfx-choice-ingest", daemon=True).start()
+        return {"status": "queued", "action": r["action"], "filename": r["filename"]}
 
     # -- export (CSV + methodology sidecar, §7A.6) ---------------------------------
 
 
+    _sweep_stale_exports(store)
+    last_sweep = [time.monotonic()]
+
     def _mktemp(suffix: str) -> Path:
-        fd, p = tempfile.mkstemp(suffix=suffix)
+        # an export the browser abandoned mid-stream can skip its cleanup
+        # task; sweep old ones while the server runs, not only at start-up
+        # (audit 8 P2-G) — at most every 10 minutes, a glob of one folder
+        if time.monotonic() - last_sweep[0] > 600:
+            last_sweep[0] = time.monotonic()
+            _sweep_stale_exports(store)
+        fd, p = tempfile.mkstemp(suffix=suffix, prefix="mrfx-export-",
+                                 dir=_export_dir(store))
         os.close(fd)  # mkstemp returns an OPEN fd — dropping it leaks one per export
         return Path(p)
 
-    def _export_payload(request: Request, view: str, sort: str, dir: str, full: bool):
-        """Build the export as a temp FILE (BOM-prefixed for Excel) and return
-        its path — never the CSV as a Python string. `?full=true` on a 64M-row
-        store is multiple GB; DuckDB streams the COPY to disk under its own
-        memory cap, and everything after must stay disk-to-disk so the export
-        can't balloon the process RSS with data-sized strings."""
+    def _space_refused(e: Exception, *paths: Path):
+        for f in paths:
+            f.unlink(missing_ok=True)
+            # DuckDB's COPY writes to "tmp_<name>" and renames at the end: a
+            # COPY stopped by a full disk leaves THAT behind (4 GB, measured)
+            f.with_name("tmp_" + f.name).unlink(missing_ok=True)
+        return HTTPException(507, str(e) if isinstance(e, ExportSpaceError) else (
+            f"The drive holding the program's temporary folder ({_export_dir(store)}) "
+            "filled up while the export was being written, so it was stopped and the "
+            "partial file removed. Narrow the export with the filters (a state, a payer "
+            "or a few codes), or free space on that drive, and try again."))
+
+    def _export_payload(request: Request, view: str, sort: str, dir: str, full: bool,
+                        zip_factor: float = 1.0):
+        """Build the export as ONE temp file in the store's temp folder and
+        return its path — never the CSV as a Python string. `?full=true` on a
+        64M-row store is multiple GB; DuckDB streams the COPY to disk under its
+        own memory cap. The Excel BOM is NOT written by copying the file again
+        (that doubled the disk a whole-store export needs): the response
+        streams BOM + file. Refused up front when the drive cannot hold it."""
+        _prog = _progress.current()
+        _prog.stage("Checking the filters and the disk space")
         qp = {} if full else _qp(request)
         grain = grain_of(qp, cfg, store)
         fs = _fs(qp if not full else {"dollar_only": "0"})
+        if not full:
+            _require_narrowing(grain, fs)
         select, params = export_select(grain, fs, sort, dir)
         stamp = dt.datetime.now().strftime("%Y-%m-%d_%H%M")
         tmp = _mktemp(".csv")
-        with store.connect() as con:
-            con.execute(f"COPY ({select}) TO '{sql_path(tmp)}' (FORMAT CSV, HEADER)", params)
-        out = _mktemp(".csv")
-        import shutil as _shutil
-        with open(out, "wb") as dst, open(tmp, "rb") as src:
-            dst.write(b"\xef\xbb\xbf")           # BOM for Excel
-            _shutil.copyfileobj(src, dst, 1 << 20)
-        tmp.unlink()
-        method = methodology_text(cfg, store, grain, fs, sort, dir, view)
-        return stamp, out, method
+        mem = float(getattr(store, "_memory_limit_gb", 4) or 4) * 1e9
+        try:
+            # the exact row count costs a query (7 s for a whole 99M-rate
+            # store), so it runs only when the store's RAW row count — an
+            # upper bound for every grain — would not fit anyway
+            bound = int(store.store_stats().get("rates") or 0)
+            try:
+                roomy = (shutil.disk_usage(tmp.parent).free - EXPORT_FREE_HEADROOM
+                         > _export_need(bound, zip_factor, mem))
+            except OSError:
+                roomy = True
+            with store.connect() as con:
+                if not roomy:
+                    _prog.stage("Counting the rows")
+                    # the SAME rows counted off the bare spine (stat_rel: the
+                    # dimension joins never add or drop a row) — the export's
+                    # joined, sorted select took 8-11 s to say "too big" on a
+                    # 99M-rate store (review 13 item 3.5)
+                    rows = con.execute(f"SELECT count(*) FROM ({stat_rel(grain, fs)})",
+                                       fs.params).fetchone()[0]
+                    _check_export_space(tmp.parent, rows, zip_factor, mem)
+                _prog.stage("Writing the rows to a file")
+                con.execute(f"COPY ({select}) TO '{sql_path(tmp)}' (FORMAT CSV, HEADER)",
+                            params)
+        except ExportSpaceError as e:
+            raise _space_refused(e, tmp)
+        except Exception as e:  # noqa: BLE001 — duckdb.IOException / OSError on a full disk
+            if _is_disk_full(e):
+                raise _space_refused(e, tmp)
+            tmp.unlink(missing_ok=True)
+            tmp.with_name("tmp_" + tmp.name).unlink(missing_ok=True)
+            raise
+        try:
+            _prog.stage("Writing the methodology")
+            method = methodology_text(cfg, store, grain, fs, sort, dir, view)
+        except BaseException:
+            tmp.unlink(missing_ok=True)   # never leave a built export behind
+            raise
+        return stamp, tmp, method
+
+    def _stream_with_bom(path: Path, filename: str, media_type: str):
+        """BOM + the file, streamed in 1 MB chunks; the file is removed once
+        the response is done (or the browser went away)."""
+        size = path.stat().st_size
+
+        def body():
+            yield _BOM
+            with open(path, "rb") as f:
+                while chunk := f.read(1 << 20):
+                    yield chunk
+
+        return StreamingResponse(
+            body(), media_type=media_type,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"',
+                     "Content-Length": str(size + len(_BOM))},
+            background=BackgroundTask(path.unlink, missing_ok=True))
 
     @app.get("/api/export.csv")
+    @_progress_route("export")
     def export_csv(
         request: Request,
         background: BackgroundTasks,
@@ -1380,11 +3196,12 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         dir: str = "desc",
         full: bool = False,
     ):
+        view = _safe_view(view)
         stamp, out, _method = _export_payload(request, view, sort, dir, full)
-        background.add_task(out.unlink, missing_ok=True)  # or it orphans per export
-        return FileResponse(out, filename=f"mrfx_{view}_{stamp}.csv", media_type="text/csv")
+        return _stream_with_bom(out, f"mrfx_{view}_{stamp}.csv", "text/csv")
 
     @app.get("/api/export.zip")
+    @_progress_route("export")
     def export_zip(
         request: Request,
         background: BackgroundTasks,
@@ -1393,18 +3210,45 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         dir: str = "desc",
         full: bool = False,
     ):
-        stamp, csv_path, method = _export_payload(request, view, sort, dir, full)
+        view = _safe_view(view)
+        stamp, csv_path, method = _export_payload(request, view, sort, dir, full,
+                                                  zip_factor=EXPORT_ZIP_FACTOR)
         out = _mktemp(".zip")
-        # z.write streams the CSV from disk; ZipFile writes to the file as it
-        # goes — no data-sized BytesIO copy of a multi-GB export in RAM
-        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
-            z.write(csv_path, f"mrfx_{view}_{stamp}.csv")
-            z.writestr(f"mrfx_{view}_{stamp}_methodology.txt", method)
+        # streamed disk-to-disk into the member (BOM first, for Excel) — no
+        # data-sized BytesIO copy and no second BOM'd copy of the CSV
+        try:
+            _prog = _progress.current()
+            _prog.stage("Compressing")
+            total = max(1, csv_path.stat().st_size)
+            with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+                with z.open(f"mrfx_{view}_{stamp}.csv", "w", force_zip64=True) as m, \
+                        open(csv_path, "rb") as src:
+                    m.write(_BOM)
+                    done = 0
+                    while True:
+                        buf = src.read(1 << 20)
+                        if not buf:
+                            break
+                        m.write(buf)
+                        done += len(buf)
+                        _prog.tick(done / total)
+                        # a Stop is honoured here too (review 14 Group 3: it
+                        # waited for the whole file, then the zip stayed in
+                        # temp for 6 h) — the except below removes both files
+                        _progress.check_cancelled()
+                z.writestr(f"mrfx_{view}_{stamp}_methodology.txt", method)
+        except BaseException as e:
+            if isinstance(e, OSError) and _is_disk_full(e):
+                raise _space_refused(e, csv_path, out)
+            csv_path.unlink(missing_ok=True)
+            out.unlink(missing_ok=True)
+            raise
         csv_path.unlink(missing_ok=True)
         background.add_task(out.unlink, missing_ok=True)
         return FileResponse(out, filename=f"mrfx_{view}_{stamp}.zip", media_type="application/zip")
 
     @app.post("/api/report/org-bundle.zip")
+    @_progress_route("bundle")
     def org_bundle(background: BackgroundTasks, body: dict = Body(...)):
         """One organization, packaged to be combined with the Medicare Order &
         Referring Tracker: a paste-ready NPI list (the tracker is NPI-native,
@@ -1441,8 +3285,14 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         from .medicare import import_orf_roster, import_shared_patients
 
         done: list[dict] = []
+        prog = tracker_job.get("_p") or _progress.Progress(None, [("Importing", 100)])
+        ctx_tok = _progress.set_current(prog)
+        prog.stage("Importing")
         try:
             for i, item in enumerate(items, 1):
+                if prog.cancelled:
+                    break                      # stopped: the files done so far stay
+                prog.tick((i - 1) / max(1, len(items)))
                 label = item.get("label") or item.get("path")
                 with tracker_job_lock:
                     tracker_job["message"] = f"importing {label} ({i} of {len(items)})…"
@@ -1468,12 +3318,17 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 with tracker_job_lock:
                     tracker_job["done"] = list(done)
         finally:
+            _progress.reset_current(ctx_tok)
+            prog.finish("stopped" if prog.cancelled else "done")
             with tracker_job_lock:
                 tracker_job["state"] = "done"
                 tracker_job["done"] = list(done)
                 ok = sum(1 for d in done if d["ok"])
                 tracker_job["message"] = (
                     f"imported {ok} of {len(items)}" if done else "nothing to import")
+                if prog.cancelled:
+                    tracker_job["message"] += (" — stopped by you; the rest were "
+                                               "not imported")
 
     def _tracker_discover() -> dict:
         from .tracker import discover
@@ -1486,8 +3341,21 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         belong to the tracker, which has its own retention rules."""
         d = _tracker_discover()
         with tracker_job_lock:
-            d["job"] = dict(tracker_job)
+            job = {k: v for k, v in tracker_job.items() if k != "_p"}
+            if tracker_job.get("_p") is not None:
+                job["progress"] = tracker_job["_p"].snapshot()
+            d["job"] = job
         return d
+
+    @app.delete("/api/medicare/tracker/import")
+    def api_tracker_stop():
+        """Stop a running tracker import after the file it is on."""
+        with tracker_job_lock:
+            p = tracker_job.get("_p")
+            running = tracker_job["state"] == "running"
+        if p is not None and running:
+            p.cancel("stopped")
+        return {"stopped": bool(running)}
 
     @app.post("/api/medicare/tracker/import")
     def api_tracker_import(body: dict = Body(...)):
@@ -1506,10 +3374,11 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 raise HTTPException(409, "an import is already running — "
                                     f"{tracker_job['message']}")
             tracker_job.update({"state": "running", "done": [], "items": [],
+                                "_p": _progress.Progress(None, [("Importing", 100)]),
                                 "message": "finding the tracker's files…"})
         try:
             found = {p["path"]: p for p in _tracker_discover()["pending"]}
-            want = body.get("paths")
+            want = _str_list(body.get("paths"), "paths")
             # Import only what discovery just offered: the request names files
             # by path, and echoing an arbitrary path back into a reader would
             # let the dashboard read anywhere on disk.
@@ -1551,13 +3420,14 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return {"clients": remove_client(store, str(body.get("subject", "")))}
 
     @app.post("/api/contracts/renewals")
+    @_progress_route("working")
     def api_renewals(body: dict = Body(...)):
         """Contracts with a REAL published end date, soonest first — with the
         coverage figure attached, because payers publish this field
         inconsistently and a sparse radar must never read as a schedule."""
         from .contracts import renewal_radar
         try:
-            return renewal_radar(store, body.get("subjects") or None,
+            return renewal_radar(store, _str_list(body.get("subjects"), "subjects", cap=500) or None,
                                  body.get("market") or {},
                                  within_days=_as_int(body.get("within_days"), 365))
         except BenchmarkError as e:
@@ -1571,16 +3441,22 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return expiration_coverage(store, {})
 
     @app.post("/api/contracts/new-to-network")
+    @_progress_route("working")
     def api_new_to_network(body: dict = Body(...)):
         """Practices that appear in a payer's book this month and were absent
         from the same payer's previous published month."""
         from .contracts import new_to_network
         try:
-            return new_to_network(
-                store, body.get("market") or {},
-                zip_code=str(body.get("zip") or "").strip() or None,
-                radius_miles=float(body["radius_miles"]) if body.get("radius_miles") else None,
-                therapy_only=bool(body.get("therapy_only", True)))
+            market = body.get("market") or {}
+            zip_code = str(body.get("zip") or "").strip() or None
+            radius = _radius_arg(body.get("radius_miles"))
+            therapy = bool(body.get("therapy_only", True))
+            # review 13 item 3.5: 8-10 s on every click of a 99M-rate store
+            # for an answer that changes only with the data — cached like
+            # changes / trajectory (Store.cached: data + user-edit generation)
+            key = json.dumps([market, zip_code, radius, therapy], sort_keys=True, default=str)
+            return store.cached("api.new_to_network", key, lambda: new_to_network(
+                store, market, zip_code=zip_code, radius_miles=radius, therapy_only=therapy))
         except BenchmarkError as e:
             raise HTTPException(422, str(e))
         except (TypeError, ValueError) as e:
@@ -1601,6 +3477,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return utilization_status(store)
 
     @app.post("/api/utilization/volumes")
+    @_progress_route("working")
     def api_utilization_volumes(body: dict = Body(...)):
         """Annual units per code for a practice, from Medicare claims — what
         pre-fills a volumes box. Medicare-only, so it is labeled a floor."""
@@ -1608,7 +3485,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         try:
             return suggested_volumes(store, str(body.get("subject", "")),
                                      body.get("year") or None,
-                                     multiplier=_as_float(body.get("multiplier"), 1.0))
+                                     multiplier=_as_float(body.get("multiplier"), 1.0),
+                                     market=body.get("market") or None)
         except BenchmarkError as e:
             raise HTTPException(422, str(e))
 
@@ -1619,13 +3497,13 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         fragile than DuckDB streaming it off disk (same reason the Medicare
         tab imports the tracker's files by path)."""
         from .utilization import UtilizationImportError, import_utilization
-        path = str(body.get("path") or "").strip()
-        if not path:
-            raise HTTPException(422, "give the path to the CSV you downloaded")
+        path = _import_path(body, "give the path to the CSV you downloaded")
         try:
             return import_utilization(store, path, str(body.get("year") or "") or None)
         except UtilizationImportError as e:
             raise HTTPException(422, str(e))
+        except OSError as e:
+            raise HTTPException(422, f"could not read that file: {_plain(e)}")
 
     @app.get("/api/demographics/status")
     def api_demographics_status():
@@ -1635,16 +3513,17 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     @app.post("/api/demographics/import")
     def api_demographics_import(body: dict = Body(...)):
         from .demographics import DemographicsImportError, import_demographics
-        path = str(body.get("path") or "").strip()
-        if not path:
-            raise HTTPException(422, "give the path to the ACS CSV you downloaded")
+        path = _import_path(body, "give the path to the ACS CSV you downloaded")
         try:
             return import_demographics(store, path,
                                        str(body.get("vintage") or "") or None)
         except DemographicsImportError as e:
             raise HTTPException(422, str(e))
+        except OSError as e:
+            raise HTTPException(422, f"could not read that file: {_plain(e)}")
 
     @app.post("/api/market/sizing")
+    @_progress_route("working")
     def api_market_sizing(body: dict = Body(...)):
         """Population, seniors and therapy practices inside a radius — is this
         market underserved or saturated?"""
@@ -1664,6 +3543,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return feed_status(store)
 
     @app.post("/api/newclinics")
+    @_progress_route("working")
     def api_newclinics(body: dict = Body(...)):
         """Therapy NPIs issued recently — practices that have no payer contract
         yet, which is the earliest a consultant can reach them."""
@@ -1671,7 +3551,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         try:
             return new_enumerations(
                 store, zip_code=str(body.get("zip") or "").strip() or None,
-                radius_miles=float(body["radius_miles"]) if body.get("radius_miles") else None,
+                radius_miles=_radius_arg(body.get("radius_miles")),
                 days=_as_int(body.get("days"), 180),
                 therapy_only=bool(body.get("therapy_only", True)),
                 state=_state_arg(body.get("state")))
@@ -1686,6 +3566,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return closure_status(store)
 
     @app.post("/api/closures")
+    @_progress_route("working")
     def api_closures(body: dict = Body(...)):
         """Therapy NPIs deactivated recently — a closed referral source is a
         hole in a client's inbound volume; a closed competitor is room."""
@@ -1693,7 +3574,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         try:
             return closures(
                 store, zip_code=str(body.get("zip") or "").strip() or None,
-                radius_miles=float(body["radius_miles"]) if body.get("radius_miles") else None,
+                radius_miles=_radius_arg(body.get("radius_miles")),
                 days=_as_int(body.get("days"), 365),
                 therapy_only=bool(body.get("therapy_only", True)),
                 state=_state_arg(body.get("state")))
@@ -1720,7 +3601,11 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         dest = (Path(cfg.store_dir) / "uploads" /
                 f"{os.getpid()}-{_uuid.uuid4().hex[:8]}")
         dest.mkdir(parents=True, exist_ok=True)
-        p = dest / (Path(file.filename or "schedule.csv").name or "schedule.csv")
+        fname = Path(file.filename or "schedule.csv").name or "schedule.csv"
+        if len(fname) > MAX_NAME_CHARS:
+            raise HTTPException(422, f"that file name is {len(fname)} characters long — "
+                                f"rename it to under {MAX_NAME_CHARS} and try again")
+        p = dest / fname
         try:
             with open(p, "wb") as out:
                 while chunk := file.file.read(1 << 20):
@@ -1732,7 +3617,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         except FloorImportError as e:
             raise HTTPException(422, str(e))
         except (OSError, ValueError) as e:
-            raise HTTPException(422, f"could not read that file: {e}")
+            raise HTTPException(422, f"could not read that file: {_plain(e)}")
         finally:
             p.unlink(missing_ok=True)
             try:
@@ -1742,6 +3627,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return {**res, "status": floor_status(store)}
 
     @app.post("/api/floors/compare")
+    @_progress_route("working")
     def api_floors_compare(body: dict = Body(...)):
         """Commercial rates against the loaded Medicaid / WC schedules."""
         from .floors import floor_comparison
@@ -1770,7 +3656,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     # -- prospect dossier + market report -------------------------------------------------
 
     @app.post("/api/report/dossier")
-    def api_dossier(body: dict = Body(...)):
+    @_progress_route("dossier")
+    def api_dossier(body: dict = Body(...), fmt: str = Query("", alias="format")):
         """One branded page about a practice you have never spoken to."""
         from .dossier import build_prospect_dossier
         try:
@@ -1782,9 +3669,14 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
         except (TypeError, ValueError) as e:
             raise HTTPException(422, f"bad input: {e}")
-        return HTMLResponse(res["html"])
+        # the omitted sections ride along, so the page builds the dossier ONCE
+        # (it also fetched dossier.json — a second full build — review 13)
+        from urllib.parse import quote
+        return _html_or_pdf(res["html"], fmt, "practice_profile", headers={
+            "X-Mrfx-Skipped": quote(json.dumps(res.get("skipped") or []))})
 
     @app.post("/api/report/dossier.json")
+    @_progress_route("dossier")
     def api_dossier_json(body: dict = Body(...)):
         """The dossier's facts and omissions, without the rendered page."""
         from .dossier import build_prospect_dossier
@@ -1800,7 +3692,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return {k: v for k, v in res.items() if k != "html"}
 
     @app.post("/api/report/market")
-    def api_market_report(body: dict = Body(...)):
+    @_progress_route("market_report")
+    def api_market_report(body: dict = Body(...), fmt: str = Query("", alias="format")):
         """The metro-level story as one sellable branded document."""
         from .dossier import build_market_report
         try:
@@ -1814,7 +3707,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
         except (TypeError, ValueError) as e:
             raise HTTPException(422, f"bad input: {e}")
-        return HTMLResponse(res["html"])
+        return _html_or_pdf(res["html"], fmt, "market_report")
 
     # -- practice growth + service-line gaps ----------------------------------------------
 
@@ -1824,6 +3717,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return {"years": available_years(store)}
 
     @app.post("/api/utilization/growth")
+    @_progress_route("working")
     def api_practice_growth(body: dict = Body(...)):
         """A practice's Medicare volume between two PUF years."""
         from .utilization import practice_growth
@@ -1831,13 +3725,15 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             return practice_growth(
                 store, str(body.get("subject") or "").strip(),
                 from_year=str(body.get("from_year") or "").strip() or None,
-                to_year=str(body.get("to_year") or "").strip() or None)
+                to_year=str(body.get("to_year") or "").strip() or None,
+                market=body.get("market") or None)
         except BenchmarkError as e:
             raise HTTPException(422, str(e))
         except (TypeError, ValueError) as e:
             raise HTTPException(422, f"bad input: {e}")
 
     @app.post("/api/utilization/service-lines")
+    @_progress_route("working")
     def api_service_lines(body: dict = Body(...)):
         """Codes nearby practices bill Medicare that this one does not."""
         from .utilization import service_line_gaps
@@ -1847,7 +3743,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 zip_code=str(body.get("zip") or "").strip() or None,
                 radius_miles=_as_float(body.get("radius_miles"), 25.0),
                 year=str(body.get("year") or "").strip() or None,
-                min_peers=_bounded_int(body.get("min_peers"), 3, 1, 1000))
+                min_peers=_bounded_int(body.get("min_peers"), 3, 1, 1000),
+                market=body.get("market") or None)
         except BenchmarkError as e:
             raise HTTPException(422, str(e))
         except (TypeError, ValueError) as e:
@@ -1856,6 +3753,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     # -- per-visit economics + volume-weighted position -----------------------------------
 
     @app.post("/api/economics/visit")
+    @_progress_route("working")
     def api_visit_economics(body: dict = Body(...)):
         """What one payer's visit is worth on this practice's own code mix."""
         from .economics import visit_economics
@@ -1871,6 +3769,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, f"bad input: {e}")
 
     @app.post("/api/economics/weighted-position")
+    @_progress_route("working")
     def api_weighted_position(body: dict = Body(...)):
         """Market position weighted by what the practice actually bills."""
         from .economics import weighted_position
@@ -1888,6 +3787,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     # -- walk-away leverage --------------------------------------------------------------
 
     @app.post("/api/leverage")
+    @_progress_route("working")
     def api_leverage(body: dict = Body(...)):
         """How many other local practices this payer publishes rates for."""
         from .leverage import network_leverage
@@ -1903,6 +3803,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, f"bad input: {e}")
 
     @app.post("/api/leverage/summary")
+    @_progress_route("working")
     def api_leverage_summary(body: dict = Body(...)):
         """Every payer this practice contracts with, thinnest network first."""
         from .leverage import leverage_summary
@@ -1919,6 +3820,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     # -- territory: sub-state geography, payer concentration, steal-share --------------
 
     @app.post("/api/territory/local")
+    @_progress_route("territory")
     def api_territory_local(body: dict = Body(...)):
         """Median rate by CITY inside one state, for one code."""
         from .territory import local_rate_map
@@ -1933,6 +3835,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, f"bad input: {e}")
 
     @app.post("/api/territory/radius")
+    @_progress_route("territory")
     def api_territory_radius(body: dict = Body(...)):
         """One code's median rate by DISTANCE BAND from a ZIP."""
         from .territory import radius_rate_map
@@ -1947,17 +3850,20 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, f"bad input: {e}")
 
     @app.post("/api/territory/concentration")
+    @_progress_route("territory")
     def api_territory_concentration(body: dict = Body(...)):
         """How contracted relationships divide across payers (HHI)."""
         from .territory import payer_concentration
         try:
-            return payer_concentration(store, body.get("market") or {})
+            return payer_concentration(store, body.get("market") or {},
+                                       code=body.get("code") or None)
         except BenchmarkError as e:
             raise HTTPException(422, str(e))
         except (TypeError, ValueError) as e:
             raise HTTPException(422, f"bad input: {e}")
 
     @app.post("/api/territory/steal-share")
+    @_progress_route("territory")
     def api_territory_steal(body: dict = Body(...)):
         """Referral sources feeding a client's competitors, not the client."""
         from .medicare import MedicareImportError
@@ -1978,6 +3884,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     # -- data quality: what kind of rate, how old, does size explain it ----------------
 
     @app.post("/api/quality/types")
+    @_progress_route("quality")
     def api_quality_types(body: dict = Body(...)):
         """Contracted vs payer-derived composition of the scoped market."""
         from .quality import rate_type_mix
@@ -1989,6 +3896,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, f"bad input: {e}")
 
     @app.post("/api/quality/posture")
+    @_progress_route("quality")
     def api_quality_posture(body: dict = Body(...)):
         """Per payer: does it negotiate, or run one schedule for everyone?"""
         from .quality import payer_posture
@@ -2001,11 +3909,13 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, f"bad input: {e}")
 
     @app.get("/api/quality/freshness")
+    @_progress_route("quality")
     def api_quality_freshness(stale_days: int = 270):
         from .quality import payer_freshness
         return payer_freshness(store, stale_days=max(1, min(int(stale_days), 3650)))
 
     @app.post("/api/quality/size")
+    @_progress_route("size")
     def api_quality_size(body: dict = Body(...)):
         """Whether bigger practices are paid better in this market."""
         from .quality import size_premium
@@ -2019,6 +3929,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, f"bad input: {e}")
 
     @app.post("/api/quality/subject-types")
+    @_progress_route("quality")
     def api_quality_subject_types(body: dict = Body(...)):
         from .quality import code_type_flag
         try:
@@ -2061,7 +3972,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         except HospitalImportError as e:
             raise HTTPException(422, str(e))
         except (OSError, ValueError) as e:
-            raise HTTPException(422, f"could not read that file: {e}")
+            raise HTTPException(422, f"could not read that file: {_plain(e)}")
         finally:
             p.unlink(missing_ok=True)
             try:
@@ -2071,6 +3982,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return {**res, "status": hospital_status(store)}
 
     @app.post("/api/hospital/parity")
+    @_progress_route("working")
     def api_hospital_parity(body: dict = Body(...)):
         """Practice rates vs hospital outpatient rates for the same payer+code."""
         from .hospital import hospital_parity
@@ -2087,6 +3999,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, f"bad input: {e}")
 
     @app.post("/api/hospital/cash")
+    @_progress_route("working")
     def api_hospital_cash(body: dict = Body(...)):
         """What local hospitals charge self-pay patients for the same codes."""
         from .hospital import cash_anchors
@@ -2106,6 +4019,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     # -- underpayment check ------------------------------------------------------------
 
     @app.post("/api/remits/check")
+    @_progress_route("working")
     def api_remit_check(body: dict = Body(...)):
         from .remits import check_underpayments
         try:
@@ -2115,8 +4029,11 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 basis=str(body.get("basis") or "allowed"))
         except BenchmarkError as e:
             raise HTTPException(422, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(422, f"bad input: {e}")
 
     @app.post("/api/remits/check.csv", response_class=PlainTextResponse)
+    @_progress_route("working")
     def api_remit_check_csv(body: dict = Body(...)):
         from .remits import check_underpayments, underpayment_csv
         try:
@@ -2126,6 +4043,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 basis=str(body.get("basis") or "allowed")))
         except BenchmarkError as e:
             raise HTTPException(422, str(e))
+        except (TypeError, ValueError) as e:
+            raise HTTPException(422, f"bad input: {e}")
 
     # -- engagement baselines / win tracking -------------------------------------------
 
@@ -2152,6 +4071,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return {"baselines": list_baselines(store)}
 
     @app.post("/api/engagements/compare")
+    @_progress_route("working")
     def api_compare_baseline(body: dict = Body(...)):
         from .engagements import compare_to_baseline
         try:
@@ -2169,26 +4089,57 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     def _run_packets() -> None:
         from .packets import build_all_packets
+        prog = packet_job.get("_p") or _progress.Progress(None, [])
+        prog.plan_from("packets")
+        prog.label = "Monthly packets"
+        ctx_tok = _progress.set_current(prog)
+        prog.stage("Finding each client's newest month")
         try:
             def progress(msg):
                 with packet_lock:
                     packet_job["message"] = msg
             res = build_all_packets(cfg, store, getattr(cfg, "packets_dir", None),
                                     progress=progress)
+            prog.finish("stopped" if prog.cancelled else "done")
             with packet_lock:
                 packet_job.update({"state": "done", "result": res,
                                    "message": f"{res['clients']} client packet(s) "
                                               f"written to {res['dir']}"})
         except Exception as e:  # noqa: BLE001 — report, never die silently
+            if prog.cancelled:
+                prog.finish("stopped")
+                with packet_lock:
+                    packet_job.update({"state": "done", "result": None,
+                                       "message": "stopped by you — the packets already "
+                                                  "written stay; nothing was written for "
+                                                  "the remaining clients"})
+                return
+            prog.finish("failed")
             log.warning("packet build failed: %s", e)
             with packet_lock:
                 packet_job.update({"state": "done", "result": None,
                                    "message": f"could not build packets: {e}"})
+        finally:
+            _progress.reset_current(ctx_tok)
 
     @app.get("/api/packets")
     def api_packets_status():
         with packet_lock:
-            return dict(packet_job)
+            out = {k: v for k, v in packet_job.items() if k != "_p"}
+            if packet_job.get("_p") is not None:
+                out["progress"] = packet_job["_p"].snapshot()
+            return out
+
+    @app.delete("/api/packets")
+    def api_packets_stop():
+        """Stop a running packet build (between clients; the packets already
+        written are complete documents and stay)."""
+        with packet_lock:
+            p = packet_job.get("_p")
+            running = packet_job["state"] == "running"
+        if p is not None and running:
+            p.cancel("stopped")
+        return {"stopped": bool(running)}
 
     @app.post("/api/packets/build")
     def api_packets_build():
@@ -2196,7 +4147,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             if packet_job["state"] == "running":
                 raise HTTPException(409, "a packet build is already running")
             packet_job.update({"state": "running", "result": None,
-                               "message": "starting…"})
+                               "message": "starting…", "_p": _progress.Progress(None, [])})
         try:
             threading.Thread(target=_bg_safe, args=(_run_packets,),
                              name="mrfx-packets", daemon=True).start()
@@ -2210,6 +4161,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return {"started": True}
 
     @app.get("/api/clients/digest")
+    @_progress_route("digest")
     def clients_digest():
         """The Monday review: per saved client, what moved. Composes the same
         functions the Changes/Benchmark/Medicare tabs run, so a digest cell can
@@ -2218,6 +4170,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return client_digest(store)
 
     @app.post("/api/medicare/leaders")
+    @_progress_route("working")
     def api_medicare_leaders(body: dict = Body(...)):
         """Practices ranked by shared Medicare patients received, optionally
         ZIP+radius clipped. in_store rows click through to the entity drawer
@@ -2227,7 +4180,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             return referral_leaders(
                 store,
                 zip_code=str(body.get("zip") or "").strip() or None,
-                radius_miles=float(body["radius_miles"]) if body.get("radius_miles") else None,
+                radius_miles=_radius_arg(body.get("radius_miles")),
                 limit=_bounded_int(body.get("limit"), 50, 1, 5000),
                 dataset_id=str(body.get("dataset_id") or "").strip() or None,
                 therapy_only=bool(body.get("therapy_only", True)))
@@ -2244,6 +4197,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return medicare_status(store)
 
     @app.post("/api/medicare/eligibility")
+    @_progress_route("working")
     def api_medicare_eligibility(body: dict = Body(...)):
         """Batch Order & Referring check: any pasted text in, one row per
         VALID NPI found (10 digits + NPPES prefix + Luhn check digit — pasted
@@ -2271,6 +4225,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 "on_list": sum(1 for r in rows if r["on_list"])}
 
     @app.post("/api/medicare/org")
+    @_progress_route("medicare_org")
     def api_medicare_org(body: dict = Body(...)):
         """One practice's Medicare view: its NPIs' eligibility, plus who shares
         patients into it and where it shares onward — each referral row carrying
@@ -2297,9 +4252,11 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 "SELECT DISTINCT npi FROM rates WHERE tin_value IN "
                 "(SELECT unnest(?::VARCHAR[])) AND npi IS NOT NULL ORDER BY npi",
                 [tins]).fetchall()]
-            name = (con.execute(
-                "SELECT any_value(display_name) FROM tin_directory WHERE tin_value "
-                "IN (SELECT unnest(?::VARCHAR[]))", [tins]).fetchone() or [None])[0]
+            # one name, the same on every call (review 9 4.10: any_value
+            # gave a multi-TIN subject a different member's name per call)
+            from .benchmark import mapped_entity_name
+            from .clients import subject_display_name
+            name = subject_display_name(con, tins, mapped_entity_name(store, subject))
         if not npis:
             raise HTTPException(
                 422, f"no practice with NPIs matched '{subject}'. The Medicare "
@@ -2343,38 +4300,57 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         grain = grain_of(qp, cfg, store)
         if grain == "npi":
             grain = "tin"  # outreach is entity-level by definition
-        fs = _fs(qp)
+        fs = _fs_app(qp)
+        # the per-code columns are on the house basis, at the dashboard's
+        # month and payer choice (outreach.build_outreach_rows)
+        market = {"month": fs.described.get("as_of_month") or "latest",
+                  "payers": list(fs.described.get("payers") or [])}
         headers, rows = build_outreach_rows(
-            store, rel_sql(grain, fs), fs.params, fs.described.get("codes")
+            store, rel_sql(grain, fs), fs.params, fs.described.get("codes"), market=market
         )
-        method = methodology_text(cfg, store, grain, fs, "display_name", "asc", "outreach")
-        return outreach_csv(headers, rows), method
+        return outreach_csv(headers, rows), outreach_methodology(store, grain, fs, market)
 
     @app.get("/api/export/outreach.csv")
+    @_progress_route("outreach")
     def export_outreach(request: Request, background: BackgroundTasks):
         """One row per entity (org name + geography + per-code merge fields),
         for cross-referencing a contact list / Brevo mail merge. DATA ONLY —
         no comment header lines that would break a mail-merge import; the
         dashboard button uses outreach.zip, which carries the methodology."""
         csv_text, _method = _outreach_parts(request)
-        stamp = dt.datetime.now().strftime("%Y-%m-%d_%H%M")
+        stamp = dt.datetime.now().strftime("%Y-%m-%d")
         out = _mktemp(".csv")
-        out.write_text(csv_text, encoding="utf-8")
+        # bytes, not write_text: the CSV already ends rows with \r\n and
+        # Windows' text mode made every row \r\r\n — a blank line between
+        # rows in Excel and a mail merge (review 11 item 4.4d)
+        out.write_bytes(csv_text.encode("utf-8"))
         background.add_task(out.unlink, missing_ok=True)
         return FileResponse(out, filename=f"mrfx_outreach_{stamp}.csv", media_type="text/csv")
 
     @app.get("/api/export/outreach.zip")
+    @_progress_route("outreach")
     def export_outreach_zip(request: Request, background: BackgroundTasks):
         """Outreach CSV + its methodology sidecar in one ZIP — the honesty
         contract says every delivered export carries its methodology, and a
         bare CSV download had nowhere to put it (comment lines would break
         the mail-merge import the CSV exists for)."""
         csv_text, method = _outreach_parts(request)
-        stamp = dt.datetime.now().strftime("%Y-%m-%d_%H%M")
+        today = dt.datetime.now()
+        stamp = today.strftime("%Y-%m-%d")
         out = _mktemp(".zip")
+        _progress.current().stage("Compressing")
+        day = (today.year, today.month, today.day, 0, 0, 0)
         with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
-            z.writestr(f"mrfx_outreach_{stamp}.csv", csv_text.encode("utf-8"))
-            z.writestr(f"mrfx_outreach_{stamp}_methodology.txt", method)
+            for member, data in ((f"mrfx_outreach_{stamp}.csv", csv_text.encode("utf-8")),
+                                 (f"mrfx_outreach_{stamp}_methodology.txt", method)):
+                info = zipfile.ZipInfo(member, date_time=day)
+                info.compress_type = zipfile.ZIP_DEFLATED
+                z.writestr(info, data)
+        if _progress.current().cancelled:
+            # stopped while compressing: the zip is not delivered, so it is not
+            # kept either (review 14 Group 3)
+            out.unlink(missing_ok=True)
+            _progress.check_cancelled()
         background.add_task(out.unlink, missing_ok=True)
         return FileResponse(out, filename=f"mrfx_outreach_{stamp}.zip", media_type="application/zip")
 
@@ -2388,29 +4364,47 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         name or TIN; empty `q` returns the largest practices as a starter set."""
         emap = store.entity_map()
         ql = q.strip().lower()
-        like = f"%{ql}%"
+        like = f"%{_lit(ql)}%"
         with store.connect() as con:
             # auto-grouped orgs: an NPPES org name shared by >1 TIN is ONE
             # practice on the Explorer's entity grain, and resolve_subject_tins
             # expands the name to all its TINs — but without this it had no
             # single picker option, so a multi-location org got benchmarked as a
             # lone fragment TIN. Exclude the 'TIN …' no-name fallback labels.
+            # "Unnamed group — 2 clinicians (NASHVILLE)" is a description, not
+            # a name: two unrelated practices can share it, so it never pools
             auto_sql = ("SELECT display_name FROM tin_directory "
-                        "WHERE display_name NOT LIKE 'TIN %' "
-                        + ("AND lower(display_name) LIKE ? " if ql else "")
-                        + "GROUP BY display_name HAVING count(*) > 1 LIMIT ?")
+                        "WHERE display_name NOT LIKE 'TIN %' AND name_source <> 'unnamed_group' "
+                        + ("AND lower(display_name) LIKE ? ESCAPE '\\' " if ql else "")
+                        # the biggest multi-TIN practices first; a UNIQUE
+                        # order (invariant 7) — without it LIMIT kept a
+                        # different 50 on each call
+                        + "GROUP BY display_name HAVING count(*) > 1 "
+                        "ORDER BY count(*) DESC, display_name LIMIT ?")
             auto = [r[0] for r in con.execute(
                 auto_sql, ([like] if ql else []) + [limit]).fetchall()]
             if ql:
                 tins = _dicts(con.execute(
                     "SELECT tin_value, display_name, npi_count, states FROM tin_directory "
-                    "WHERE lower(display_name) LIKE ? OR tin_value LIKE ? "
-                    "ORDER BY npi_count DESC NULLS LAST, display_name LIMIT ?",
-                    [like, f"{ql}%", limit]))
+                    "WHERE lower(display_name) LIKE ? ESCAPE '\\' OR tin_value LIKE ? ESCAPE '\\' "
+                    "ORDER BY npi_count DESC NULLS LAST, display_name, tin_value LIMIT ?",
+                    [like, f"{_lit(ql)}%", limit]))
+                if len(ql) == 10 and ql.isdigit():
+                    # the box invites an NPI: offer the practices it bills
+                    # under (it matched nothing before — review 10 item 1.9)
+                    # the kept (TIN, NPI) pairs, not a scan of every rate row:
+                    # the header search box sends NPIs here (review 13 6.4)
+                    tins += _dicts(con.execute(
+                        "SELECT tin_value, display_name, npi_count, states FROM tin_directory "
+                        f"WHERE tin_value IN (SELECT DISTINCT tin_value FROM {store.pairs_relation()} "
+                        "WHERE npi = ?) "
+                        "ORDER BY npi_count DESC NULLS LAST, display_name, tin_value LIMIT ?",
+                        [ql, limit]))
             else:
                 tins = _dicts(con.execute(
                     "SELECT tin_value, display_name, npi_count, states FROM tin_directory "
-                    "ORDER BY npi_count DESC NULLS LAST, display_name LIMIT ?", [limit]))
+                    "ORDER BY npi_count DESC NULLS LAST, display_name, tin_value LIMIT ?",
+                    [limit]))
         entities = sorted(set(emap.values()) | set(auto))
         if ql:
             entities = [e for e in entities if ql in e.lower()]
@@ -2426,6 +4420,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return {"entities": entities, "tins": tins}
 
     @app.post("/api/benchmark/market")
+    @_progress_route("benchmark")
     def benchmark_market(body: dict = Body(...)):
         try:
             return compute_benchmark(store, str(body.get("subject", "")), body.get("market") or {})
@@ -2435,6 +4430,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
 
     @app.post("/api/benchmark/opportunity")
+    @_progress_route("benchmark")
     def benchmark_opportunity(body: dict = Body(...)):
         try:
             bench = compute_benchmark(store, str(body.get("subject", "")), body.get("market") or {})
@@ -2448,22 +4444,28 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
 
     @app.post("/api/report/pitch", response_class=HTMLResponse)
-    def pitch_report(body: dict = Body(...)):
+    @_progress_route("pitch")
+    def pitch_report(body: dict = Body(...), fmt: str = Query("", alias="format")):
         try:
-            bench = compute_benchmark(store, str(body.get("subject", "")), body.get("market") or {})
+            _prog = _progress.current()
+            _prog.stage("Comparing with peers")
+            with _prog.group():
+                bench = compute_benchmark(store, str(body.get("subject", "")),
+                                          body.get("market") or {})
             opp = None
             volumes = clean_volumes(body.get("volumes"))
             if volumes:
                 opp = compute_opportunity(bench, volumes,
                                           int(body.get("conservative_percentile", 40)))
-            return HTMLResponse(render_pitch_report(cfg, store, bench, opp))
+            return _html_or_pdf(render_pitch_report(cfg, store, bench, opp), fmt, "pitch_report")
         except (BenchmarkError, ValueError, TypeError) as e:
             # ValueError/TypeError: a non-numeric or null volume/percentile in
             # the JSON body (int()/float()/None) — a client input error, so 422.
             raise HTTPException(422, str(e))
 
     @app.post("/api/report/negotiation", response_class=HTMLResponse)
-    def negotiation_report(body: dict = Body(...)):
+    @_progress_route("negotiation")
+    def negotiation_report(body: dict = Body(...), fmt: str = Query("", alias="format")):
         try:
             volumes = clean_volumes(body.get("volumes"))
             neg = compute_payer_negotiation(
@@ -2471,7 +4473,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 volumes=volumes or None,
                 conservative_percentile=int(body.get("conservative_percentile", 40)),
             )
-            return HTMLResponse(render_negotiation_report(cfg, store, neg))
+            return _html_or_pdf(render_negotiation_report(cfg, store, neg), fmt, "negotiation_one_pager")
         except (BenchmarkError, ValueError, TypeError) as e:
             # ValueError/TypeError: a non-numeric or null volume/percentile in
             # the JSON body (int()/float()/None) — a client input error, so 422.
@@ -2479,32 +4481,33 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     # payer-comparison workspace (Negotiate tab): one payer, named comparables
     @app.post("/api/negotiate/compare")
+    @_progress_route("compare")
     def negotiate_compare(body: dict = Body(...)):
         try:
             return compute_payer_comparison(
                 store, str(body.get("subject", "")), str(body.get("payer", "")),
                 body.get("market") or {},
-                comparables=[str(c) for c in (body.get("comparables") or [])]
-                if isinstance(body.get("comparables") or [], list) else [],
+                comparables=_comparables_arg(body.get("comparables")) or [],
             )
         except (BenchmarkError, ValueError, TypeError) as e:
             raise HTTPException(422, str(e))
 
     @app.post("/api/report/payer-compare", response_class=HTMLResponse)
-    def payer_compare_report(body: dict = Body(...)):
+    @_progress_route("compare")
+    def payer_compare_report(body: dict = Body(...), fmt: str = Query("", alias="format")):
         try:
             comp = compute_payer_comparison(
                 store, str(body.get("subject", "")), str(body.get("payer", "")),
                 body.get("market") or {},
-                comparables=[str(c) for c in (body.get("comparables") or [])]
-                if isinstance(body.get("comparables") or [], list) else [],
+                comparables=_comparables_arg(body.get("comparables")) or [],
             )
-            return HTMLResponse(render_payer_compare_report(cfg, store, comp))
+            return _html_or_pdf(render_payer_compare_report(cfg, store, comp), fmt, "payer_comparison")
         except (BenchmarkError, ValueError, TypeError) as e:
             raise HTTPException(422, str(e))
 
     # fee schedule / payer scorecard (§7C)
     @app.post("/api/negotiate/proposal")
+    @_progress_route("proposal")
     def negotiate_proposal(body: dict = Body(...)):
         from .benchmark import compute_rate_proposal
         try:
@@ -2512,24 +4515,78 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 store, str(body.get("subject", "")), str(body.get("payer", "")),
                 body.get("market") or {}, body.get("target") or {},
                 volumes=body.get("volumes") or None,
-                comparables=body.get("comparables") or None)
-        except BenchmarkError as e:
+                comparables=_comparables_arg(body.get("comparables")))
+        except (BenchmarkError, ValueError, TypeError) as e:
             raise HTTPException(422, str(e))
 
+    @app.post("/api/negotiate/paid-more")
+    @_progress_route("compare")
+    def negotiate_paid_more(body: dict = Body(...)):
+        """The named clinics this payer pays more than the practice for the
+        same codes — its city when 5+ comparable clinics are there, else its
+        state (benchmark.clinics_paid_more)."""
+        from .benchmark import clinics_paid_more
+        try:
+            return clinics_paid_more(store, str(body.get("subject", "")),
+                                     str(body.get("payer", "")), body.get("market") or {},
+                                     limit=int(body.get("limit") or 100))
+        except (BenchmarkError, ValueError, TypeError) as e:
+            raise HTTPException(422, str(e))
+
+    @app.post("/api/negotiate/paid-more.csv", response_class=PlainTextResponse)
+    @_progress_route("compare")
+    def negotiate_paid_more_csv(body: dict = Body(...)):
+        import csv as _csv
+        import io as _io
+
+        from .benchmark import clinics_paid_more
+        from .store import defuse_csv
+        try:
+            d = clinics_paid_more(store, str(body.get("subject", "")), str(body.get("payer", "")),
+                                  body.get("market") or {}, limit=1000)
+        except (BenchmarkError, ValueError, TypeError) as e:
+            raise HTTPException(422, str(e))
+        buf = _io.StringIO()
+        cut = ([f"Listing the first {len(d['clinics']):,} of {d['clinics_paid_more']:,} clinics."]
+               if len(d["clinics"]) < d["clinics_paid_more"] else [])
+        for line in (d["headline"], f"Compared with: {d['compared_with']} in {d['where']}.",
+                     *cut, d["note"], *store.analytics_note()):
+            buf.write("# " + " ".join(str(line).split()) + "\n")
+        w = _csv.writer(buf)
+        codes = [c["code"] for c in d["codes"]]
+        w.writerow(["rank", "practice", "name_source", "practice_type", "tax_id", "cities",
+                    "npi_count", "codes_compared", "codes_paid_more", "median_gap_pct",
+                    *[f"rate_{c}" for c in codes], "why_this_type"])
+        w.writerow(["", "YOUR RATE", "", "", "", "", "", "", "", "",
+                    *[f"{c['your_rate']:.2f}" for c in d["codes"]], ""])
+        for x in d["clinics"]:
+            r = {q["code"]: q["rate"] for q in x["rates"]}
+            w.writerow([defuse_csv(str(v)) for v in (
+                x["rank"], x["name"], x["name_source"] or "", x["practice_type"] or "", x["tin"],
+                "; ".join(x["cities"]), x["npi_count"] if x["npi_count"] is not None else "",
+                x["codes_compared"], x["codes_paid_more"],
+                "" if x["median_gap_pct"] is None else f"{x['median_gap_pct']:.1f}",
+                *[(f"{r[c]:.2f}" if c in r else "") for c in codes], x["type_reason"] or "")])
+        safe = re.sub(r"[^A-Za-z0-9]+", "_", d["payer"]).strip("_") or "payer"
+        return PlainTextResponse("\ufeff" + buf.getvalue(), headers={
+            "Content-Disposition": f'attachment; filename="paid_more_{safe}.csv"'})
+
     @app.post("/api/report/proposal", response_class=HTMLResponse)
-    def report_proposal(body: dict = Body(...)):
+    @_progress_route("proposal")
+    def report_proposal(body: dict = Body(...), fmt: str = Query("", alias="format")):
         from .benchmark import compute_rate_proposal, render_proposal_report
         try:
             prop = compute_rate_proposal(
                 store, str(body.get("subject", "")), str(body.get("payer", "")),
                 body.get("market") or {}, body.get("target") or {},
                 volumes=body.get("volumes") or None,
-                comparables=body.get("comparables") or None)
-            return render_proposal_report(cfg, store, prop)
-        except BenchmarkError as e:
+                comparables=_comparables_arg(body.get("comparables")))
+            return _html_or_pdf(render_proposal_report(cfg, store, prop), fmt, "rate_proposal")
+        except (BenchmarkError, ValueError, TypeError) as e:
             raise HTTPException(422, str(e))
 
     @app.post("/api/schedule/fee")
+    @_progress_route("ratecard")
     def schedule_fee(body: dict = Body(...)):
         try:
             fs = compute_fee_schedule(store, str(body.get("subject", "")), body.get("market") or {})
@@ -2539,21 +4596,145 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             # the JSON body — a client input error (422), never a 500.
             raise HTTPException(422, str(e))
 
+    @app.get("/api/schedule/visit/presets")
+    def schedule_visit_presets():
+        """The standard-visit baskets the Rate card's visit calculator offers."""
+        from .visit import DEFAULT_PRESET, UNITS_RULE, presets_public
+        return {"presets": presets_public(), "default": DEFAULT_PRESET, "units_rule": UNITS_RULE}
+
+    @app.post("/api/schedule/visit")
+    @_progress_route("visit")
+    def schedule_visit(body: dict = Body(...)):
+        """One standard therapy visit, priced per payer at the practice's own
+        rates — units by the CMS 8-minute rule (mrfx/visit.py)."""
+        from .visit import VisitError, price_visit
+        try:
+            return price_visit(store, str(body.get("subject", "")), body.get("market") or {},
+                               body.get("lines"), body.get("preset"))
+        except (VisitError, BenchmarkError, ValueError, TypeError) as e:
+            raise HTTPException(422, str(e))
+
+    # -- "Visit value in this market" (review 12, Group 3) -------------------
+    def _visit_market(body: dict) -> dict:
+        from .visit_market import market_visit_value
+        subject = body.get("subject")
+        return market_visit_value(
+            store, body.get("market") or {}, body.get("lines") or None,
+            str(body["preset"]) if body.get("preset") else None,
+            str(subject) if subject not in (None, "") else None)
+
+    def _visit_market_or_refusal(body: dict) -> tuple[dict | None, str | None]:
+        """For the rate card's printable / CSV: the block, or why not (a
+        refusal never costs the rate card itself)."""
+        from .visit import VisitError
+        if not body.get("visit_market"):
+            return None, None
+        try:
+            return _visit_market(body), None
+        except (VisitError, BenchmarkError, ValueError, TypeError) as e:
+            return None, str(e)
+
+    @app.post("/api/schedule/visit/market")
+    @_progress_route("visit_market")
+    def schedule_visit_market(body: dict = Body(...)):
+        """One standard visit priced at every practice of a state and
+        discipline: mean / median / P25 / P75 per payer and over all payers,
+        and the optional subject's place in each (mrfx/visit_market.py)."""
+        from .visit import VisitError
+        try:
+            return _visit_market(body)
+        except (VisitError, BenchmarkError, ValueError, TypeError) as e:
+            raise HTTPException(422, str(e))
+
+    @app.post("/api/schedule/visit/market.csv", response_class=PlainTextResponse)
+    @_progress_route("visit_market")
+    def schedule_visit_market_csv(body: dict = Body(...)):
+        from .visit import VisitError
+        from .visit_market import to_csv
+        try:
+            note = "".join(f"# {x}\n" for x in store.analytics_note())
+            return PlainTextResponse("\ufeff" + note + to_csv(_visit_market(body)), headers={
+                "Content-Disposition": 'attachment; filename="visit_value.csv"'})
+        except (VisitError, BenchmarkError, ValueError, TypeError) as e:
+            raise HTTPException(422, str(e))
+
+    @app.post("/api/schedule/visit/market/practices")
+    @_progress_route("visit_market")
+    def schedule_visit_market_practices(body: dict = Body(...)):
+        """The practices behind one row of "Visit value in this market",
+        ranked by their visit value (highest first; order='asc' for lowest),
+        a page at a time, with name, city, tax ID, NPIs and the rates that
+        make up each visit (mrfx/visit_market.py market_visit_practices)."""
+        from .visit import VisitError
+        from .visit_market import market_visit_practices
+        subject = body.get("subject")
+        try:
+            return market_visit_practices(
+                store, body.get("market") or {}, body.get("lines") or None,
+                str(body["preset"]) if body.get("preset") else None,
+                str(body.get("payer") or "All payers"),
+                str(subject) if subject not in (None, "") else None,
+                int(body.get("offset") or 0), int(body.get("limit") or 50),
+                "asc" if str(body.get("order") or "").lower() == "asc" else "desc")
+        except (VisitError, BenchmarkError, ValueError, TypeError) as e:
+            raise HTTPException(422, str(e))
+
+    @app.post("/api/schedule/visit/market/practices.csv", response_class=PlainTextResponse)
+    @_progress_route("visit_market")
+    def schedule_visit_market_practices_csv(body: dict = Body(...)):
+        from .visit import VisitError
+        from .visit_market import practices_csv
+        subject = body.get("subject")
+        payer = str(body.get("payer") or "All payers")
+        try:
+            note = "".join(f"# {x}\n" for x in store.analytics_note())
+            text = practices_csv(store, body.get("market") or {}, body.get("lines") or None,
+                                 str(body["preset"]) if body.get("preset") else None, payer,
+                                 str(subject) if subject not in (None, "") else None)
+        except (VisitError, BenchmarkError, ValueError, TypeError) as e:
+            raise HTTPException(422, str(e))
+        safe = re.sub(r"[^A-Za-z0-9]+", "_", payer).strip("_") or "payer"
+        return PlainTextResponse("\ufeff" + note + text, headers={
+            "Content-Disposition": f'attachment; filename="visit_value_practices_{safe}.csv"'})
+
+    @app.post("/api/report/visitvalue", response_class=HTMLResponse)
+    @_progress_route("visit_market")
+    def report_visit_value(body: dict = Body(...), fmt: str = Query("", alias="format")):
+        from .visit import VisitError
+        from .visit_market import render_report
+        try:
+            return _html_or_pdf(render_report(cfg, store, _visit_market(body)), fmt, "visit_value")
+        except (VisitError, BenchmarkError, ValueError, TypeError) as e:
+            raise HTTPException(422, str(e))
+
     @app.post("/api/report/ratecard", response_class=HTMLResponse)
-    def ratecard_report(body: dict = Body(...)):
+    @_progress_route("ratecard_report")
+    def ratecard_report(body: dict = Body(...), fmt: str = Query("", alias="format")):
         try:
             fs = compute_fee_schedule(store, str(body.get("subject", "")), body.get("market") or {})
-            return HTMLResponse(render_rate_card(cfg, store, fs, payer_scorecard(fs)))
+            _progress.current().stage("Pricing a standard visit across the state")
+            vm, why = _visit_market_or_refusal(body)
+            _progress.current().stage("Drawing trends and listing sources")
+            return _html_or_pdf(render_rate_card(cfg, store, fs, payer_scorecard(fs),
+                                                 visit_market=vm, visit_market_refusal=why),
+                                fmt, "rate_card")
         except (BenchmarkError, ValueError, TypeError) as e:
             # ValueError/TypeError: a non-numeric or null volume/percentile in
             # the JSON body — a client input error (422), never a 500.
             raise HTTPException(422, str(e))
 
     @app.post("/api/schedule/fee.csv", response_class=PlainTextResponse)
+    @_progress_route("ratecard")
     def schedule_fee_csv(body: dict = Body(...)):
         try:
             fs = compute_fee_schedule(store, str(body.get("subject", "")), body.get("market") or {})
             csv_text = fee_schedule_csv(fs, payer_scorecard(fs), store)
+            vm, why = _visit_market_or_refusal(body)
+            if vm is not None:
+                from .visit_market import to_csv
+                csv_text += "\n" + to_csv(vm)
+            elif why:
+                csv_text += f"\n# Visit value in this market: not shown — {why}\n"
             return PlainTextResponse("﻿" + csv_text, headers={  # BOM for Excel
                 "Content-Disposition": 'attachment; filename="rate_card.csv"'})
         except (BenchmarkError, ValueError, TypeError) as e:
@@ -2563,28 +4744,44 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     # underpaid-practice leads (§7D)
     @app.post("/api/leads")
+    @_progress_route("leads")
     def leads(body: dict = Body(...)):
         try:
-            return compute_leads(
+            # computed (and cached) at the CSV's limit and cut here: the screen
+            # and its "Download CSV" are then one computation, not two (review
+            # 13 item 3.5 — the CSV recomputed the list the screen had just
+            # cached, 1.8 s). The ranking has a unique tiebreak, so the first
+            # N of the long list ARE the short list.
+            limit = _bounded_int(body.get("limit"), 100, 1, LEADS_LIMIT)
+            full = compute_leads(
                 store, body.get("market") or {},
                 threshold_percentile=_as_int(body.get("threshold_percentile"), 25),
                 min_codes=_bounded_int(body.get("min_codes"), 3, 1, 1000),
-                limit=_bounded_int(body.get("limit"), 100, 1, 5000),
+                limit=LEADS_LIMIT,
                 exclude_subject=(str(body["exclude_subject"]) if body.get("exclude_subject") else None),
             )
+            if limit >= LEADS_LIMIT:
+                return full
+            out = dict(full)
+            out["leads"] = full["leads"][:limit]
+            out["count"] = len(out["leads"])
+            out["limit"] = limit
+            out["truncated"] = bool(full["truncated"]) or len(full["leads"]) > limit
+            return out
         except (BenchmarkError, ValueError, TypeError) as e:
             # ValueError/TypeError: a non-numeric or null volume/percentile in
             # the JSON body — a client input error (422), never a 500.
             raise HTTPException(422, str(e))
 
     @app.post("/api/leads.csv", response_class=PlainTextResponse)
+    @_progress_route("leads")
     def leads_export(body: dict = Body(...)):
         try:
             result = compute_leads(
                 store, body.get("market") or {},
                 threshold_percentile=_as_int(body.get("threshold_percentile"), 25),
                 min_codes=_bounded_int(body.get("min_codes"), 3, 1, 1000),
-                limit=_bounded_int(body.get("limit"), 1000, 1, 5000),
+                limit=_bounded_int(body.get("limit"), LEADS_LIMIT, 1, LEADS_LIMIT),
                 exclude_subject=(str(body["exclude_subject"]) if body.get("exclude_subject") else None),
             )
             return PlainTextResponse("﻿" + leads_csv(store, result), headers={
@@ -2596,6 +4793,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     # rate-change monitoring (§7E)
     @app.post("/api/changes")
+    @_progress_route("changes")
     def changes(body: dict = Body(...)):
         try:
             return compute_rate_changes(
@@ -2609,6 +4807,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
 
     @app.post("/api/changes.csv", response_class=PlainTextResponse)
+    @_progress_route("changes")
     def changes_export(body: dict = Body(...)):
         try:
             result = compute_rate_changes(
@@ -2626,6 +4825,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     # market intelligence for one code (Markets tab): geography, negotiability,
     # % of Medicare, assistant/telehealth differential — all share the house basis
     @app.post("/api/market/geography")
+    @_progress_route("markets")
     def market_geography(body: dict = Body(...)):
         try:
             return geographic_rates(store, body.get("code"), body.get("market") or {},
@@ -2634,6 +4834,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
 
     @app.post("/api/market/negotiability")
+    @_progress_route("markets")
     def market_negotiability(body: dict = Body(...)):
         try:
             return negotiability(store, body.get("code"), body.get("market") or {})
@@ -2641,6 +4842,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
 
     @app.post("/api/market/medicare")
+    @_progress_route("markets")
     def market_medicare(body: dict = Body(...)):
         try:
             return medicare_index(store, body.get("code"), body.get("market") or {})
@@ -2648,6 +4850,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
 
     @app.post("/api/market/differential")
+    @_progress_route("markets")
     def market_differential(body: dict = Body(...)):
         try:
             return assistant_pos_diff(store, body.get("code"), body.get("market") or {})
@@ -2655,16 +4858,19 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
 
     @app.post("/api/contract-gaps")
+    @_progress_route("gaps")
     def contract_gaps_ep(body: dict = Body(...)):
         try:
             return contract_gaps(
                 store, str(body.get("subject") or ""), body.get("market") or {},
-                min_peers=_as_int(body.get("min_peers"), 5),
+                # bounded: 1e308 reached DuckDB as an out-of-range integer (a 500)
+                min_peers=_bounded_int(body.get("min_peers"), 5, 1, 1_000_000),
                 limit=_bounded_int(body.get("limit"), 100, 1, 5000))
         except (BenchmarkError, ValueError, TypeError) as e:
             raise HTTPException(422, str(e))
 
     @app.post("/api/leaderboard")
+    @_progress_route("leaderboard")
     def leaderboard_ep(body: dict = Body(...)):
         try:
             return compute_leaderboard(
@@ -2676,6 +4882,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
 
     @app.post("/api/trajectory")
+    @_progress_route("trajectory")
     def trajectory_ep(body: dict = Body(...)):
         from .inflation import InflationError
         try:
@@ -2715,6 +4922,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return {"saved": n, **index_status(store)}
 
     @app.post("/api/roster")
+    @_progress_route("roster")
     def roster_ep(body: dict = Body(...)):
         try:
             return compute_payer_roster(
@@ -2726,6 +4934,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, str(e))
 
     @app.post("/api/roster.csv", response_class=PlainTextResponse)
+    @_progress_route("roster")
     def roster_csv_ep(body: dict = Body(...)):
         try:
             result = compute_payer_roster(
@@ -2750,7 +4959,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             raise HTTPException(422, "peer set name required")
         store.save_peer_set(name, {
             "mode": body.get("mode", "curated"),
-            "tins": [str(t).replace("-", "") for t in (body.get("tins") or [])],
+            "tins": [t.replace("-", "") for t in _str_list(body.get("tins"), "tins")],
             "notes": body.get("notes", ""),
         })
         return {"peer_sets": store.peer_sets()}
@@ -2761,6 +4970,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         return {"peer_sets": store.peer_sets()}
 
     @app.get("/api/overview")
+    @_progress_route("overview")
     def overview(request: Request):
         from .overview import market_overview
         from .states import state_code
@@ -2784,9 +4994,11 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             if hit is not None:
                 return hit
             result = market_overview(store, state)
-            if len(_overview_cache) > 64:
-                _overview_cache.clear()
-            _overview_cache[key] = result
+            from .store import _run_cancelled
+            if not _run_cancelled():          # never cache under a Stop (review 14 2.9)
+                if len(_overview_cache) > 64:
+                    _overview_cache.clear()
+                _overview_cache[key] = result
             return result
         finally:
             _overview_lock.release()
@@ -2827,6 +5039,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         try:
             n = _load_mpfs_csv(store, data, fname)
         except (ValueError, KeyError) as e:
+            if str(e).startswith("line "):     # a bad value on one line: say which
+                raise HTTPException(422, f"MPFS CSV not loaded — {e}")
             raise HTTPException(422, f"MPFS CSV must have code,locality,non_facility_rate columns: {e}")
         return {"loaded": store.mpfs_loaded(), "rows": n}
 
@@ -2834,10 +5048,18 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     @app.get("/api/sources")
     def sources(state: str | None = None):
+        # ONE answer with the Files tab's tested-sources catalog (review 10
+        # item 3.7): a registry card the catalog has verified says so and
+        # carries the tested link; a tested payer the registry has no card
+        # for gets one ("tested source"), so Sources never calls a link
+        # "unverified — search for current URL" that Files auto-queues
+        from .known_sources import load_known_sources, merge_registry_cards
+        known = load_known_sources(cfg.known_sources_path)
+        st = (state or "").strip().upper()
         return {
             "states": registry.states(),
-            "national": registry.national(),
-            "state": registry.state(state) if state else [],
+            "national": merge_registry_cards(registry.national(), known, "US"),
+            "state": merge_registry_cards(registry.state(st), known, st) if st else [],
             "elevance_note": registry.elevance_note(),
         }
 
@@ -2852,8 +5074,75 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
 
     # -- misc -------------------------------------------------------------------------------
 
+    # The header poll NEVER waits on an analytics update (0.8.1). In the field
+    # log, behind a billion-row update, /api/stats took 5 s ... 55 MINUTES per
+    # call: each part it reads (whole-store counts, names progress, coverage)
+    # is cached and single-flight, but the caller that happens to recompute
+    # one pays for it, and every 15 s poll queued another thread. Now the body
+    # is computed by ONE thread at a time; a request waits for it at most
+    # STATS_WAIT_S and otherwise answers with the last body (counts a few
+    # seconds old — the header says nothing it did not say a moment ago).
+    _stats_hold = {"body": None, "busy": None}
+    _stats_mu = threading.Lock()
+
+    def _stats_refresh() -> threading.Event:
+        """Start (or join) the one computation of the stats body; returns an
+        event set when it ends."""
+        with _stats_mu:
+            ev = _stats_hold["busy"]
+            if ev is not None:
+                return ev
+            ev = threading.Event()
+            _stats_hold["busy"] = ev
+
+        def run():
+            try:
+                try:
+                    body = _stats_body()
+                except Exception as e:  # noqa: BLE001
+                    # a read that met a part swap is asked again once — the
+                    # rule SwapRetryMiddleware keeps for requests (review 11
+                    # item 1.8); this body is computed off the request
+                    if not _part_swap_race(e):
+                        raise
+                    body = _stats_body()
+                with _stats_mu:
+                    _stats_hold["body"] = body
+            except Exception:  # noqa: BLE001 — the last body stands
+                log.debug("stats body unavailable", exc_info=True)
+            finally:
+                with _stats_mu:
+                    _stats_hold["busy"] = None
+                ev.set()
+        threading.Thread(target=run, name="mrfx-stats", daemon=True).start()
+        return ev
+
     @app.get("/api/stats")
+    @_log_if_slow("/api/stats")
     def stats():
+        ev = _stats_refresh()
+        ev.wait(STATS_WAIT_S)          # module constant: tests shorten it
+        with _stats_mu:
+            body = _stats_hold["body"]
+        if body is not None:
+            return body
+        # nothing computed yet and the first computation is slow (a busy
+        # store right after start): answer from the files table alone
+        return _stats_minimal()
+
+    def _stats_minimal() -> dict:
+        with store.connect() as con:
+            rates_n, payers_n, files_done = con.execute(
+                "SELECT coalesce(sum(rows_emitted) FILTER (WHERE coalesce(file_type, '') "
+                "<> 'provider_reference'), 0), count(DISTINCT payer) FILTER (WHERE "
+                "rows_emitted > 0), count(*) FROM files WHERE status = 'done'").fetchone()
+        return {"rates": int(rates_n or 0), "tins": None, "payers": int(payers_n or 0),
+                "files_done": int(files_done or 0), "attention": [], "enrichment": None,
+                "enrichment_mode": cfg.enrichment.mode, "enrichment_bulk_active": False,
+                "default_grain": None, "data_generation": None, "analytics": None,
+                "counting": True}
+
+    def _stats_body() -> dict:
         # the whole-store counts are cached + single-flight (store_stats): this
         # endpoint is on the dashboard's 15s poll, and an uncached
         # count(DISTINCT) over 86M raw rows stacked concurrent HDD scans that
@@ -2863,9 +5152,10 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             files_done = con.execute("SELECT count(*) FROM files WHERE status = 'done'").fetchone()[0]
             attention = _dicts(con.execute(
                 """
-                SELECT filename, status, ref_groups_skipped, error FROM files
+                SELECT filename, status, ref_groups_skipped, error,
+                       coalesce(TRY_CAST(json_extract_string(qa, '$.missing_ref_ids') AS BIGINT), 0) AS missing_ref_ids FROM files
                 WHERE status IN ('failed', 'quarantined', 'pending_confirmation')
-                   OR ref_groups_skipped > 0
+                   OR ref_groups_skipped > 0 OR coalesce(TRY_CAST(json_extract_string(qa, '$.missing_ref_ids') AS BIGINT), 0) > 0
                 """
             ))
         return {"rates": counts["rates"], "tins": counts["tins"], "payers": counts["payers"],
@@ -2875,7 +5165,91 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 # True when the fast local NPPES bulk file is actually in use, so
                 # the dashboard only nudges toward it when we're on the slow API.
                 "enrichment_bulk_active": use_bulk_enrichment(cfg),
-                "default_grain": grain_of({}, cfg, store)}
+                "default_grain": grain_of({}, cfg, store),
+                # bumps when a rollup lands (new rates, new payers, new
+                # months): the dashboard refreshes its pickers and the open
+                # Explorer/Code view when it changes (round 7 P1.20)
+                "data_generation": store.data_generation,
+                # how much of what is loaded the screens answer from, and what
+                # the rollup is doing about the rest (review 13 item 1.2)
+                "analytics": _analytics_public()}
+
+    def _analytics_public() -> dict:
+        cov = store.analytics_coverage()
+        keep = ("state", "reason", "pct", "eta_text", "covered_files", "done_files",
+                "covered_payers", "loaded_payers", "covered_rows", "loaded_rows", "sentence",
+                "paused", "rebuilding", "parts_saved", "new_files")
+        return {k: cov.get(k) for k in keep}
+
+    # -- the Analytics activity panel (review 14 item 1.2) -----------------------
+    # Async and single-flight: the panel polls every 2 s while open, so it must
+    # never queue behind a saturated request pool (the round-13 progress
+    # channel's rule) — it is computed on its own 2-thread limiter, and a poll
+    # that arrives while one is being computed gets the last answer.
+    _activity = {"at": 0.0, "body": None, "busy": False}
+    _activity_mu = threading.Lock()
+
+    def _activity_compute() -> dict:
+        from . import activity as _act
+        body = _act.build(store)
+        with _activity_mu:
+            _activity.update(at=time.monotonic(), body=body, busy=False)
+        return body
+
+    @app.get("/api/analytics/activity")
+    async def analytics_activity():
+        import anyio
+        import anyio.to_thread
+        with _activity_mu:
+            fresh = _activity["body"] is not None and time.monotonic() - _activity["at"] < 1.0
+            if fresh or _activity["busy"]:
+                if _activity["body"] is not None:
+                    return _activity["body"]
+            _activity["busy"] = True
+        lim = app.state.__dict__.setdefault("activity_limiter", anyio.CapacityLimiter(2))
+        try:
+            return await anyio.to_thread.run_sync(_activity_compute, limiter=lim)
+        finally:
+            with _activity_mu:
+                _activity["busy"] = False
+
+    @app.post("/api/analytics/run-now")
+    def analytics_run_now():
+        """Fold in at the next safe moment, even while downloads continue."""
+        from . import foldin
+        f = foldin.running(store)
+        if f is None:
+            raise HTTPException(409, "the analytics scheduler is not running in this "
+                                     "process — the analytics update when a command finishes")
+        f.request_run_now()
+        with _activity_mu:
+            _activity["at"] = 0.0
+        return {"ok": True, "scheduler": f.state()}
+
+    @app.post("/api/analytics/pause")
+    def analytics_pause(body: dict = Body(default={})):
+        """{"paused": true|false} — hold every analytics update (persisted) or
+        resume. A running build stops between two committed parts."""
+        if not isinstance(body, dict) or not isinstance(body.get("paused"), bool):
+            raise HTTPException(422, 'send {"paused": true} or {"paused": false}')
+        from . import foldin
+        f = foldin.running(store)
+        if f is not None:
+            f.set_paused(body["paused"])
+        else:
+            store.set_analytics_paused(body["paused"])
+        with _activity_mu:
+            _activity["at"] = 0.0
+        return {"ok": True, "paused": store.analytics_paused()}
+
+    @app.get("/api/boot")
+    @_log_if_slow("/api/boot")
+    def boot_info():
+        """The one thing the first paint needs from /api/stats (whose
+        whole-store counts made the table wait 1.2-1.7 s — review 10 1.4) —
+        and the coverage line, so the first paint already says when the
+        screens answer from part of the store (review 13 item 1.2)."""
+        return {"default_grain": grain_of({}, cfg, store), "analytics": _analytics_public()}
 
     @app.get("/api/states")
     def states():
@@ -2891,14 +5265,31 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         # every raw parquet part in the store (an uncached full-store scan on the
         # interactive dashboard-load path). Fall back to raw `rates` only before
         # the first rollup exists, so a brand-new store still lists its payers.
-        with store.connect() as con:
-            has_tbl = con.execute(
-                "SELECT count(*) FROM information_schema.tables "
-                "WHERE table_name = 'rates_by_tin_tbl'").fetchone()[0]
-            src = "rates_by_tin_tbl" if has_tbl else "rates"
-            rows = con.execute(
-                f"SELECT DISTINCT payer FROM {src} ORDER BY payer").fetchall()
-        return {"payers": [r[0] for r in rows]}
+        def compute():
+            with store.connect() as con:
+                has_tbl = con.execute(
+                    "SELECT count(*) FROM information_schema.tables "
+                    "WHERE table_name = 'rates_by_tin_tbl'").fetchone()[0]
+                src = "rates_by_tin_tbl" if has_tbl else "rates"
+                rows = con.execute(
+                    f"SELECT DISTINCT payer FROM {src} ORDER BY payer").fetchall()
+            return {"payers": [r[0] for r in rows], "_spine": bool(has_tbl)}
+        got = store.cached("api.payers", None, compute)
+        if not got.pop("_spine"):
+            # before the first rollup the list reads raw parts, which land
+            # without a new generation: never hold that one
+            store._gen_cache.pop(("api.payers", None), None)
+            return {"payers": got["payers"], "covered": []}
+        # review 13 item 1.2: list what is LOADED; `covered` says which of them
+        # the analytics hold (the page greys the others: "loaded, not yet in
+        # analytics") — the chips offered 3 payers while the header said 49
+        # ONE coverage rule (review 14 items 1.1c / 2.7): the header, these
+        # chips and every document sentence read Store.analytics_coverage()
+        cov = set(store.analytics_coverage().get("covered") or [])
+        covered = [p for p in got["payers"] if p in cov]
+        inv = store.loaded_inventory()
+        return {"payers": sorted(set(got["payers"]) | set(inv.get("payers") or [])),
+                "covered": covered}
 
     @app.get("/api/catalog")
     def catalog():
@@ -2931,12 +5322,31 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 f"({store._memory_limit_gb} GB). Narrow it with a filter (payer, "
                 f"code, or state), or raise duckdb_memory_gb in config/mrfx.yaml "
                 f"if your machine has spare RAM, then restart.")})
+        if _part_swap_race(exc):
+            # asked twice and both times a rates part was being replaced (a
+            # big re-ingest finishing): the data is fine — ask again
+            return JSONResponse(status_code=503, content={"error": (
+                "The data was being updated while this was read (a file finished "
+                "loading). Nothing is wrong — try again in a moment.")})
         if isinstance(exc, ValueError):
             # a filter/parameter the request supplied was unusable (e.g. the
             # explorer month filter given the report tabs' 'latest' sentinel) —
             # client input, not a server fault
-            return JSONResponse(status_code=422, content={"error": str(exc)})
-        return JSONResponse(status_code=500, content={"error": f"{type(exc).__name__}: {exc}"})
+            return JSONResponse(status_code=422, content={"error": _plain(str(exc))})
+        import duckdb
+        if isinstance(exc, (duckdb.ConversionException, duckdb.BinderException,
+                            duckdb.ParserException, duckdb.InvalidInputException,
+                            duckdb.OutOfRangeException, TypeError)):
+            # a value of the wrong kind reached the database: the client's
+            # input, said in words. The raw text quoted the SQL ("LINE 3: …")
+            # and file paths (review 9 item 4.7); it is in the log
+            return JSONResponse(status_code=422, content={"error": (
+                "One of the values sent could not be used (a filter of the wrong "
+                "kind, e.g. a list where a single value belongs). Check the "
+                "filters and try again.")})
+        return JSONResponse(status_code=500, content={"error": (
+            f"Something went wrong answering this ({type(exc).__name__}). The "
+            "details are in the server log.")})
 
     async def _widen_threadpool():
         # sync endpoints + their lock-waits share anyio's default 40-token
@@ -3025,9 +5435,17 @@ def _load_mpfs_csv(store: Store, data: bytes, source: str) -> int:
             rate = float(rate_raw)
         except ValueError:
             raise ValueError(f"line {i} (code {code}): non-numeric rate {rate_raw!r}")
+        if not math.isfinite(rate) or rate <= 0:
+            # 'nan' / 'inf' parse as floats: accepted, they made every anchored
+            # screen a 422 until a new anchor was uploaded (review 12 item 2.1)
+            raise ValueError(f"line {i} (code {code}): the rate {str(rate_raw).strip()!r} is "
+                             "not a dollar amount above zero — fix that line and upload again")
         rows.append({
             "code": code,
             "locality": (row.get(fields.get("locality", ""), "") or "") if fields.get("locality") else "",
+            # optional: which state the row prices (else "% of Medicare" says
+            # the file didn't state its locality)
+            "state": (row.get(fields["state"]) or "").strip().upper()[:2] if fields.get("state") else "",
             "non_facility_rate": rate,
         })
     return store.load_mpfs(rows, source)

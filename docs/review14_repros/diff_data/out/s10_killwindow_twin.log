@@ -1,0 +1,2 @@
+byte-identical copy: read_identity={"size": 656, "mtime_ns": 1794471937167457490, "sha": "a7cd3... files=[('k (1).json.gz', 'done'), ('k.json.gz', 'done')] rate rows=120 (one document = 60)
+decoded copy: read_identity={"size": 656, "mtime_ns": 1794471939429291528, "sha": "a7cd3... files=[('k (1).json', 'done'), ('k.json.gz', 'done')] rate rows=120 (one document = 60)

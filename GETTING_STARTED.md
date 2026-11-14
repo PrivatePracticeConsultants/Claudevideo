@@ -23,9 +23,13 @@ python --version
 ```
 
 (On Windows, `py -0p` lists every version installed.) If it prints 3.11, 3.12,
-3.13 or 3.14 you are done — skip to Step 2. Otherwise install the current
-release from <https://www.python.org/downloads/>; on Windows tick
-**"Add python.exe to PATH"** on the first installer screen.
+3.13 or 3.14 you are done — skip to Step 2. Otherwise install **Python 3.13**
+from <https://www.python.org/downloads/windows/> (macOS:
+<https://www.python.org/downloads/macos/>); on Windows tick **"Add python.exe
+to PATH"** on the first installer screen. **Not 3.15:** python.org's big
+"Download Python" button now gives 3.15, and duckdb, pyarrow, numpy, ijson,
+PyYAML and watchfiles publish no 3.15 installers yet, so the install fails
+with "Failed to build installable wheels".
 
 > **Historical note.** Older copies of this guide insisted on Python 3.12,
 > because `duckdb` 1.3.2 shipped no build for anything newer and pip fell back
@@ -37,14 +41,16 @@ release from <https://www.python.org/downloads/>; on Windows tick
 
 ## Step 2 — Get the code
 
-**Option A — you have the zip I sent** (`mrfx.zip`): double-click to unzip it,
-which gives you a folder (e.g. `Claudevideo`). Move it somewhere easy like your
-home folder or Desktop.
+**Option A — you have the zip I sent** (`mrfx_project.zip`): double-click to
+unzip it, which gives you a folder (e.g. `Claudevideo`). Move it to a short
+local path that is NOT synced to the cloud, e.g. `C:\mrfx\`. Avoid Desktop,
+Documents and OneDrive: on Windows 11 they sync to the cloud by default, so the
+database and multi-GB downloads would be uploaded and locked mid-write.
 
 **Option B — download with git** (if you use GitHub):
 
 ```
-git clone --branch claude/bcbs-mo-mrf-pipeline-o0qwq4 <your-repo-url>
+git clone --branch claude/gracious-mccarthy-ao7vmo <your-repo-url>
 ```
 
 Either way, `cd` into the folder in your terminal:
@@ -73,27 +79,23 @@ pip install -e .
 
 **Windows (PowerShell):**
 ```
-py -3 -m venv .venv
+py -3.13 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python --version
 python -m pip install -r requirements.txt
 python -m pip install -e .
 ```
-The first line (`py -0p`) lists the Python versions installed on your machine
-and their paths — you should see a `3.12` entry. If you don't, install Python
-3.12 from <https://www.python.org/downloads/release/python-3120/> (tick "Add
-python.exe to PATH"), then re-run the lines above. `python --version` should
-print `Python 3.12.x` once the environment is active.
+`python --version` should print 3.11, 3.12, 3.13 or 3.14 once the environment
+is active. (`py -0p` lists every Python installed; if you have several, pick
+one with e.g. `py -3.13 -m venv .venv`.)
 
-> **Why 3.12 and not the newest Python?** This is the single most common
-> install snag. If you see **`Failed to build installable wheels for some
-> pyproject.toml based projects` (duckdb, pyarrow, watchfiles, pydantic-core)**,
-> it means your Python is *newer* than those packages ship ready-made
-> installers for, so pip tried to *compile* them from source — which needs a
-> C/Rust build toolchain you don't have. The fix is not to install a compiler;
-> it's to use Python **3.12**, which has ready-made installers for everything
-> here. Delete the half-made `.venv` folder if one was created, then run the
-> `py -3.12 -m venv .venv` sequence above.
+> **If you see `Failed to build installable wheels` (duckdb, pyarrow,
+> watchfiles, pydantic-core):** pip found no ready-made installer for your
+> Python and tried to compile one. That means either a Python NEWER than 3.14
+> (python.org's default download is 3.15 since autumn 2026),
+> or an old copy of `requirements.txt`. Don't install a compiler: delete the
+> half-made `.venv` folder, use Python 3.11–3.14 (`py -3.13 -m venv .venv`),
+> and re-run the lines above.
 
 > If Windows blocks the activate script with a security error, run this once,
 > then retry the activate line:
@@ -170,8 +172,10 @@ with a row count; index links show `expanding` while their file lists unpack;
 a file bigger than the safety limit shows `too big` — see the disk section
 below).
 Files process **a few at a time in the background** — by default as many as
-your computer has processor cores minus one (the `parallel_ingests:` knob in
-`config/mrfx.yaml`, `0` = automatic), and **several files download at once**
+your computer has processor cores minus one, or fewer if your RAM can't hold
+that many (about 2 GB each after the database's share — 6 GB on a 16 GB
+machine, which leaves room for 3 to 4; up to 7 on 32 GB; the
+`parallel_ingests:` knob in `config/mrfx.yaml`, `0` = automatic), and **several files download at once**
 to keep those workers fed (`parallel_downloads:`, `0` = automatic, capped at
 6 — the same per-host limit a web browser uses; simultaneous downloads
 coordinate so they can never fill your disk together) — you can paste a whole
@@ -185,38 +189,94 @@ and skips them rather than loading junk. The app also spots **duplicates**:
 Blue plans publish copies of each other's national files, so when a link
 downloads to the exact same bytes as a file another link already loaded, it's
 skipped with a note saying which link it duplicates — your database stays
-clean even if you paste every state's index. (Duplicate detection compares
-link downloads to each other; files you copy into `data/inbox/` by hand
-aren't part of that comparison.)
+clean even if you paste every state's index.
+
+- **The same link twice** is never downloaded again: once a link is done,
+  pasting it again (even with a fresh "signed" ending) is ignored — unless
+  you have ADDED billing codes since it was read; then pasting it reads it
+  again for the new codes.
+- **The same file under a different link** is caught EARLY when it can be
+  proven a copy: after the first 15 MB arrive, the app compares them with
+  every file you have already loaded of exactly the same size (links AND
+  files you dropped into `data/inbox/`). If they match, it asks the server for
+  the file's last 1 MB and 8 small samples from the middle; if all match AND
+  the file is compressed (`.gz` or `.zip` — their last bytes carry a checksum
+  of the whole file), it stops and skips the file as a duplicate. A plain
+  `.json` can differ in a single rate in the middle while matching all of
+  that, so a plain `.json` always downloads in full and the full-content check
+  decides — nothing different is ever skipped. Change the 15 with
+  `early_dedup_mb:` in `config/mrfx.yaml` (0 turns the early check off; if
+  your `mrfx.yaml` has no such line, add it — `config/mrfx.yaml.new` from the
+  update shows it). A file loaded before this check existed is caught after
+  its first copy's full download — and that copy then fingerprints it, so
+  every LATER copy is caught early.
+- **Two copies downloading at the same time** (several states' indexes list
+  the same national file): the later one, once its beginning matches the
+  earlier one's, shows **"waiting: an identical-looking copy is already
+  downloading"** and sits still — no reconnecting — until the earlier one is
+  loaded (then it is skipped without downloading the rest) or fails (then it
+  carries on by itself). Nothing is lost either way.
+- **Small files go first.** Of the 6 download slots, 3 take files of 100 MB
+  or less (and files whose size isn't known yet), so small files are never
+  stuck behind huge ones. One of those 3 never takes anything else; the
+  other two help with big files whenever no small file is waiting. A small
+  slot that finds a file is bigger (or the server won't say its size) hands
+  it to a big slot at once, before saving any of it. Change with
+  `small_file_downloads:` / `small_file_mb:` in `config/mrfx.yaml` (0 = no
+  lanes; add the lines if your file doesn't have them).
+
+> **When is a file skipped, and when is it loaded again?** (version 0.8.0)
+>
+> - **Skipped:** the same link pasted again; a file with the same contents as
+>   one already loaded — even if it is compressed differently, or one is the
+>   `.json` and the other the `.json.gz` ("the same content as X") — unless
+>   its name gives another month and its header has no date (then it is that
+>   month's file); an allowed-amounts or drug-price file (no negotiated
+>   rates). The Files tab always says which file it duplicates, or why it was
+>   left out.
+> - **Loaded again:** a file the payer CHANGED (once a month the app asks
+>   every payer index you loaded whether each of its files changed — one tiny
+>   request per file — and downloads only the changed ones; the index row
+>   says "last checked … · next check …", and names any NEW file the index
+>   lists without downloading it — paste the index again to load those);
+>   the files read before you ADDED
+>   billing codes (the Files tab's **Re-read N files for the new codes**
+>   button); a file you forgot and pasted again.
+> - **Held for you to decide:** a different file dropped into `data/inbox`
+>   under the name of one already loaded (Replace / Keep both).
+> - Nothing is ever counted twice: two files with the same contents load once.
 
 **Don't want to hunt for links at all?** The app ships ready to go:
 
-- **`config/starter_links.txt`** — every payer source verified in testing,
-  one per line, ready to load in a single command:
+- **`mrfx add --known`** (or `mrfx add --known --states MO,KS` for just your
+  states) — every queueable source in the tested-sources catalog
+  (`config/known_sources.yaml`). `config/starter_links.txt` is the same list
+  as plain text, generated from the catalog (109 links), for pasting a subset
+  into the dashboard; to keep your own list, copy it and edit the copy (an
+  update replaces the original):
 
   ```
-  mrfx add --file config/starter_links.txt
+  mrfx add --known --states MO,KS
   ```
 
-  That queues 38 sources (Highmark's 15 hosted Blue plans, BCBS Mississippi,
-  BCBS Tennessee, Cigna, BCBS South and North Carolina, CareFirst, Molina,
-  Kaiser, Aetna, Harvard Pilgrim, Regence, Oscar, the 14-state Anthem
-  master index,
-  Centene/Ambetter's all-states page, the Blue KC / BCBS Michigan /
-  BCBS Louisiana hubs, UnitedHealthcare's national portal, SelectHealth
-  (Utah/Idaho/Nevada), Moda Health (Oregon/Alaska/Texas), the First
-  Health PPO rental network, Tufts Health Public Plans (Massachusetts),
-  and Security Health Plan (Wisconsin) —
-  Molina/Kaiser/Aetna/Harvard Pilgrim/Regence/Oscar need the headless
-  browser, which the app now downloads for itself on first use (the
-  starter-links FILE swaps Oscar
-  for a browser-free monthly index), and Anthem needs confirm_over_gb: 12).
-  Each one
-  expands on its own — expect thousands of files to queue and let it run.
-  The same file lists the remaining browser-only portals (Humana, HCSC, Premera…)
+  The whole list queues 109 automatic sources (audited live 2026-11-05 — see
+  docs/SOURCES_AUDIT_2026-11.md): the Highmark-hosted Blue plans, about 20
+  more Blue plans (Michigan, Kansas City, Louisiana, Idaho, Arizona,
+  Nebraska, Vermont, Excellus, Premera, Wellmark, Blue Shield of CA…),
+  Anthem's 14-state master index, UnitedHealthcare, Aetna, Cigna, Kaiser,
+  Centene/Ambetter, regional plans across the country, and national
+  administrators and networks (Meritain, Allied Benefit Systems, HealthComp,
+  MedCost, MultiPlan/PHCS…). That is hundreds of thousands of files and many
+  terabytes, a grind of weeks, so most people paste only the sources for
+  their own states from **Show tested sources** instead. Some sources use the
+  headless browser, which the app downloads for itself on first use. Anthem's
+  index is 11.5 GB and asks for "download anyway" unless confirm_over_gb is
+  15 or more. Each big index is capped at 2,000 files unless you raise
+  max_toc_files (in `config/mrfx.yaml`, shown there with a `#` in front).
+  The same file lists the remaining browser-only portals (Humana, HCSC, HAP…)
   with instructions in the comments. Click **"Show tested
 sources"** on the Files tab to browse it, or **"Queue tested payer indexes"**
-to load them all — monthly-dated links are refreshed to the current month
+to load all the automatic ones — monthly-dated links are refreshed to the current month
 automatically. The catalog lives in `config/known_sources.yaml` with each
 source's verification date and test results.
 
@@ -246,6 +306,10 @@ If you already downloaded MRF files yourself, two ways to load them:
   # example (macOS/Linux)
   cp ~/Downloads/2026-07-01_somepayer_in-network-rates.json.gz data/inbox/
   ```
+
+`.json`, `.json.gz` and `.zip` all work. **A `.zip` holding several JSON files
+is read for its LARGEST one only** — the others are ignored; if a payer's zip
+packs several rate files, unzip it and drop each `.json` in.
 
 Watch the **Files** tab: the file shows `processing` (with a progress bar for
 large files) and then `done`, with a row count and a data-quality summary. Big
@@ -298,6 +362,17 @@ Once a file is `done`:
   every one paid below what that payer published for the practice, with the
   shortfall and a CSV. Read the caveats: MPPR, assistant modifiers and patient
   cost-share all legitimately sit between a published rate and a payment.
+- **Rate card** tab → **One visit, by payer**: what one follow-up visit is
+  worth from each payer at that practice's own contracted rates (type the
+  practice name, TIN or an NPI, then **Build rate card** — the visit prices
+  itself). The default visit is the four most-billed timed therapy codes
+  (97110, 97530, 97140, 97112), 15 minutes each = 4 units; pick the version
+  without the 97140 + 97530 pair, the gait visit, or type your own codes and
+  minutes. Units always follow the CMS 8-minute rule. The dollar figure is
+  the contracted value per visit — the ceiling on net revenue per visit
+  (NRPV); real collections are lower (patient balances, denials, and some
+  payers cut the 2nd+ therapy unit). A payer missing a rate for one of the
+  codes shows "–" instead of a made-up total.
 - **Negotiate** tab now also builds the **rate proposal** — pick a basis
   (payer's median or p75, best comparable rate, or % of Medicare), paste
   annual volumes, and print the proposal grid the payer receives. Proposed
@@ -353,64 +428,45 @@ imports everything new in one go.
 
 ---
 
-## Make provider names fill in fast (recommended)
+## Provider names fill in automatically
 
 The rates load with raw NPI numbers first, then the app fills in each
 provider's **name, city/state, and taxonomy** in the background. You'll see a
 banner like *"5,192 / 854,692 names (identifying 849,492 more…)"* while it
 works.
 
-Out of the box that runs in **`api` mode** — it looks each NPI up one at a
-time over the internet against the public NPPES service, which is heavily
-rate-limited. For a big book (hundreds of thousands of providers) that can
-take **days**. If your banner is climbing only a few thousand per day, this is
-why.
+**This is automatic.** The app keeps CMS's **NPPES full monthly file** (a
+~1.1 GB `.zip`) in `data/nppes` by itself: it checks
+<https://download.cms.gov/nppes/NPI_Files.html> at most once a day, downloads a
+new month in the background, builds a small local lookup cache
+(`nppes_cache.parquet` in your store folder) in one pass, and then identifies
+every provider — the whole backlog at once, and anything new you ingest later —
+in seconds, with no per-provider internet lookups. Measured on a 32-million-rate
+store: a fresh install named all 93,479 providers in ~3½ minutes including the
+download. When a new month arrives it also **refreshes providers whose name,
+specialty or address changed**. The newest two monthly files are kept; older
+ones are deleted.
 
-**The fast way — point it at the NPPES bulk file (one local pass, minutes):**
+If CMS can't be reached, it retries within the hour and meanwhile uses the file
+it already has — or, on a brand-new install, looks names up one by one over the
+internet (the slow way: rate-limited, can take days for a big book).
 
-1. Download the **NPPES full monthly file** (a ~1 GB `.zip`) from
-   <https://download.cms.gov/nppes/NPI_Files.html>. Keep it as the `.zip` — you
-   do **not** need to unzip it.
-2. In `config/mrfx.yaml`, set `bulk_csv_path` under the `enrichment:` block:
+**Managing the file yourself instead** (optional): set `auto_download: false`
+under `enrichment:` in `config/mrfx.yaml` and point `bulk_csv_path` at a full
+monthly `.zip` you downloaded (keep it zipped; a **folder** also works — its
+newest NPPES zip is used). On Windows keep the path in single quotes:
 
-   ```yaml
-   enrichment:
-     mode: bulk
-     bulk_csv_path: 'E:\NPPES_Data_Dissemination_July_2026_V2.zip'
-   ```
+```yaml
+enrichment:
+  auto_download: false
+  bulk_csv_path: 'E:\NPPES\'
+```
 
-   Use the real path to *your* download. On Windows, **keep the single quotes**
-   around the path (or write it with forward slashes,
-   `E:/NPPES_Data_Dissemination_July_2026_V2.zip`) so the backslashes are read
-   correctly.
+You can also run it as a one-off command (stop the dashboard first):
 
-   > **You only really need the `bulk_csv_path` line.** Whenever that file is
-   > present the app uses it automatically — even if `mode` is left at the
-   > default `api`. Setting `mode: bulk` is just the explicit form. (So if names
-   > were "stuck", the usual cause is a `bulk_csv_path` that's misspelled or
-   > points at a file that isn't there — the app can't use a file it can't find,
-   > and falls back to the slow API. Double-check the path.)
-3. Restart `mrfx serve`.
-
-The first time it runs, it reads the file **once** (a few minutes) and builds a
-small local lookup cache (`nppes_cache.parquet` in your store folder). After
-that, every provider — the whole backlog at once, and anything new you ingest
-later — is identified in seconds, with no internet lookups.
-
-**Already have a backlog?** You have two options:
-
-- **Easiest:** just set `bulk_csv_path` (step 2 above) and restart `mrfx serve`
-  — the running app picks the file up on its own and clears the backlog in one
-  pass. Nothing else to run.
-- **Or run it as a one-off command** — stop the dashboard first (Ctrl-C in its
-  window; while it runs it keeps the database open, so this command will
-  politely refuse), then:
-
-  ```
-  mrfx enrich --bulk "E:\NPPES_Data_Dissemination_July_2026_V2.zip"
-  ```
-
-  It prints `identified N name(s)` when done; start the dashboard again after.
+```
+mrfx enrich --bulk "E:\NPPES_Data_Dissemination_November_2026_V2.zip"
+```
 
 > The app only trusts the **full monthly** file for this (it's ~8–9 million
 > providers). If you accidentally point it at a small *weekly* update, it
@@ -532,13 +588,30 @@ them):
 14:05:01 INFO    mrfx.fetch: parallel ingest: 3 parser worker process(es)
 ```
 
-Parsing is the slow part (roughly 30 seconds per uncompressed GB *per worker*,
-and big payer files are 10–200 GB uncompressed), so the wall-clock for a long
-queue is basically `total uncompressed GB ÷ workers`. Here's what actually
-moves that number, in order of impact:
+Parsing is the slow part, and how slow depends on the kind of file. What to
+expect per worker (measured on real payer files on a 4-core test machine in
+Nov 2026 — your PC will differ, but the shape holds):
+
+| Kind of file | Real example | Time per worker |
+|---|---|---|
+| Big file, few of your codes in it | UHC, 5.5 GB uncompressed | 35–50 s (6–9 s per uncompressed GB) |
+| Very big file | BCBS Wyoming, 42 GB uncompressed | about 7½ minutes |
+| None of your codes in it | BCBS North Dakota, 3 GB | about 1 minute (skipped quickly) |
+| Huge number of providers per rate | Aetna, 20 GB → 590 million rows | 25–30 minutes — limited by the rows it writes, not the file size |
+
+So a file that sits at the same percentage for a minute is normal; one that
+shows **no movement for an hour** is not (the app flags that on its own). For
+the many-rows kind, `therapy_only_ingest: true` in `config/mrfx.yaml` is the
+big lever: on that Aetna data it cut the rows ~10× and the time roughly in
+half. Read its comment in that file first — it **permanently** leaves out the
+non-therapist providers (MDs, NPs…) who also bill these codes, and it needs
+the NPPES provider data loaded before it can tell therapists apart.
+Here's what moves the queue's total time, in order of impact:
 
 1. **Use more of your CPU (if you have it).** Auto mode uses your core count
-   minus one, but stops at **8** workers to stay safe on RAM. If Task Manager →
+   minus one, stops at **8**, and also stops where your memory runs out at
+   about 2 GB per worker next to the database: an 8 GB PC gets **1** worker,
+   a 16 GB PC **3**, a 32 GB 8-core PC 7. If Task Manager →
    Performance → CPU shows more logical processors than the banner is using
    AND you have plenty of memory, set it explicitly in `config/mrfx.yaml`:
 
@@ -550,7 +623,14 @@ moves that number, in order of impact:
    database and Windows itself. On a 16 GB machine, don't go past 5–6; on
    32 GB, 10–12 is fine. (If you've ever seen an out-of-memory error on this
    machine, stay at the auto setting.) Values above your core count are
-   clamped — extra processes past the cores only fight each other.
+   clamped — extra processes past the cores only fight each other. Each
+   worker keeps a bit more than one core busy (about 1.2–1.5: its file
+   reading and database writing run alongside the parsing), so you don't
+   gain anything by going past your core count. Measured on a 4-core test
+   machine: 1 worker 154 s for a test queue, 2 workers 87 s, 3 workers
+   87 s — speed stops improving at about **your cores ÷ 1.4** workers
+   (around 5 on an 8-core PC). If memory is tight, that number is a good
+   place to stop; going higher only costs RAM.
 
 2. **More simultaneous downloads if the parsers are starving.** On the Files
    tab, if parsers sit idle while links crawl (common with Blue-plan CDNs that
@@ -626,11 +706,29 @@ moves that number, in order of impact:
    biofeedback and caregiver training. Trim it if you only care about a handful
    of codes and want smaller, faster ingests.
 
-   **Adding a code only affects files ingested afterwards.** That list is the
+   **Adding a code: read the loaded files again.** That list is the
    extraction filter, so a code that wasn't in it was never pulled out of the
-   files you already loaded — no later update recovers it. To pick up new codes
-   in files you already have, re-add those links (the app re-downloads and
-   re-extracts them).
+   files you already loaded. Since version 0.7.7 the app remembers which codes
+   each file was read for: after you add codes and restart, the **Files** tab
+   shows **Re-read N files for the new codes** — one click reads them again
+   (from the copy kept in `data/processed`, or by downloading the link again
+   when the copy is gone). Pasting a loaded link again does the same for that
+   one file.
+
+   **Want proof the fast reader gives the same numbers?** The app reads big
+   files with a fast scanner that skips every code you didn't ask for without
+   parsing it. It was checked against the original reader on real payer files
+   (identical rates), but you can check it on YOUR files any time — it touches
+   nothing in your data:
+
+   ```
+   mrfx fastcheck "C:\path\to\some-payer-file.json.gz"
+   ```
+
+   It reads the file both ways and prints `IDENTICAL` (plus how much faster the
+   fast way was) or `DIFFERENT` with what differed. If you ever see
+   `DIFFERENT`, set `fast_scan: false` in `config/mrfx.yaml` to go back to the
+   original reader, and send that file's name along with the report.
 
 4. **Keep the machine awake.** Windows sleep pauses everything mid-queue. For
    an overnight grind: plug in, Settings → System → Power → set "Put my device
@@ -673,6 +771,25 @@ it (Ctrl-C), edit, start again; the queue resumes where it left off.
 > cores, and past your RAM they crash the machine into the swap file. The
 > caps above are where more truly stops helping.
 
+### When a payer's server stops answering
+
+Payer servers often accept a download and then go quiet for minutes. The app
+no longer lets that hold one of your download slots: after **4 minutes with no
+data** the file is **parked**. Its slot goes to the next file in the queue
+straight away, and everything it had downloaded so far is kept. The parked
+file goes back in line after 10 minutes, or immediately if nothing else is
+waiting, and picks up exactly where it stopped. If the next file's server also
+goes quiet, it is parked the same way and the slot moves on again. So
+something is always downloading while you wait on a slow payer.
+
+In the Files & imports list a parked file shows an amber **parked** badge and
+the time it goes back in line; **try now** sends it back at once. If a server
+sends nothing at all six times in a row, it is treated as down: the file is
+paused for 24 hours (the longer pause above) and then tries again by itself.
+All of this is in `config/mrfx.yaml` (`download_park_seconds: 240`,
+`download_park_minutes: 10`, `download_park_limit: 6`; `download_park_seconds: 0`
+turns parking off).
+
 ---
 
 ## Command-line reference (optional)
@@ -686,17 +803,17 @@ prompt). They're an alternative to the dashboard buttons.
 | `mrfx add <url> [<url>…]` | Paste links from the terminal: rate files, TOC/index links, or listing pages (Step 5) |
 | `mrfx add --file links.txt` | Queue a whole text file of links (one per line) |
 | `mrfx add --known` | Queue every tested payer index from `config/known_sources.yaml` |
-| `mrfx add --file config/starter_links.txt` | Same, from the editable ready-to-go list |
+| `mrfx add --file config/starter_links.txt` | Same list as plain text (copy it to make your own; an update replaces the original) |
 | `mrfx add --retry-failed` | Re-queue every link that previously failed |
 | `mrfx preflight <path>` | Inspect a file before ingesting |
 | `mrfx ingest [path]` | Ingest a file or the whole inbox (shows a progress bar) |
 | `mrfx status` | List ingested files and totals |
 | `mrfx export out.csv --cpt 97110 --payer "Aetna"` | Export a filtered CSV + methodology sidecar (state filtering lives in the dashboard and `mrfx outreach`) |
 | `mrfx outreach contacts.csv --state MO --cpt 97110,97140` | Contact/mail-merge CSV |
-| `mrfx enrich --bulk "E:\NPPES…zip"` | Fill in provider names/geography now, in one fast local pass from the NPPES bulk file (see "Make provider names fill in fast" above) |
-| `mrfx packets` | Write this month's packet for every watchlist client |
+| `mrfx enrich` | Fill in provider names/geography now (downloads this month's NPPES file first if needed — see "Provider names fill in automatically" above); `--bulk <zip>` uses a file you choose |
+| `mrfx packets [--pdf]` | Write this month's packet for every watchlist client (`--pdf`: a PDF beside every document) |
 | `mrfx renewals --clients` | Contracts with a real published end date, soonest first |
-| `mrfx backup E:\backups\mrfx.zip` | Copy the whole store into one zip with a checksum manifest (stop the server first) |
+| `mrfx backup E:\backups\mrfx.zip` | Copy the whole store into one zip with a checksum manifest (stop the server first; or set `backup_dir` and the running app does it weekly) |
 | `mrfx verify [backup.zip]` | Check a backup against its manifest, or (no argument) the live store's integrity |
 | `mrfx medicare --from-tracker` | Find the Order & Referring Tracker's folder and import everything new from it (stop the server first; the dashboard's Import button needs no stopping) |
 | `mrfx medicare --eligibility <csv>` | Import the CMS Order & Referring roster the tracker downloaded (stop the server first) |
@@ -717,8 +834,9 @@ prompt). They're an alternative to the dashboard buttons.
 - `data/inbox/` — drop MRF files here.
 - `data/downloads/` — where pasted links download to while processing. Each
   file is deleted automatically once its rates are extracted (turn that off
-  with `delete_raw_after_ingest: false` in `config/mrfx.yaml` if you want to
-  keep the raw files).
+  with `delete_raw_after_ingest: false` in `config/mrfx.yaml` — the line is
+  there with a `#` in front; remove the `#` — if you want to keep the raw
+  files).
 - `data/processed/` — files that finished (if `move_processed` is on).
 - `data/failed/` — files that couldn't be read, with a reason in the Files tab.
 - `data/mrfx_store/` — the analyzed database. Delete this folder (or run
@@ -750,50 +868,922 @@ terabytes). Three ways to control it:
 
 ## Updating to a new version without losing your data
 
-Your **data and the program are separate folders**, so you can drop in a newer
-build and keep everything you've already ingested — rates, identified provider
-names, the link queue, entity groupings, peer sets. All of that lives in the
-`data/` folder, which is **never** part of a code download, so a code update
-cannot touch it. The one file a new build *does* replace is your
-`config/mrfx.yaml` (your settings), so protect that.
+Your **data and the program are separate**: everything you've ingested —
+rates, identified provider names, the link queue, entity groupings, peer sets,
+backups — lives in `data/`, which is **never** part of a code download. Your
+settings live in `config/mrfx.yaml`.
 
-Steps (a few minutes, no re-ingesting):
+**The easy way (this version and later): `Update MRF Explorer.bat`.**
+Close the app, then drag the new build's `.zip` onto `Update MRF Explorer.bat`
+in the project folder (or run `mrfx update path\to\mrfx_project.zip`). It:
 
-1. **Stop the app** — press Ctrl-C in the `mrfx serve` window. While it runs it
-   keeps the database open, so don't update code mid-run.
-2. **Save your settings** — copy `config/mrfx.yaml` somewhere safe (or just note
-   your `bulk_csv_path` line and any other edits).
-3. **(Recommended) back up your store** — copy the whole `data/` folder
-   somewhere first. It may be several GB, but it's your entire book of work, and
-   then even a mistake is fully recoverable.
-4. **Put the new code in.** The simplest safe way: open the new build's `.zip`,
-   and copy its **`mrfx` folder** over your existing `mrfx` folder (choose
-   replace/overwrite). That single folder *is* the whole program — this updates
-   everything while leaving `data/`, `config/`, and `.venv/` untouched, so
-   there's nothing to restore. (If you'd rather unzip the whole thing over the
-   folder, that works too — just put your saved `config/mrfx.yaml` back after.)
-5. **Restart `mrfx serve`.** You do **not** need to reinstall anything — your
-   virtual environment already has what it needs.
-6. **Hard-refresh the dashboard in your browser** — press **Ctrl-Shift-R** (or
-   Ctrl-F5) once on the dashboard tab. Browsers cache the dashboard's code, and
-   after a build swap they can keep running the *old* page against the new app —
-   the tell-tale sign is a control that suddenly shows **blank** (e.g. the
-   "As-of month" dropdown). A hard-refresh loads the new page. (New builds also
-   ask the browser not to cache the dashboard, so this gets less necessary over
-   time, but it's the instant fix if anything looks off right after updating.)
+- refuses while the app is running (the database must be closed);
+- checks the zip is a complete MRF Explorer build, and refuses an OLDER build
+  than the one you have (an older program must not run against data a newer
+  one has upgraded — `mrfx update <zip> --allow-downgrade` if you really mean it);
+- installs the new build's components FIRST (needs internet for a few
+  seconds). If that fails, nothing is changed and it says so — run it again
+  once you are online;
+- saves the program files it will replace to `data/update_backups/`;
+- writes only the files that changed — **never** `data/`, `.venv/`, or your
+  `config/mrfx.yaml` / `entity_map.yaml` / `registry_overrides.yaml` (if the new
+  build ships a different `mrfx.yaml`, it's saved beside yours as
+  `mrfx.yaml.new` so you can see new options). If a file can't be written
+  (antivirus holding it), every file already written is put back and it says
+  so — close other programs and run it again;
+- re-points the environment at this folder (`pip install -e .`).
 
-On that first restart the app notices its summary tables are from the older
-version and **rebuilds them once** — a one-time wait proportional to your store
-size. This only recomputes the compact analytics from your existing rates; it
-does **not** re-download, re-parse, or re-identify anything. After it finishes,
-the new features are live and every number is preserved.
+Then start the app and press **Ctrl-Shift-R** once in the dashboard tab
+(browsers cache the dashboard's code; a hard-refresh loads the new page).
 
-**Adding new payer files** then works exactly as always — drop them in the inbox
-or paste links; they ingest alongside what's already there. Re-adding a file you
-already have is automatically **skipped, not duplicated**, so your numbers can't
-get double-counted.
+**Updating a copy that predates the updater (one time):** close the app, copy
+`config/mrfx.yaml` somewhere safe, extract the new zip over the old folder
+(Windows: Extract All to the folder that *contains* the project folder →
+"Replace the files in the destination"), put your `mrfx.yaml` back, then run
+`python -m pip install -r requirements.txt` and `python -m pip install -e .`
+with the environment active. HOW_TO_RUN.md Part 5 has it click by click.
+
+On the first restart after an update the app may notice its summary tables
+are from an older version and **rebuild them once** — a one-time wait
+proportional to your store size. It only recomputes the compact analytics from
+your existing rates; it does **not** re-download, re-parse, or re-identify
+anything.
+
+**Adding new payer files** then works exactly as always — re-adding a file you
+already have is automatically **skipped, not duplicated**.
 
 ---
+
+## What changed in the November 2026 (round 3) update
+
+- **Modifier field read correctly.** BCBS Alabama publishes place-of-service
+  codes (11 office, 22 outpatient hospital, …) in the modifier field; read as
+  modifiers, every Alabama rate failed "base modifiers only" (97110: 0 of 6,190
+  practices). They are now moved to place of service. "52,53" is split into
+  52 and 53. One rule for "base" everywhere: no modifier, or only GP/GO/GN.
+  Rates already in your store are corrected once at startup (no re-download).
+- **"Latest" means the payer's current rate**, even when you also filter by
+  rate or modifier; the Entity view combines each practice at its own newest
+  month and keys organizations on name + main state (a TIN named after a
+  therapist is its own entity).
+- **% of Medicare** uses the Medicare locality of the view's state (or the
+  practice's state). Load each state's locality (Benchmark tab → Load MPFS);
+  with no matching locality the percentage is not shown — it is never
+  borrowed from another state.
+- **Months**: a file dated in the future is filed under its real month; the
+  Files tab shows each file's rates month and published month.
+- **Sources**: every tested source lists its states; "Queue these states"
+  queues just yours. `mrfx sources --check` re-checks the whole list live
+  (read-only) — run it monthly.
+- **Speed with names loaded**: once practice names arrive, the Explorer
+  table took 158 s and the Code page 10 s on a 32M-rate store (a join DuckDB
+  could only run as a nested loop); fixed — 1.2 s and 0.17 s on the same store.
+- **Speed on a big store (0.4)**: "newest file per contract" is now stored
+  with the rates instead of being worked out on every click. On a 99M-rate
+  test store the Explorer's opening view went from "needs more memory" to
+  about 1 second, the summary strip from 40 s to 5 s, the Code page from
+  2.5 s to under 1 s, the Overview from 25 s to 10 s (then instant until new
+  data lands). The first start after updating spends a few seconds marking
+  the newest months (log: "marked each contract's newest month") — no long
+  rebuild. Every number is the same as before. On the Code page the ranking
+  now appears as soon as it is ready and the month-by-month table fills in
+  after; clicking another code cancels the previous one.
+- **Download list order (Files & imports)**: what is moving now first —
+  downloading, then processing — then what needs you (too big, paused,
+  failed), then done and skipped, and the queue last, in the order it will
+  download. The files downloading right now always appear, even in a queue
+  of thousands.
+- **Long runs**: a download whose server stalls is **paused** (slot freed,
+  bytes kept, automatic retry in 24 h, up to 5 times — `download_pause_hours`
+  / `download_auto_resumes`); Resume stopped; the monthly refresh (if on)
+  retries a not-yet-posted monthly file daily until the 10th; NPPES name file
+  built in about a minute.
+
+## What changed in the November 7, 2026 (round 6) update
+
+- **Downloads never wait on a silent payer.** A file whose server goes quiet
+  for 4 minutes is parked and the next file starts (see "When a payer's server
+  stops answering" above).
+- **Client packets and the monthly digest compare each payer's own newest file
+  with that payer's previous one.** On real data one payer's late file used to
+  make "this month" empty for everyone else; the packet now says which months
+  it compared, payer by payer.
+- **Much faster on big stores**, same numbers: client packets about 3×, the
+  Clients tab digest about 2× (instant on a repeat visit), the outreach export
+  about 10×, the visit calculator about 6×, the radius map and leverage
+  summary 4-20×, and the Overview's quality panels instant on a repeat visit.
+- **The prospect dossier compares a practice within its own state** (it used
+  to pool every state you had loaded) and every position now shows how many
+  peer practices stand behind it; the printed benchmark marks positions resting
+  on fewer than 5 peers as *thin*.
+- **Smaller honesty fixes:** steal-share counts only therapy practices as
+  competitors and says CMS hides referral pairs under 11 patients; tax IDs
+  that look personal are masked the same way on screen and in every export;
+  the Leads list says when it stops at 1,000; payer concentration uses one
+  rate per practice; notes on every report name exactly which rows were used.
+- **The dashboard never shows a stale answer**: change a filter twice quickly
+  and the slower, older reply can no longer paint over the newer one.
+
+## What changed in the November 7, 2026 (round 7) update — version 0.7.0
+
+Numbers that were wrong, now right (each checked by hand in a test):
+
+- **"nan" / "Infinity" in a payer file** can no longer turn a practice's rate
+  into "nan"; "2 x 34.50" is no longer read as $234.50.
+- **The negotiation one-pager no longer adds payers together.** Each payer's
+  figure counts all your units as if they were billed to that payer, so two
+  payers worth $10,000 each are alternatives, not $20,000. The page now names
+  the largest single-payer opportunity.
+- **Trend lines follow the same contracts every month**: a payer that starts
+  publishing no longer moves the line.
+- **Leads, the leaderboard and the payer roster use the same "position" as
+  the Benchmark.** A market where every practice is paid the same fee schedule
+  is no longer a list of "p0 underpaid" leads.
+- **Inflation:** a year entered under another index name (e.g. MEI) is never
+  divided by a CPI-U year.
+- **Referral leaders:** two therapists with the same name are two rows.
+- **Census 65+ counts** are no longer double or triple counted.
+- **Annual-units boxes** read "97110, 1,200" as 1,200 everywhere and say which
+  lines they could not read.
+- **Overview "Which payers pay above vs below market"** divides by the market
+  median the page shows, and leaves out a payer's code when it prices fewer
+  than 3 practices for it.
+- **One rounding rule:** 112.5 % of Medicare prints as 113 % everywhere.
+- **The pitch report's "In real terms" block** says it is the market's
+  trajectory, not your client's own contracts.
+
+Safety and install:
+
+- **A web page you visit can no longer send files or commands to the
+  dashboard** (it only answers its own page on this computer).
+- **Install Python 3.13** (python.org's big button now gives 3.15, which some
+  components don't support yet) and put the folder on a short local path like
+  `C:\mrfx\`, not Documents/Desktop/OneDrive.
+- **Double-clicking Start while the app is already running** now says so and
+  stops, instead of retrying forever.
+- **The updater** installs components before changing anything, refuses an
+  older build, and puts everything back if a file is locked.
+
+Speed and big stores:
+
+- **Exports are built on the drive that holds your data**, once (not twice),
+  and a drive that is too full gets a plain sentence instead of an error page.
+- **Benchmark, negotiation, contract gaps, leads, leaderboard, fee schedule,
+  digest and packets** reuse one pre-computed table per data refresh: on a
+  99-million-rate store the benchmark went 3.3 s → 1.0 s, contract gaps
+  3.0 s → 0.6 s, 5 client packets 21 s → 11 s. Same numbers to the cent.
+- **A website you save** shows on the Leads list at once.
+- **The dashboard notices new data**: after an ingest the payer and month
+  pickers and the open Explorer / Code page refresh by themselves.
+- **Rate changes ("What changed")** are remembered until the next data refresh.
+
+Downloads and files:
+
+- **A big file downloaded in several parallel pieces** (`download_segments`)
+  can now take as long as it needs; the time cap no longer restarts it.
+- **An index listing more than `max_toc_files` files** says so in amber on its
+  row (and the count shows how many it listed).
+- **A rate group whose provider list is only partly in the file** is counted
+  on the Files tab and re-read when the payer's reference file arrives.
+- **NPPES weekly updates** now rename/move providers in the practice
+  directory too.
+- **Hospital price files**: the CMS "wide" layout (one column per payer) and
+  files with the CPT in a second code column now import correctly.
+- **The official 2026 Medicare RVU zip from cms.gov now imports** (its title
+  rows used to make it refuse); the non-QPP rates are used, and a conversion
+  factor that doesn't match the file's own is refused.
+- **"fee for service" / "fee_schedule"** spelled differently by a payer no
+  longer drop rates.
+
+## What changed in version 0.8.6
+
+Built around one job: showing a practice owner how their rates compare with
+**other outpatient rehab clinics**, and naming the clinics a payer pays more.
+
+- **"Compare against" on every comparison screen**, set to **outpatient
+  rehab clinics** by default (it replaces the "therapy practices only"
+  checkbox). Other choices: clinics by organization NPI taxonomy, therapy
+  practices (the old checkbox), and all practices. A practice counts as an
+  outpatient rehab clinic when the evidence says so:
+  - its organization NPI is registered as a therapy clinic (261QP2000X …)
+    or a therapist group (225100000X …). Payer files rarely list a
+    clinic's own organization NPI, so the app also looks the practice up by
+    its legal name in the NPPES file (registered *only* as therapy counts;
+    a multi-specialty registration does not);
+  - most of its clinicians are PT/OT/SLP;
+  - most of its Medicare therapy services are billed by therapists in
+    private practice (CMS Medicare Physician & Other Practitioners data);
+  - and NOT when most of its practice addresses are CMS-listed hospitals or
+    nursing homes (those are hospital / facility therapy).
+  Orthopedic and other physician groups whose therapists bill most of their
+  therapy are kept apart as "physician-owned therapy" — on BCBS Tennessee
+  they were paid $42.33 for 97110 against $24.23 at clinics. Hover a
+  practice's name to read why it was classed the way it was.
+- **Negotiate now names the clinics the payer pays more.** After Compare,
+  "Clinics … pays more" lists every comparable clinic the same payer pays
+  more than you for at least one of your codes — in your city when 5 or
+  more comparable clinics are there, otherwise your state — with each
+  clinic's rate and gap per code, your rate, their median and the highest.
+  **Download CSV** saves it for a rate request.
+- **Fewer menu entries, nothing removed.** **My rates** holds the Rate card
+  (with Price a visit and Visit value) and Benchmark; **Market rates** holds
+  Browse rates (the old Explorer), By code (Code comparison), A code's
+  market (Markets) and A payer's clinics (Payer roster). A row of tabs at
+  the top of each moves between them; old links still open the same screen.
+- **The CMS lists download themselves**: the hospital and nursing-home
+  address lists and the Medicare therapy rows, a few minutes after the app
+  starts and once a month after that (`cms_reference: off` in
+  config/mrfx.yaml turns it off; `mrfx cmsref` runs it by hand).
+- On a real BCBS Tennessee store (5,660 practices): 443 outpatient rehab
+  clinics, 219 hospitals, 191 facilities, 12 physician-owned therapy groups,
+  4,775 physician / other practices, 20 unknown; 132 practices have an
+  organization NPI registered as therapy (4 before the NPPES name lookup).
+
+## What changed in version 0.8.5
+
+- **Practice names are right.** A practice (tax ID) with no organization
+  NPI used to be named after the alphabetically first clinician on its
+  roster — "ALEC YATES" for Bone and Joint Institute of Tennessee, "ABBEY
+  MCCRORY" for MSK Group — so about a quarter of the names in a state's list
+  began with "A". Now, everywhere (every screen and every export):
+  1. a practice with organization NPIs is named by their legal business name
+     (the name most of them share; "Acme PT, LLC" and "ACME PT LLC" count
+     as one name);
+  2. otherwise by the group most of its clinicians are enrolled with in
+     CMS's **Doctors and Clinicians** file — the app downloads it (about
+     900 MB) a couple of minutes after it starts and checks for a new release
+     each month (`mrfx dac` loads it by hand; `cms_dac: off` in
+     config/mrfx.yaml turns the download off);
+  3. a practice with exactly one provider is named after that provider;
+  4. anything else reads "Unnamed group — 12 clinicians (MEMPHIS)" — never
+     one clinician's name for a group.
+- **Cities are where the practice actually is**: ranked by how many of its
+  providers practise there, the export's state first (they were the first
+  three alphabetically, any state).
+- **name_source** in the visit-value list and its CSV says which rule named
+  each practice (nppes_org, cms_dac, solo_npi, unnamed_group). Hover a name
+  in the list for the same.
+- On a real BCBS Tennessee PT export (5,302 practices): names starting with
+  "A" fell from 27.7% to 7.1%; 45% are named from the CMS file, 39% are solo
+  providers, 6% by their organization NPIs, 10% "Unnamed group".
+- One thing to know: "solo" means exactly one NPI is published under that tax
+  ID by the payers you loaded — a larger group that a payer lists with one
+  NPI reads as solo until another file lists more of its providers.
+
+## What changed in version 0.8.4
+
+- **Visit value in this market now shows the practices behind each row.**
+  Every payer row (and "All payers") has a **▸ Practices** button. It opens
+  the list of every practice that payer prices for the visit, **highest
+  visit value first** (or **Lowest first**), 50 at a time with **Show more**:
+  rank, practice name and city, tax ID, an NPI (the practice's own when it
+  has one; hover "+N more" for the others), how many of its NPIs are
+  therapists, the visit value, how far it is from the median, its
+  percentile, and the rates that make up the visit (for "All payers": the
+  spread of that practice's payers). Your practice, when one is picked, is
+  highlighted. **Download this list (CSV)** saves the whole list with every
+  NPI and per-code rate. The numbers are the same ones the row summarises —
+  a practice counts only when the payer prices every code of the visit. A
+  payer with fewer than 5 practices has no list, as it has no numbers.
+
+## What changed in version 0.8.3
+
+A fix for the **Rate card** (and **Price a visit** / **Visit value in this
+market**) on a very large store: with an NPI typed as the practice, the rate
+card could sit for an hour without showing anything.
+
+- **Typing an NPI is now quick.** To find which practice an NPI belongs to,
+  the app used to read every rate in the store (1.18 billion on the store
+  that showed the problem), several times per rate card. It now looks the
+  NPI up in the list it already keeps of which files hold which NPIs and
+  reads only those files. Same answer — checked against the old way on a
+  1.19-billion-rate test store — in seconds.
+- **No more rebuilding the market comparison inside your request.** The
+  "peer $" column and the visit value read a summary of every practice's
+  rates. That summary was rebuilt over the whole store whenever a file
+  finished loading or the analytics added a part — so on a busy store nearly
+  every rate card rebuilt it first. Now, when it is not ready, the report
+  reads just the payers and codes it needs (the same numbers), and the
+  summary is rebuilt quietly in the background when no analytics update is
+  running. A file that finishes loading no longer makes it out of date; only
+  the analytics adding new rates do.
+- **The practice drawer, Outreach, the local and radius maps, Leverage,
+  steal-share, market sizing, the dossier, the client digest and the Tracker
+  bundle no longer re-read the whole store.** They all use a list of which
+  NPIs work under which tax ID (and where). That list was rebuilt from every
+  rate whenever a file had finished loading; on a 1.19-billion-rate test
+  store those screens answered "needs more memory" after 15–25 seconds, or
+  took a minute with sections missing. The app now keeps that list per file
+  (each new file is read once, in the background, as it lands) and merges
+  it. Right after you install 0.8.3 it reads each loaded file once in the
+  background — a few minutes on a big store — and then only new files.
+  These kept lists take some disk space beside your data (on the
+  1.19-billion-rate test store: 2.6 GB; usually much less on real data).
+- Measured on a 1.19-billion-rate test store: a rate card by NPI in 0.5–5.7 s,
+  Price a visit 0.1–0.4 s, Visit value 0.2–1.9 s (before: 5–13 s each on the
+  same machine, with everything cached in memory; much longer on a real disk
+  while the analytics build runs).
+
+## What changed in version 0.8.2
+
+A fix to 0.8.1, found on the same real store (1.18 billion rates, memory set
+to 8 GB).
+
+- **"Practice names and places" no longer runs out of memory.** 0.8.1 read
+  the whole store for the practice names in one go; on that store it needed
+  more than the 8 GB it is allowed, stopped after about 11 minutes with
+  *"the one-pass name-directory source could not be built (Out of Memory
+  Error …)"*, and then **tried again before every remaining part** — so each
+  part took about 16 minutes instead of 5. The numbers were still right,
+  just slow. 0.8.2 reads the store in pieces sized to the memory limit
+  (one payer, or part of one, at a time), saves each piece as it finishes,
+  and splits a piece in two if it is still too big. If it ever cannot be
+  built at all, it says so once and the remaining parts read the store
+  directly — it is never tried again for the same build.
+- **A stop in the middle keeps the finished pieces**: the next start
+  continues with the next piece.
+- **If a build is running now**, stop it (Ctrl+C), install 0.8.2, and start
+  it again: it continues from its last saved part, nothing is redone.
+
+## What changed in version 0.8.1
+
+A fix for very large stores, found on a real one (1.18 billion rates, 50
+payers, 465 files) where the analytics sat at "3 of 50 payers" all night.
+
+- **A big batch of new files is added payer by payer.** When many files
+  arrive at once (hundreds, or most of the store), the app no longer tries to
+  add them in one all-or-nothing update — that update re-read the new rows
+  hundreds of times, showed nothing until the very end, and started over
+  after every restart; on the store above it would have taken days. It now
+  uses the build that saves each part as it finishes: each payer appears on
+  screen as soon as its parts are done, and a stop or restart carries on from
+  the last saved part. Small batches (a few files) still go in the quick way.
+  The log says which: *"a large update … building payer by payer instead"*.
+- **Payers come first.** The build now adds every payer's rates before it
+  fills in practice names and places, so your numbers start appearing within
+  seconds of the build starting instead of hours later (on our 99-million-
+  rate test store: the first payer at 12 s, was 110 s).
+- **Practice names and places in one pass.** That part of the build used to
+  read the whole store once for every one of its parts (74 times on the store
+  above, about 4 minutes each). It now reads it once and works from a compact
+  summary — minutes instead of hours on a big store. The numbers are
+  identical to the old way (checked on real files and on the 99-million-rate
+  test store).
+- **The header never waits.** The counts at the top right are now worked out
+  in the background; while a big update runs they may be a few seconds old,
+  but the page no longer hangs (the log showed single refreshes taking up to
+  55 minutes).
+- **If you started a build with 0.8.0** (for example with the command we gave
+  you to get past the stuck update), updating to 0.8.1 does not start it over:
+  the next start continues it from its last saved part, and its remaining
+  "practice names and places" parts use the new one-pass read.
+
+## What changed in version 0.8.0 (review 14)
+
+You asked: are the analytics really taking in every newly loaded file — and
+can we watch it? **Yes, every file that finishes loading goes into the
+numbers, once and completely** (we checked it file by file, in more than
+twenty live runs, including killing the app in the middle). What was not fine
+was *when*: a long download could hold the update back for hours, and the
+header did not say when the next one would come. Both are fixed, and you can
+now watch it happen.
+
+**The Analytics activity panel.** Click the orange line at the top right
+("Analytics cover …"), or **Analytics** on the Files tab, or open
+`…/#analytics`. It shows, updating every 2 seconds:
+
+- **A big bar** for the update running now, in words: *"Adding 37 newly
+  loaded files — payer Blue Cross of X — part 3 of 8 — 1.2 M rows/s — about
+  14 min left"*. The time left only appears once the app has measured one
+  part, and always says "about".
+- **Waiting to be added**: every file that has loaded but is not in the
+  numbers yet, newest first — its payer, rows, when it loaded, and *why it
+  is waiting* in plain words: "next in line", "next update in about 4 min
+  (downloads are running; updates are spaced so they keep the disk)",
+  "after the build finishes", "retrying at 10:50 after an out-of-memory
+  stop", "analytics paused".
+- **Added recently**: the last 50 files that went in, with the time each
+  appeared on screen, how long it waited, and what kind of update did it.
+- **Per payer**: ✓ in the analytics, part-way (k of n parts), or waiting —
+  with the rows in the analytics next to the rows loaded.
+- **Problems**: the last failure in a sentence, when it tries again, and
+  what you can do (usually: raise `duckdb_memory_gb`, or free disk space).
+- **Run now** (do the next update at once, even while downloads continue)
+  and **Pause analytics** (for a laptop on battery: files keep loading, but
+  nothing new reaches the numbers until you press Resume; remembered after a
+  restart, and the header says "paused").
+- A short **"What this means"** box. In one line: files load in minutes;
+  adding them to the numbers every screen reads takes longer on a big store,
+  and until a file is added its rates are stored safely but are not in any
+  report.
+
+`mrfx status --analytics` prints the same panel in the terminal.
+
+**Updates no longer wait for the queue to go quiet.** The update is now its
+own job: it runs whenever the numbers are behind, whatever the downloads are
+doing — a few seconds after the last file when nothing else is happening,
+and while downloads run, spaced out (at least a minute, three times as long
+as the last update took, never more than 30 minutes apart) so the downloads
+keep most of the disk. The header says when: *"2 newly loaded files not in
+the analytics yet — added in about 2 min (downloads are running)"*. A new
+file of a payer you already have now updates only that payer's practices in
+that file, not the whole payer and the whole store. An update that runs out
+of memory is simply tried again later — it no longer turns into a rebuild of
+everything.
+
+**Fixed (these could lose or double data):**
+
+- A link whose load failed once kept a hidden lock: the same file under
+  another link was then skipped for good, and a copy dropped in the inbox
+  made the inbox wait forever. Fixed — a failed load always lets go, and the
+  copy loads.
+- The "same document compressed differently" check of 0.7.7 did not cover
+  files loaded before 0.7.7. The app now names those older files by their
+  content in the background, one at a time (the Files tab shows "Naming N
+  older files by content — 37 %"). Files whose original download was deleted
+  after loading (the default) cannot be named this way; the Files tab says
+  how many, and what to do if a second copy of one appears.
+- A backup taken while a file was being saved could leave that file's rows
+  out of the backup — and still say "backup OK". The backup now lists the
+  store's files at the same instant it copies the database, and `mrfx
+  verify` checks that the files in the zip really hold the rows the backup
+  claims. A stopped backup no longer leaves a store-sized `.part` file on
+  the backup drive; a `backup_dir` inside the data folder is refused (every
+  backup would contain all the earlier ones); on a drive that cannot make
+  links (an exFAT USB stick) the copy no longer blocks new files for
+  minutes. While a backup copies the database, new files wait to be saved
+  for about 25 seconds per GB of database — the Files tab says how long for
+  yours.
+- A tax ID shaped like a Social Security number can no longer be saved as a
+  client, and one saved earlier is never shown, put in the address bar, a
+  folder name, a title or a PDF.
+
+**Smaller fixes.** The monthly re-check no longer downloads new files an
+index lists (next month's files, often many GB) — it says on the index row
+"N new files listed — not downloaded; paste this index again, or turn on
+monthly_refresh"; that was always the intent. Stop no longer leaves wrong
+"stopped" answers behind in the client digest and the monthly packets. A Run
+button no longer stays greyed out after you press Enter twice. Two copies of
+the same document whose names give different months (and whose header has
+no date) now load as their two months instead of losing one. Save as PDF can
+be stopped, gives up after 3 minutes, and a report too large to print says
+so (use Open printable → Print instead); `mrfx packets --pdf` skips a
+document it cannot print and does the rest. If the app restarts while an
+export is building, its bar says "the app restarted — run it again" instead
+of staying stuck. Back in your browser now returns to the previous tab.
+Pasting many links at once survives the app being closed half way. A damaged
+download says so in words. The rule for a practice's all-payer rate is now
+printed on every report and export that uses it.
+
+**Numbers.** None changed: the same files give the same rows and the same
+analytics, byte for byte (checked on real payer files and on the
+99-million-rate test store).
+
+## What changed in version 0.7.7 (review 13)
+
+**The header says what the numbers are made of.** Loading a big payer is
+fast; folding it into the numbers every screen reads (the "analytics") takes
+longer — on a store of a billion rates, a few hours. Until 0.7.7 the screens
+answered from whatever had been folded in so far without a word, so with 49
+payers loaded the dashboard could quietly be showing 3. Now, while the
+analytics are behind, the line at the top right says so in orange:
+
+> 1,163,544,071 rates · 49 payers · 615 files · **Analytics cover 3 of 49
+> payers (3 of 615 files). Rolling up the rest — 41 %, about 2 h left**
+
+Payers not folded in yet are greyed in every payer list (you can still pick
+them; a screen with nothing for them says why), every report and export
+prints the same sentence in its methodology, and the line disappears when
+everything is covered. The fold-in itself is now done payer by payer and
+remembers where it was: stop the app half way and it carries on from there
+next time (it used to start over), and each payer shows up on screen as soon
+as its turn is done. On this program's 99-million-rate test store a full
+build went from 12 minutes to 6; for a store of 1.16 billion rates expect
+**about 2 to 4 hours on a laptop, the dashboard usable throughout, the header
+showing how far it is**. If it fails (for example out of memory), the line
+says why and it tries again by itself.
+
+**A progress bar on everything you build.** Every report, export, search
+and packet now shows a bar under its button, from 0 to 100 %, with what it is
+doing in words and a **Stop** button:
+
+> Rate card — **Comparing with peers** — 46 % ▕██████░░░░░░▏ Stop
+
+It only reaches 100 % when the result is in your hands; for a download it
+ends at "built — your browser is downloading it". Stop really stops the work
+on the computer (nothing half-built is shown). The `mrfx export / outreach /
+packets / orgreport` commands print the same steps in the terminal.
+
+**Faster.** Measured on the 99-million-rate store: a practice's details
+(the panel on the right) 30 s → 1.6 s; the Overview 27 s → 2.3 s; the
+outreach file for every practice 71 s → 37 s (one state 12 s → 5 s); the city
+rate map 9.4 s → 0.2 s; market sizing 7 s → 0.8 s; the client digest 17 s →
+5 s; "validate a tax ID" 14 s → 0.6 s; the header counts 6.8 s → 1 s. The
+numbers and files are byte-for-byte the same.
+
+**Save as PDF.** Beside every "Open printable" button (pitch report,
+negotiation one-pager, payer comparison, proposal, rate card, visit value,
+practice profile, market report) there is now **Save as PDF**: the same
+document, as a PDF file in your Downloads folder, ready to e-mail. It uses
+the small built-in browser the app already downloads the first time it needs
+one (the same one it uses for payer sites that need JavaScript). If that
+browser is not available, the button says so and "Open printable" + your
+browser's Print → Save as PDF still works. `mrfx packets --pdf` saves a PDF
+beside every document of the monthly packets.
+
+**Medicaid and hospital rates in your negotiation documents.** If you have
+loaded your state's Medicaid fee schedule (`mrfx floors`) or hospital price
+files (`mrfx hospital`), the negotiation one-pager, the payer comparison, the
+proposal and the practice profile now carry one line per code, for example:
+
+> Medicaid pays $30.00 for 97110 in MO; Alpha Health pays you $28.00 (below
+> Medicaid).
+> 97110: Alpha Health pays 2 MO hospitals a median $107.50 ($95.00–$120.00;
+> you: $28.00).
+
+Nothing loaded? The document says that line is left out and why.
+
+**Automatic backups.** Your store took weeks of downloads and lives only on
+this computer. In `config/mrfx.yaml`, set `backup_dir:` to a folder —
+ideally on an external or second drive, for example `D:/mrfx-backups` —
+and restart. While the dashboard runs, it writes a backup there every 7 days
+(`backup_every_days`) without stopping anything, checks it, and keeps the
+newest 4 (`backup_keep`; it only ever deletes backups it made). If the drive
+is too full it does not try — it says so instead. The **Files** tab shows
+"Last backup: date, size, folder (checked OK)" and a **Back up now** button.
+To restore: stop the app, unzip the backup, and put the contents of its
+`store` folder in place of your store folder (`data/mrfx_store` unless you
+changed `store_dir`). `mrfx verify <backup zip>` checks any backup first.
+Also on the command line: `mrfx backup` and `mrfx verify` as before.
+
+**Links you can bookmark, and one search box.** The address bar now follows
+the screen: after you run a benchmark it reads, for example,
+`…/#benchmark?subject=ACME%20REHAB&state=MO` — bookmark it, or send it to
+yourself, and opening it runs that benchmark again (Negotiate, Rate card,
+Rate changes and Medicare work the same way). At the top right, **Find a
+practice** takes a name, a 9-digit tax ID or a 10-digit NPI: press Enter and
+the practice's details open on the right.
+
+**What is skipped, and what loads again** (the box "When is a file skipped"
+in Step 5 has the whole rule):
+
+- The same document **compressed differently** (or saved unzipped) is now
+  recognised as the same file and loaded once — before, it could be counted
+  twice.
+- Once a month the app now asks every payer index you loaded — the ones you
+  pasted too — whether each of its files changed, and downloads only the
+  changed ones (`monthly_recheck: true`, on by default). A file whose size
+  changed under the same version tag is now treated as changed.
+- **After you add billing codes** to `codes.cpt_codes`, restart: the Files
+  tab says how many loaded files were read before the new codes and offers
+  **Re-read N files for the new codes** — press it once. (The old advice to
+  "re-add the links" did nothing.)
+- A provider list that finished downloading while its payer's rate file was
+  being read is now always applied (before, about one time in four, a few
+  rates of that payer were silently missing until the file was loaded again).
+- Payer listings no longer drop an employer whose name merely contains
+  "allowed" or "NDC"; what a listing leaves out is said on its row.
+
+**Numbers.** One small rule change: in "Visit value in this market" the
+quartile now follows the printed percentile (a practice at percentile 26 is
+in the second quartile, as you would read it). A practice's rate across all
+its payers is still the middle of its published lines (a payer that lists a
+code twice, for two places of service, counts twice) — that rule is now
+printed under every such figure. Nothing else changed.
+
+## What changed in version 0.7.6 (review 12)
+
+**New: what a visit is worth in a market.** On the **Rate card** tab, under
+"One visit, by payer", there is a new box: **Visit value in this market**.
+Pick a **State** and a **Discipline** above (both are needed — a visit's value
+is a market figure, and a market is one state and one discipline), choose the
+visit in the visit box (the default is one 15-minute unit each of 97110,
+97530, 97140 and 97112), and press **Show visit value in this market**. For
+every payer you see how many practices in that state it pays for the whole
+visit, the **average (mean)**, the **median**, and the middle half (**P25** to
+**P75**) of what one visit is worth to those practices — and the same over
+**all payers**, where each practice counts once, at the middle of its own
+payers' values (payers are never added together). Picking a practice is
+optional; when you do, its own visit value with each payer is placed in that
+payer's spread: its percentile, its quartile, and how many dollars and percent
+it sits above or below the average and the median. **An example:** a
+Missouri PT clinic paid $30 by Payer A on all four codes has a $120.00 visit
+with A; if A's six Missouri practices are worth $80, $100, $120, $140, $160
+and $180 a visit, the box shows 6 practices, average $130.00, median $130.00,
+P25 $105.00, P75 $155.00, and the clinic at p40, second quartile, $10.00
+(7.7%) below both the average and the median. A practice counts for a payer
+only if that payer has a rate for **every** code of the visit (a half-priced
+visit is left out, and the box says how many were); a payer with fewer than 5
+practices is not shown. A **practice** here is one tax ID (TIN): a clinic that
+bills under two tax IDs counts as two practices in the market's numbers, and
+when you pick it, the box places it once, at its own value. The quartile is
+read from the percentile on the same row (below 25 is the first quartile,
+below 50 the second, below 75 the third), so the two never disagree when many
+practices are paid exactly the same. **Open printable** and **Download CSV**
+give the same numbers, and the printable rate card and its CSV include the box
+when State and Discipline are set.
+
+The rest of this round fixed what an end-to-end check of the 0.7.5 zip found:
+
+- **The current-rate chart in an NPI's drawer** now shows the same number as
+  the Explorer and the Code page when a payer changed how it spelled the base
+  modifier between months (it showed an average of the old and new rates).
+- **A download from a server that sends an unusual "ETag"** (without quotes)
+  no longer starts over after every dropped connection; and when a download
+  is set aside, the message now says truthfully how much of it is kept.
+- **`mrfx ingest` no longer waits forever** for a link the program was
+  loading when it was last closed; that link goes back in the queue.
+- **A monthly refresh of an index whose links carry a signature** (a long
+  `?sig=…` part) now finds a republished file, and pressing **Clear queue**
+  while an index is being checked now sticks.
+- **Re-pasting a list of links** with fresh signatures now updates the links
+  still waiting in the queue, so they no longer fail with an expired link.
+- **The first monthly refresh after updating** no longer downloads every file
+  again when nothing changed.
+- **A Medicare fee schedule with a "nan" or a zero rate** is refused with the
+  line number, instead of breaking every screen that shows % of Medicare.
+- **A link that waited for the same file in the inbox** retries by itself if
+  the program was closed before that file finished loading.
+- **Two files of one payer for the same month** (for example two plan books,
+  or a corrected file under a new name) are **pooled**: a practice priced in
+  both gets the middle of the two rates. The Files tab and every methodology
+  now say so, with how many practices are priced in more than one file. If a
+  payer re-posts a corrected file under a new name, remove the old one on the
+  Files tab.
+- **The memory setting is now automatic** (`duckdb_memory_gb` is left out of
+  `config/mrfx.yaml`, leaving room for the file readers). The settings the
+  guides mention (`max_toc_files`, `delete_raw_after_ingest`,
+  `monthly_refresh`, …) are now in `config/mrfx.yaml` with a `#` in front —
+  remove the `#` to change one. Your own `config/mrfx.yaml` is kept by
+  `mrfx update`; the new one arrives beside it as `mrfx.yaml.new`.
+- **New clinics / closures within a radius** now list the nearest ones even
+  when many newer ones exist far away.
+- **A second copy of a file you already loaded** is deleted from the inbox
+  (its original stays in `data/processed`), instead of being kept twice.
+- **After an update that has to adjust stored rates**, the dashboard opens
+  within about 30 seconds and the rest of the adjustment continues behind it;
+  the Files tab shows how far it is.
+- Smaller things: the Markets state list no longer shows military mail codes
+  as states; `mrfx status` prints its memory line once; a big file dropped in
+  the inbox shows "reading the file once …, N of M MB" while it is first
+  read; stopping the server on Mac/Linux no longer prints a "leaked
+  semaphore" warning; Mass General Brigham Health Plan's address in the
+  catalog was updated.
+
+## What changed in version 0.7.5 (review 11)
+
+This round went over how links are downloaded, how files are loaded and when
+a file is skipped — with real files, a deliberately badly behaved test
+server and the program killed at random moments. What you would have seen
+before, and what happens now:
+
+- **A file dropped in twice no longer counts twice.** The browser's second
+  download (`rates (1).json.gz`), a copy, or a file you downloaded in your
+  browser after its link had already loaded, used to be loaded again — every
+  contract line was then held twice and every count that adds files up was
+  inflated. The same bytes under a second name are now recognised and shown
+  as **skipped — "identical to …, which is already loaded"**. The upload
+  button says the same right away.
+- **A capped index now loads the rest.** An index with more files than
+  `max_toc_files` says so; raise the setting and press **retry** on that
+  index's row — the button is there now — and the files past the cap are
+  queued (files already loaded are not downloaded again).
+- **An over-size file re-queues when the limit is raised.** Raising
+  `confirm_over_gb` and restarting now picks up the "too big" rows whose size
+  is known; "download anyway" still works per row.
+- **"Clear queue" sticks.** Pressed while an index was being read, the index
+  used to finish, queue all its files and load them anyway.
+- **"Keep both" can no longer get stuck.** If the program stopped before a
+  file you chose to keep was loaded, it sat "queued" for good and could not be
+  removed. It now loads at the next start or scan, and such a row can be
+  removed.
+- **A resumed download is checked.** When a download is interrupted and
+  resumed, the server's answer is now compared with what was asked; if the
+  insurer replaced the file in the meantime, the download starts over instead
+  of joining two versions into one file. (One case no program can detect: a
+  server that gives no version information AND replaces a file with a
+  different one of exactly the same size between two connections — the app
+  then checks a sample of the beginning, where the file's date lives.)
+- **A re-checked link asks the server first.** The monthly refresh (and a
+  provider list arriving later) used to reuse a kept download or skip a
+  loaded file without asking whether the insurer had published a new version
+  under the same address. It now asks once; unchanged files are not
+  downloaded again, changed ones are.
+- **Plain sentences instead of program errors.** A link that redirects in a
+  loop, a damaged or cut-off download, an empty file, a file saved as UTF-16,
+  a parser that ran out of memory twice, an insurer's "come back later"
+  answer, and a file with none of your billing codes now each say what
+  happened and what to do. A dashboard question that coincides with a file
+  finishing is asked again instead of failing.
+- **Small files no longer wait behind big ones to start downloading**, and stopping downloads
+  during a retry pause frees the slot at once. A program that is closed hard
+  no longer leaves its helper processes running in the background.
+- **Less reading of each file**: a file dropped in the inbox is read twice
+  instead of two and a half times; outreach CSVs no longer get a blank line
+  between rows in Excel on Windows.
+- **Settings:** `mode: off` for name lookups works as written (it used to stop
+  every command with a config error unless written `"off"`).
+
+Nothing in this round changes a number: three real insurer files load to
+exactly the same rows as in 0.7.4.
+
+## What changed in version 0.7.4 (review 10)
+
+**Searching is faster.** Typing in the Explorer's search box now starts the
+search as soon as you pause (it waited over half a second before), and each
+new letter cancels the search before it — the old ones no longer queue up
+behind each other, so the answer arrives sooner and is always for what is in
+the box. While it loads, the previous rows stay on screen, dimmed, instead of
+the table going blank. A name needs at least two letters. The first screen
+after a start shows up without waiting for the header counts, the summary
+strip is remembered across restarts, the Entity view pages and sorts in
+about a third of the time, and the NPI view now answers a code on its own on
+a mid-size database instead of refusing. "Stats are busy — retrying…" no
+longer appears for the search you meant. Typing an NPI in the TIN or Entity
+view says which tax ID it bills under; an NPI typed into a practice box
+suggests its practice. `%` and `_` in a search are plain characters.
+
+**The Explorer shows the same numbers as every other tab.** Its Month box now
+starts on **latest — each contract's newest file** (the basis Benchmark,
+Markets and Leads use); **all months (pooled)** is still there.
+
+**Numbers that were wrong.**
+- The market report's city table lists only the state's own cities (a practice
+  with one clinician across the border put that city in the report).
+- Markets with a State picked ranks every state on its own practices and
+  highlights the picked one (other states were computed from the picked
+  state's practices).
+- Rate changes for a picked month compare each insurer's file with that
+  insurer's own previous file, list any insurer that could not be compared,
+  and say "nothing was compared" instead of "No changes" when that is the case.
+  Each row now shows its claim type and place of service.
+- The rate card's best-paying insurer is judged on the codes the insurers
+  both price (a Medicare anchor could crown an insurer that pays less on the
+  same code).
+- Monthly packets include "Market position" again (it was always left out).
+- The row details chart, the Code page's month-by-month table and the
+  overview use the same basis as everything else (newest file, practice
+  claims, base rates); the overview's "by discipline" block compares one
+  service — the moderate evaluation — for each discipline.
+- Leads, the outreach file and Benchmark use one market median: the median
+  of the OTHER practices (Leads included the practice itself — $47.50 on
+  Leads against $48.00 on Benchmark). Positions are unchanged; "average
+  below median" and the worst-payer gap can each move by a few dollars.
+- Leads flags a practice that an insurer's newest file no longer lists (its
+  rate there is from an older file).
+- New-to-network means absent from every earlier file of that insurer.
+- Printed documents fit their columns on a landscape page.
+- Half-cents are rounded the same way everywhere ($70.70 on one screen and
+  $70.69 on another).
+- "States with data" counts states only (foreign provinces and spelled-out
+  names are folded or dropped).
+- Weighted position, the hospital multiple, the floors percentages and the
+  referral wait are rounded once, at the end.
+
+**Clearer wording.** The dossier and market report state their month and
+market; Leads' "underpaid most by" and the dossier's "weakest payer" say
+which measure they are; the Sources tab shows the links the Files tab has
+tested; freshness ignores empty files and says "dated in the future"; the
+Code page has a claim-type box (practices vs facilities); a client name that
+matches no practice is refused when you add it; the Leads CSV keeps its old
+column order (new columns are at the end) and money in CSVs has two decimals.
+
+**Positions already quoted may move.** Because Leads now measures the gap to
+the median of the other practices, a Leads "average below median" figure
+and its worst-payer gap can differ from 0.7.3 by a few dollars; positions
+(the p-numbers) do not change.
+
+## What changed in version 0.7.3 (review 9)
+
+**Starting the program.** The window now says what it is doing from the first
+second: `opening the store at …`, the one-time update if there is one (with
+progress), and finally `the dashboard is ready — open http://localhost:8377`.
+The check of your stored files at start-up only reads files that are new or
+changed since the last start, so a big store opens in about the same time
+however many files it holds. If one stored file can't be read, the others are
+still updated and the window says which one was left.
+
+**Dropping or uploading a file again.** The program now recognises a file it
+already has by its contents, not just its name or size:
+- the *same* file again is reported as already loaded and is not read twice
+  (before, a 2–3 MB file could be loaded twice and every number became the
+  median of the two copies);
+- a *different* file under a loaded name, for the same insurer and month, is
+  held with two buttons on the Files tab — **Replace** or **Keep both** —
+  instead of being blended in silently;
+- a file that changes while it is being read is not recorded as loaded; the
+  next scan offers the new version.
+
+**Provider lists follow their month.** A rate file now uses the provider list
+the insurer published for the *same* month (or the newest one when it can't
+tell). Before, a June rate file could pick up March's list. A rate file that
+loaded from a link before its provider list arrived is read again (or
+downloaded again, once) when the list lands; until then its note says
+*waiting for this payer's provider reference file*. Very large provider lists
+are stored correctly on every path, and files that rely on a provider list no
+longer use memory in proportion to their size.
+
+**Numbers you sell.**
+- A report pinned to a month ("as of 2023-06") no longer shows rate changes
+  from after that month.
+- The "cut streak" counts only real month-to-month cuts on the same
+  practices and codes.
+- A practice's overall position is the same number on Leads, the
+  leaderboard, the payer roster, Negotiate, the one-pager and the dossier.
+  (Correction: the size-premium panel still printed a different figure — its
+  within-payer band average — until 0.7.4, which shows the overall position
+  there too.) Leads' "worst payer" compares payers on the codes they both
+  price, so Leads can name a different worst payer than 0.7.2 did.
+- Positions already quoted can move by a point (the payer roster now starts
+  from the same p50 rule), the leaderboard's code count counts the codes in
+  the position, sparkline percentages round half-up, and the negotiability
+  list can come back in a different order.
+- The Rate changes tab's State box filters "Find changes" too, not only the
+  trajectory.
+- A practice name typed in part ("ACME"), a practice outside the market's
+  state, and a mapped group are treated the same way on every screen; the
+  dossier is titled with the group's own name.
+- Report footers describe the market in words, percentages never read
+  "-0.0%", and the outreach file explains its own columns.
+
+**Faster.** The Rate changes tab's trajectory is remembered until new data
+arrives (instant on the second click) and has a State box; the outreach
+export is about twice as fast; the medians behind Benchmark and Leads are kept
+across restarts instead of being rebuilt each time.
+
+**Downloads.** Each file's body is downloaded once (a big file found by a
+small-file slot keeps downloading instead of being started again; since
+0.7.5 a small-file slot may first ask for 1 byte to learn the file's size),
+so a queue
+of big files finishes sooner and asks the insurer's server for less.
+
+**Safer input.** A wrong value sent to the dashboard gets a plain sentence
+back, never a database error; very long file names are refused with a
+sentence.
+
+## Version 0.7.2 — start-up fix
+
+0.7.1 updated the stored rows of every file once, at the first start, before
+the dashboard opened — and printed nothing while it worked. On a big store it
+sat after the "analytics memory budget" line for a long time, which looked
+like a hang. 0.7.2 does the same update in about a second for most stores
+(measured: 2,000 files, 94 s → 0.9 s), only rewrites the files whose rows
+actually change, and prints what it is doing:
+`one-time update of N stored file(s)…`, a progress line every 15 seconds,
+and `stored rows are up to date…` when it is done.
+
+## What changed in the November 2026 (audit 8) update — version 0.7.1
+
+Downloads:
+
+- **Copies of a file you already have are recognised early — and only when
+  that is proven.** After the first 15 MB (`early_dedup_mb`), a download whose
+  size, first 15 MB, last 1 MB and 8 samples in between match a loaded file is
+  stopped and marked a duplicate. Only compressed files (.gz / .zip) are ever
+  skipped this way: their last bytes carry a checksum of the whole content. A
+  plain .json is always downloaded in full (two plain files can match at both
+  ends and still differ in the middle).
+- **A copy of a file that is downloading right now "waits"** (grey badge,
+  counted separately) instead of downloading twice, and is checked when the
+  other finishes.
+- **Size lanes**: up to 3 download slots take files of 100 MB or less first
+  (`small_file_downloads`, `small_file_mb`); the line above the download list
+  shows the current numbers.
+
+Files:
+
+- **A rate file whose provider list is IN the file is never matched to
+  another file's provider list.** If a payer also had a separate provider
+  list, rates could attach to the wrong practices on three of the four ways a
+  file is read. Two provider lists from the same month that disagree are no
+  longer guessed between (the Files tab says so).
+- **A big standalone provider list (over 1 MB)** is stored as a provider list
+  instead of a rate file with 0 rows.
+- **A file dropped in (or uploaded) under a name that is already loaded** is
+  no longer silently ignored: the same file is reported as already loaded; a
+  different one is loaded under a new name.
+- Rows stored by older versions with "fee_schedule" spelled that way now count
+  as dollar rates (fixed once, at the first start). Files that older versions
+  may have trimmed say **re-ingest suggested** on the Files tab.
+
+Numbers:
+
+- **Payer trajectory / "In real terms"**: measured on the same practices and
+  codes in both months. A payer adding a cheaper code no longer reads as a cut.
+- **A practice with offices in two states** has one rate on every page
+  (Benchmark, Negotiate, rate card): the market's state filter picks the
+  peers, not which of the practice's own rates count.
+- **Leads' "worst payer"**, the leaderboard and the size premium use the same
+  position and the same codes as the Benchmark.
+- **Per-visit value** compares payers on the codes they all price.
+- **Outreach merge fields** (C97110_RATE, _PCTL, …) are on the same basis as
+  the Benchmark (latest month, base modifiers, professional) with the same
+  position rule; the methodology file defines each column.
+- **Rounding**: every printed number rounds exactly as the database does
+  (45.125 → 45.13 everywhere).
+- **Sparklines** stop at a report's as-of month; **hospital parity** takes one
+  rate per hospital first; the **market report** states its as-of month,
+  basis and source files; the **client digest** follows entity-map edits.
 
 ## Debug FAQ — what it says, what it means, what to do
 
@@ -804,13 +1794,12 @@ them in one place, grouped by where you'll hit them.
 
 - **`Failed to build installable wheels for some pyproject.toml based
   projects` (duckdb, pyarrow, watchfiles, pydantic-core)** — your Python is
-  newer than these packages ship ready-made installers for, so pip tried to
-  compile them from source and failed. **Don't install a compiler — use Python
-  3.12.** On Windows: `py -0p` to confirm 3.12 is installed (if not, get it
-  from <https://www.python.org/downloads/release/python-3120/>), delete the
-  half-made `.venv` folder, then run the Step-3 sequence starting with
-  `py -3.12 -m venv .venv`. `python --version` inside the active environment
-  must read `3.12.x` before you install.
+  newer than these packages ship ready-made installers for (anything past
+  3.14), or `requirements.txt` is an old copy, so pip tried to compile them
+  from source and failed. **Don't install a compiler — use Python 3.11–3.14.**
+  On Windows: `py -0p` lists what's installed; delete the half-made `.venv`
+  folder, then run the Step-3 sequence starting with e.g.
+  `py -3.13 -m venv .venv`.
 - **`mrfx: command not found`** — the virtual environment isn't active. Re-run
   the `activate` line from Step 3 (you'll see `(.venv)` in the prompt).
 - **`python3: command not found` on Windows** — use `python` instead.
@@ -859,7 +1848,9 @@ them in one place, grouped by where you'll hit them.
   Correct behavior; nothing to fix.
 - **`identical to a file already ingested … skipped as duplicate`** — Blue
   plans host copies of each other's national files. Your data already has
-  it; nothing was lost.
+  it; nothing was lost. When it says **`same size, same first 15 MB and same
+  last 1 MB — skipped after N MB`**, the copy was recognised early and the
+  rest of it was never downloaded.
 - **`out-of-network allowed-amounts file (no negotiated rates) — skipped`** —
   the link was a billed-charges report, not a rate file. Normal.
 - **`scanned: none of the target billing codes appear in this file`** — the
@@ -953,7 +1944,7 @@ them in one place, grouped by where you'll hit them.
   15+ minutes.
 - **The queue is huge and slow** — expected for whole-payer grinds (UHC and
   Anthem queue thousands of files; parsing runs ~30s per uncompressed GB).
-  The app already uses (your cores − 1) parsers automatically
+  The app already uses (your cores − 1) parsers automatically (fewer if RAM is tight)
   (`parallel_ingests: 0`); on a big multi-core machine that's the fastest
   safe setting, so just leave it running overnight and skip rows you don't
   need. (If the startup log warns that ijson is running its "pure-Python
@@ -1008,20 +1999,16 @@ them in one place, grouped by where you'll hit them.
 ### Provider names / identification
 
 - **Names are identifying very slowly — the banner crawls up a few thousand a
-  day, or is stuck at a few thousand.** You're being served by the slow `api`
-  path, looking each provider up one at a time over the internet (rate-limited,
-  so a big book takes days and can appear stuck once NPPES throttles you). Point
-  the app at the local NPPES bulk file — see **"Make provider names fill in fast
-  (recommended)"** above. One local pass identifies the whole backlog in
-  minutes. Quick version: set `bulk_csv_path` in `config/mrfx.yaml` and restart
-  (that alone switches to the fast local path — `mode` can stay `api`; the
-  one-off `mrfx enrich --bulk` command does the same but needs the dashboard
-  stopped first). **If you
-  already set `bulk_csv_path` and it's still slow, the path is almost certainly
-  wrong** — a misspelled path or one pointing at a file that isn't there is
-  silently un-usable, so the app falls back to the API. Check the `mrfx serve`
-  window: it now logs a warning naming the missing file. Fix the path (mind the
-  Windows quotes/slashes) and restart.
+  day, or is stuck at a few thousand.** That means the app is looking providers
+  up one at a time over the internet instead of using the local NPPES file it
+  normally downloads by itself (see **"Provider names fill in automatically"**
+  above). Check the `mrfx serve` window for a line starting `NPPES:` — it says
+  why: no internet / CMS unreachable (it retries within the hour), a download
+  that stopped (it resumes), or `auto_download: false` in `config/mrfx.yaml`
+  (then point `bulk_csv_path` at a file you downloaded). If you set
+  `bulk_csv_path` yourself and it's still slow, the path is almost certainly
+  wrong — the window logs a warning naming the missing file. Fix the path (mind
+  the Windows quotes/slashes) and restart.
 - **The banner never reaches zero.** A handful of NPIs in payer files are
   deactivated or malformed and simply aren't in NPPES — those are marked
   "identified" (no name found) so the count settles just short of 100% instead
@@ -1038,6 +2025,10 @@ them in one place, grouped by where you'll hit them.
 
 - `mrfx status` summarizes everything the store knows.
 - Each failed row's error text is written to be actionable — read it first.
+- Closed the server window before reading its last message? Started with
+  `Start MRF Explorer (auto-restart).bat`, everything it showed is also saved
+  in `data/mrfx_store/diagnostics/serve.log` (the newest lines are at the end).
+- `mrfx --version` prints which version you are running.
 - For anything beyond this FAQ, hand `docs/AI_HANDOFF.md` plus the row's
   error text to an AI assistant — that document tells it exactly how this
   codebase works and how to debug it safely.

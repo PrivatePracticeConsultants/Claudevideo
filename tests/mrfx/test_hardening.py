@@ -76,10 +76,23 @@ def test_rollup_tables_are_clustered_for_zonemap_pruning(store):
 
     with store.connect() as con:
         # physical scan order (no ORDER BY in the probe) must be non-decreasing:
-        # proof the table was materialized clustered, not in aggregate-hash order
-        spine = [r[0] for r in con.execute(
-            "SELECT billing_code FROM rates_by_tin_tbl").fetchall()]
-        assert spine == sorted(spine), "spine not clustered by billing_code"
+        # proof the table was materialized clustered, not in aggregate-hash order.
+        # Since 0.7.7 the spine is built payer by payer (review 13 item 1.3 —
+        # each payer's slices commit on their own and resume after a kill), so
+        # the clustering holds WITHIN each payer's block: payers contiguous,
+        # billing codes ascending inside each. A code-filtered query still
+        # prunes to that code's row groups in every payer block.
+        spine = con.execute("SELECT payer, billing_code FROM rates_by_tin_tbl").fetchall()
+        blocks: dict = {}
+        order = []
+        for payer, code in spine:
+            if not order or order[-1] != payer:
+                assert payer not in blocks, "a payer's rows are not contiguous"
+                order.append(payer)
+                blocks[payer] = []
+            blocks[payer].append(code)
+        for payer, codes_seen in blocks.items():
+            assert codes_seen == sorted(codes_seen), f"{payer}: not clustered by billing_code"
         direc = [r[0] for r in con.execute(
             "SELECT tin_value FROM tin_directory_tbl").fetchall()]
         assert direc == sorted(direc), "directory not clustered by tin_value"
@@ -324,8 +337,12 @@ def test_cosmetic_failures_never_fail_real_work(cfg, store, monkeypatch):
     monkeypatch.undo()
 
     # 2. QA aggregates degrade instead of failing the finished file
-    monkeypatch.setattr(ing, "_qa_aggregates", boom)
+    monkeypatch.setattr(ing, "qa_aggregate_counts", boom)
+    from mrfx.store import file_key
+    fake_part = store.rates_dir / f"{file_key('x.json')}.parquet"
+    fake_part.write_bytes(b"")   # a part for the (failing) QA scan to target
     qa = qa_report(store, {"rows": 5, "non_dollar_rows": 0}, "x.json")
+    fake_part.unlink()
     assert qa["rows"] == 5 and any("unaffected" in m for m in qa["messages"])
     p = drop(cfg, "innetwork_mixed.json", gz=True)
     res = ingest_file(cfg, store, p)
@@ -374,7 +391,9 @@ def test_orphaned_parse_worker_exits_at_chunk_boundary(cfg, tmp_path, monkeypatc
     monkeypatch.setattr(ing.os, "getppid", fake_getppid)
     p = tmp_path / "rates.json"
     shutil.copy(FIXTURES / "innetwork_mixed.json", p)
-    with pytest.raises(SystemExit, match="parent process died"):
+    # ParentGone (a RuntimeError), not SystemExit: a SystemExit re-raised in a
+    # live parent killed its processor thread silently (round 3, P1.1)
+    with pytest.raises(ing.ParentGone, match="lost contact with MRF Explorer"):
         ing._parse_worker(cfg, str(p), p.name, {}, {}, 0, p.stat().st_size,
                           str(tmp_path / "out.parquet.tmp"), str(tmp_path / "prog.json"))
 
@@ -396,7 +415,12 @@ def test_prefetch_reuses_kept_download_never_redownloads(cfg, store, tmp_path):
     rec = store.next_queued_url()
     assert fetch_url_record(cfg, store, rec) is True
     row = next(r for r in store.list_urls() if r["url"] == url)
-    assert row["status"] == "fetched" and row["content_sha"] == "cafe" * 16
+    # the kept bytes are reused with no request; the sha is the bytes' own —
+    # a sidecar that does not describe the file on disk is never trusted
+    # (review 11 item 1.6: a stale sha let a true copy load twice)
+    import hashlib
+    assert row["status"] == "fetched"
+    assert row["content_sha"] == hashlib.sha256(dest.read_bytes()).hexdigest()
     assert dest.exists()  # bytes untouched
 
 
@@ -710,9 +734,18 @@ def test_no_route_blocks_the_event_loop(cfg, store):
     # ONE deliberate exception: /api/debug/stacks runs on the event loop so it
     # still answers when every threadpool worker is wedged — the situation it
     # exists to diagnose. It does no store/compute work (in-memory frame walk).
+    # Since 0.7.7 (review 13 Group 2) the progress poll and its Stop are the
+    # other two, for the same reason: they must answer while every worker
+    # thread is busy building the report the bar describes, and they read one
+    # in-memory object under a lock held for microseconds — never the store.
+    # Since 0.8.0 (review 14 item 1.2) the Analytics activity poll is the
+    # fourth: async so it never queues behind a saturated pool, but its store
+    # reads run OFF the event loop (anyio.to_thread on its own 2-token
+    # limiter) and a poll during a computation returns the last answer.
     offenders = [r.path for r in create_app(cfg, store).routes
                  if isinstance(r, APIRoute) and asyncio.iscoroutinefunction(r.endpoint)
-                 and r.path != "/api/debug/stacks"]
+                 and r.path not in ("/api/debug/stacks", "/api/progress/{token}",
+                                    "/api/analytics/activity")]
     assert offenders == [], f"async endpoints would block the event loop: {offenders}"
 
 
@@ -861,15 +894,41 @@ def test_rollup_never_rebuilds_back_to_back_mid_grind():
     # The field failure: an unconditioned "10 files pending" trigger meant a
     # big store's hour-long rebuild ended with the next batch already
     # pending, so rebuilds ran back-to-back and extraction starved for the
-    # disk ("chunks frozen, CPU busy"). Mid-grind, ONLY the adaptive
-    # interval may trigger — no pending count, however large, forces it.
-    from mrfx.fetch import _rollup_due
+    # disk ("chunks frozen, CPU busy"). Mid-grind, ONLY the cadence may
+    # trigger — no pending count, however large, forces it.
+    # UPDATED in round 14 (item 1.1): the decision moved from the queue's
+    # `_rollup_due` to the analytics scheduler (mrfx/foldin.py). Same rule —
+    # a busy queue waits a multiple of the last update, counted from its END
+    # — now bounded above as well (BUSY_CAP_S), and an idle queue folds in
+    # after a few seconds instead of only at "the queue is idle".
+    import time as _t
 
-    assert not _rollup_due(500, 3, 10.0, 3600.0)      # huge backlog, interval not passed
-    assert _rollup_due(1, 3, 3600.0, 3600.0)          # interval passed → rebuild
-    assert _rollup_due(1, 0, 0.0, 3600.0)             # queue idle → final rebuild now
-    assert not _rollup_due(0, 0, 99999.0, 1.0)        # nothing pending → never
+    from mrfx import foldin as FI
 
+    class S:                       # a stale store with nothing else going on
+        def rollups_stale(self):
+            return True
+
+        def analytics_paused(self):
+            return False
+
+        def rollup_in_progress(self):
+            return False
+
+    f = FI.FoldIn(S())
+    f.note_queue(3)                                    # a busy queue
+    f.last_duration = 300.0                            # the last update took 5 min
+    f.last_end = _t.monotonic() - 10.0
+    d = f.decide()
+    assert not d["due"] and d["code"] == "cadence"     # backlog never forces it
+    assert f.gap_s(True) == FI.BUSY_MULTIPLE * 300.0
+    f.last_end = _t.monotonic() - FI.BUSY_MULTIPLE * 300.0 - 1
+    assert f.decide()["due"]                           # cadence passed → update
+    f.last_duration = 99999.0
+    assert f.gap_s(True) == FI.BUSY_CAP_S              # bounded above
+    f.note_queue(0)
+    f.last_end = f.last_poke = _t.monotonic() - FI.IDLE_SETTLE_S - 1
+    assert f.decide()["due"]                           # idle → right away
 
 def test_scan_inbox_rebuilds_once_per_pass(cfg, store, monkeypatch):
     # Two files dropped together must cost ONE full analytics rebuild, not
@@ -878,12 +937,17 @@ def test_scan_inbox_rebuilds_once_per_pass(cfg, store, monkeypatch):
     from tests.mrfx.conftest import drop
 
     drop(cfg, "innetwork_mixed.json", gz=True)
-    # same fixture under a second name = a second real ingest in one pass
+    # the same fixture under a second name, one byte different = a second
+    # real ingest in one pass. (Changed in 0.7.7, review 13 item 5.2.1: the
+    # byte-identical decompressed copy this used is now — correctly — the
+    # same CONTENT as the .gz and skipped as a duplicate; the trailing
+    # newline keeps this test about two real ingests.)
     import gzip
     import shutil
     src = cfg.inbox_dir / "innetwork_mixed.json.gz"
     with gzip.open(src) as fin, open(cfg.inbox_dir / "second_copy.json", "wb") as fout:
         shutil.copyfileobj(fin, fout)
+        fout.write(b"\n")
 
     calls = []
     real = store.rebuild_rollups
@@ -1136,6 +1200,72 @@ def test_forget_recomputes_shared_tin_directory_flags(cfg, store):
     assert inc == full
 
 
+def test_removal_refreshes_only_the_removed_tins_directory_rows(cfg, store, monkeypatch):
+    """A forget/replace used to rebuild the WHOLE name directory (measured 30+
+    min at 300M rows) because the directory has no payer column. Each
+    directory row depends only on its own TIN's rows, so the removed part's
+    TINs are recorded and only those rows are recomputed — and the result
+    must equal a full rebuild bit for bit (gone TIN pruned, shared TIN
+    recomputed, untouched TINs unchanged)."""
+    _payer_part(store, "r1.json", "Rho", [
+        ("460000001", "1460000001", "97110", "2026-06", 50.0),   # only in r1 -> must vanish
+        ("460000002", "1460000002", "97110", "2026-06", 52.0),   # shared with r2
+    ])
+    store.upsert_file("r1.json", finished_at="2026-07-01 10:00:00")
+    _payer_part(store, "r2.json", "Sigma", [
+        ("460000002", "1460000003", "97112", "2026-06", 54.0),
+        ("460000003", "1460000004", "97110", "2026-06", 56.0),   # untouched
+    ])
+    store.upsert_file("r2.json", finished_at="2026-07-01 10:00:01")
+    store.rebuild_rollups()
+
+    full_dir_builds = []
+    real_build = store._build_rollup_tables
+
+    def spy(con, *a, **k):
+        full_dir_builds.append(k.get("tables"))
+        return real_build(con, *a, **k)
+
+    monkeypatch.setattr(store, "_build_rollup_tables", spy)
+    from mrfx.ingest import forget_file
+    forget_file(cfg, store, "r1.json")
+    assert not store.rollups_stale()
+    assert full_dir_builds == []            # no whole-directory refresh
+    inc = _rollup_snapshot(store)
+    with store.connect() as con:
+        assert con.execute("SELECT count(*) FROM rollup_pending_tins").fetchone()[0] == 0
+        tins = [r[0] for r in con.execute(
+            "SELECT tin_value FROM tin_directory_tbl ORDER BY tin_value").fetchall()]
+    assert tins == ["460000002", "460000003"]
+    monkeypatch.undo()
+    store.rebuild_rollups()
+    assert inc == _rollup_snapshot(store)
+
+
+def test_removal_queued_by_an_older_version_still_refreshes_whole_directory(cfg, store):
+    """A pending note written before TINs were recorded has no tins_tracked
+    flag: the consumer must fall back to the full directory refresh."""
+    import json as _json
+
+    _payer_part(store, "o1.json", "Tau", [("470000001", "1470000001", "97110", "2026-06", 40.0)])
+    store.upsert_file("o1.json", finished_at="2026-07-01 10:00:00")
+    _payer_part(store, "o2.json", "Tau", [("470000002", "1470000002", "97110", "2026-06", 41.0)])
+    store.upsert_file("o2.json", finished_at="2026-07-01 10:00:01")
+    store.rebuild_rollups()
+    store.rates_dir.joinpath(  # remove o1's part behind the store's back, like an old version did
+        __import__("mrfx.store", fromlist=["file_key"]).file_key("o1.json") + ".parquet").unlink()
+    with store.connect() as con:
+        con.execute("INSERT OR REPLACE INTO meta VALUES ('rollup_pending_payers', ?)",
+                    [_json.dumps({"gen": 1, "payers": ["Tau"]})])
+        con.execute("DELETE FROM files WHERE filename = 'o1.json'")
+        store._register_views(con)
+    store.update_rollups_incremental()
+    with store.connect() as con:
+        tins = [r[0] for r in con.execute(
+            "SELECT tin_value FROM tin_directory_tbl ORDER BY tin_value").fetchall()]
+    assert tins == ["470000002"]           # full refresh dropped the vanished TIN
+
+
 def test_store_stats_and_states_cached_single_flight(cfg, store):
     # The stall fix: store_stats and available_states must serve from cache
     # within the TTL (no repeat whole-store scan on the 15s dashboard poll).
@@ -1319,12 +1449,15 @@ def test_serve_supervisor_restarts_on_crash_stops_on_clean(monkeypatch):
     calls = {"n": 0}
     sleeps = []
 
-    def fake_call(argv):
+    def fake_call(argv, **kw):
         calls["n"] += 1
         # crash twice (non-zero), then exit cleanly
         return -1073740940 if calls["n"] <= 2 else 0
 
     monkeypatch.setattr(subprocess, "call", fake_call)
+    # no serve.log tee: with one, the child runs through Popen — and the
+    # config path below would be the repo's REAL config/mrfx.yaml
+    monkeypatch.setattr(cli, "_serve_log_path", lambda p: None)
     # the function does `import time as _time`, so patch the real time.sleep
     monkeypatch.setattr(_t, "sleep", lambda s: sleeps.append(s))
 
@@ -1339,9 +1472,10 @@ def test_serve_supervisor_stops_on_ctrl_c(monkeypatch):
 
     import mrfx.cli as cli
 
-    def boom(argv):
+    def boom(argv, **kw):
         raise KeyboardInterrupt
     monkeypatch.setattr(subprocess, "call", boom)
+    monkeypatch.setattr(cli, "_serve_log_path", lambda p: None)
     assert cli._supervise_serve("config/mrfx.yaml") == 0  # Ctrl-C → clean stop
 
 

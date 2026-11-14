@@ -157,6 +157,15 @@ def open_stream(path: Path, progress_cb=None) -> io.BufferedIOBase:
             members = [m for m in zf.infolist()
                        if m.filename.lower().endswith((".json", ".json.gz"))]
             if not members:
+                # a ZIP inside the ZIP (CareSource ships its files that way):
+                # open the largest inner zip and read ITS json member — one
+                # level, which is all any payer does
+                zips = [m for m in zf.infolist() if m.filename.lower().endswith(".zip")]
+                if zips:
+                    zf = zipfile.ZipFile(zf.open(max(zips, key=lambda m: m.file_size)))
+                    members = [m for m in zf.infolist()
+                               if m.filename.lower().endswith((".json", ".json.gz"))]
+            if not members:
                 raise ValueError("zip archive contains no .json member")
             # the LARGEST member is the rate file; picking namelist()[0] silently
             # ingested a small manifest JSON and dropped the real data
@@ -180,7 +189,9 @@ def open_stream(path: Path, progress_cb=None) -> io.BufferedIOBase:
 
 def _estimate_uncompressed(path: Path, compressed: int) -> int | None:
     suffix = path.name.lower()
-    if suffix.endswith(".gz") or suffix.endswith(".zip"):
+    # by NAME or by MAGIC BYTES: a body an origin gzipped anyway is stored as
+    # sent (fetch._body_chunks), so a ".json" name can hold gzip bytes
+    if suffix.endswith(".gz") or suffix.endswith(".zip") or _compressed_magic(path):
         # MRF JSON is extremely repetitive and commonly gzips 12-20x (sometimes
         # more). A too-low multiplier is dangerous: it can route a genuinely
         # huge, ref-heavy file to the single-pass IN-MEMORY path, which then
@@ -188,8 +199,43 @@ def _estimate_uncompressed(path: Path, compressed: int) -> int | None:
         # constant-memory invariant. Over-estimating is safe — it only routes a
         # file to the two-pass streaming path, which is always correct. So bias
         # high: 18x.
-        return compressed * 18
+        #
+        # But real MRFs compress anywhere from ~3x to 60x (measured Nov 2026:
+        # a BCBS file 38x, a 0.7 GB download that is 42 GB of JSON). So also
+        # read the size the archive RECORDS — the gzip trailer (exact below
+        # 4 GiB, modulo 4 GiB above it) or the zip directory (exact) — and
+        # take the LARGER. That can only raise an estimate, which only ever
+        # routes a file to the always-correct two-pass path; it closes the
+        # dangerous case of a 40-80 MB download that is really 1.5-3 GB being
+        # parsed single-pass with its whole reference table in memory.
+        return max(compressed * 18, _recorded_uncompressed(path) or 0)
     return compressed
+
+
+def _compressed_magic(path: Path) -> bool:
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4)
+    except OSError:
+        return False
+    return head[:2] == b"\x1f\x8b" or head[:4] == b"PK\x03\x04"
+
+
+def _recorded_uncompressed(path: Path) -> int | None:
+    """Uncompressed size as the archive records it; None if unreadable."""
+    try:
+        with open(path, "rb") as f:
+            is_zip = f.read(4) == b"PK\x03\x04"
+        if is_zip:
+            with zipfile.ZipFile(path) as zf:
+                sizes = [i.file_size for i in zf.infolist()
+                         if i.filename.lower().endswith((".json", ".json.gz"))]
+            return max(sizes) if sizes else None
+        with open(path, "rb") as f:
+            f.seek(-4, 2)
+            return int.from_bytes(f.read(4), "little")
+    except (OSError, ValueError, zipfile.BadZipFile):
+        return None
 
 
 def _scan_header(stream: io.BufferedIOBase, pf: Preflight) -> None:
@@ -273,6 +319,26 @@ def _detect_refs_deep(path: Path, pf: Preflight) -> None:
         pass
 
 
+def _unknown_reason(path: Path, size: int) -> str:
+    """Why a file is not a recognised MRF, in words (review 11 items 4.5 /
+    4.6: an empty download and a Windows "Unicode" save both read "no
+    in_network / provider_references / reporting_structure key found")."""
+    if not size:
+        return "the file is empty (0 bytes) — the download or copy did not finish"
+    try:
+        with open_stream(path) as s:
+            head = s.read(4)
+    except Exception:  # noqa: BLE001
+        head = b""
+    if head[:2] in (b"\xff\xfe", b"\xfe\xff") or (len(head) >= 4 and (
+            head[1:2] == b"\x00" and head[3:4] == b"\x00")):
+        return ("the file is saved as UTF-16 (Windows \"Unicode\") — open it and save it "
+                "as UTF-8, then drop it in again")
+    if not head.strip():
+        return "the file holds no data (only blank space)"
+    return "no in_network / provider_references / reporting_structure key found"
+
+
 def preflight(path: Path, cfg: MrfxConfig, store: Store | None = None) -> Preflight:
     pf = Preflight(filename=path.name)
     try:
@@ -288,7 +354,16 @@ def preflight(path: Path, cfg: MrfxConfig, store: Store | None = None) -> Prefli
         with open_stream(path) as stream:
             _scan_header(stream, pf)
     except Exception as e:  # noqa: BLE001 — preflight must never blow up on a bad file
-        pf.messages.append(f"unreadable: {type(e).__name__}: {e}")
+        low = str(e).lower()
+        if isinstance(e, EOFError) or "not a gzipped file" in low or "crc check" in low \
+                or "not a zip file" in low:
+            # a damaged / cut-off file: say so before the library's words
+            # (review 11 items 4.5 / 4.6)
+            pf.messages.append(
+                "the file is damaged or incomplete (a cut-off download, or extra bytes "
+                f"after its end) — drop in a fresh copy ({type(e).__name__}: {e})")
+        else:
+            pf.messages.append(f"unreadable: {type(e).__name__}: {e}")
         pf.verdict = "UNREADABLE"
         return pf
 
@@ -331,7 +406,7 @@ def preflight(path: Path, cfg: MrfxConfig, store: Store | None = None) -> Prefli
         return pf
     if pf.file_type == "unknown":
         pf.verdict = "UNREADABLE"
-        pf.messages.append("no in_network / provider_references / reporting_structure key found")
+        pf.messages.append(_unknown_reason(path, pf.compressed_bytes))
         return pf
 
     # in-network file: companion check

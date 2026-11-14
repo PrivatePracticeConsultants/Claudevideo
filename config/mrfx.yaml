@@ -107,9 +107,12 @@ payer_name_map:
 
 # Files parsed at the same time when grinding pasted links (each is its own
 # CPU process; the database stays single-writer, and a died worker restarts
-# automatically). 0 = auto: uses (your CPU cores - 1), capped at 8 — the
-# fastest safe setting on any machine. Set a specific number to pin it (still
-# capped at cores-1), or 1 to process strictly one file at a time.
+# automatically). 0 = auto: (your CPU cores - 1), capped at 8 AND at what
+# fits in RAM: ~2 GB per worker after duckdb_memory_gb and ~3 GB for Windows
+# (with duckdb_memory_gb: 8 that is 2 workers on a 16 GB PC, up to 7 on 32 GB)
+# — the fastest safe setting on any machine.
+# Set a specific number to pin it (still capped at cores-1; RAM is then your
+# call), or 1 to process strictly one file at a time.
 parallel_ingests: 0
 
 # Files DOWNLOADED at the same time to feed the parsers above. 0 = auto: 6,
@@ -134,6 +137,19 @@ parallel_downloads: 0
 # CDN that drops connections a high value raises the failure rate. Pair a higher
 # segment count with a LOWER parallel_downloads — e.g. segments 4, downloads 2.
 download_segments: 1
+
+# Skip a download early when it is a copy of a file already ingested (payers
+# host each other's files under different web addresses). After this many MB
+# arrive, a file with exactly the same size as one already ingested is compared
+# with it: same first MB AND same last 1 MB -> stopped and skipped as a
+# duplicate. 0 = off (duplicates are still caught after the full download).
+early_dedup_mb: 15
+
+# Size lanes: of the parallel downloads, this many work only on files of
+# small_file_mb or less, so small files are never stuck behind huge ones; the
+# rest take the big files first. 0 = no lanes.
+small_file_downloads: 3
+small_file_mb: 100
 
 # How long to wait for the NEXT piece of data before hanging up and
 # reconnecting. This is the gap BETWEEN bytes, not a limit on how long a file
@@ -162,6 +178,26 @@ download_stall_seconds: 600
 # Its partial bytes are kept — press retry to resume. Default 3 hours; raise it
 # if you routinely pull very large files over a slow link, or set 0 to disable.
 download_max_seconds: 10800
+# A download whose server stops sending data (or keeps failing) is PAUSED, not
+# failed: its slot goes to the next file at once, the bytes so far are kept, and
+# it tries again by itself this many hours later ("paused" in the Files tab,
+# with a "try now" button). After download_auto_resumes pauses it is marked
+# failed. 0 hours = the old behavior (failed right away, retry by hand).
+download_pause_hours: 24
+download_auto_resumes: 5
+
+# PARK a download whose payer's server goes quiet, long before the stall window
+# above: after this many seconds with no data (under 1 MB) the file steps aside,
+# its download slot goes to the NEXT file in the queue straight away, and the
+# bytes so far are kept. It rejoins the line after download_park_minutes, or at
+# once if nothing else is waiting, and resumes where it stopped ("parked" in the
+# Files tab). So a slow-to-answer payer never leaves a slot idle. After
+# download_park_limit parks in a row with no progress at all, the server is
+# treated as down and the file takes the pause above. download_park_seconds: 0
+# turns parking off (download_park_limit is at least 1).
+download_park_seconds: 240
+download_park_minutes: 10
+download_park_limit: 6
 
 inbox_dir: data/inbox
 processed_dir: data/processed
@@ -170,11 +206,13 @@ store_dir: data/mrfx_store
 move_processed: true          # false = leave files in inbox, track via checkpoint
 
 # Memory ceiling (GB) for the analytics database (rollup rebuilds + dashboard
-# queries). 8 is the sweet spot on a 32 GB machine: the rebuild sizes its work
-# to fit on the first try (instead of failing upward into retries) while
-# leaving headroom for the parser workers, Windows, and your browser.
-# Remove the line to let the app choose automatically from available RAM.
-duckdb_memory_gb: 8
+# queries). Leave it unset: the app picks a safe value from this machine's RAM
+# after setting aside room for Windows (3 GB) and at least two parser workers
+# (2 GB each): 2 GB on an 8 GB laptop (with 1 parser worker), 6 GB on a
+# 16 GB laptop (4 workers), 12 GB on a 32 GB desktop (9 workers).
+# Set it only if a rebuild says it ran out of memory (8 is a good value on a
+# 32 GB machine):
+# duckdb_memory_gb: 8
 
 # Where DuckDB writes temporary SPILL scratch during the heavy end-of-batch
 # rollup. Unset = AUTOMATIC: if your store is on a slow spinning hard drive and
@@ -185,21 +223,40 @@ duckdb_memory_gb: 8
 
 enrichment:
   # How provider names/geography get filled in behind the raw NPI numbers.
-  #   api  = look each NPI up over the internet (no download, but rate-limited —
-  #          a big book can take DAYS).
-  #   bulk = one fast local pass over the NPPES monthly file (minutes for the
-  #          whole book, then instant). RECOMMENDED for large books.
-  #   off  = don't identify names.
-  # For bulk: download the FULL monthly .zip from
-  # https://download.cms.gov/nppes/NPI_Files.html and point bulk_csv_path at it
-  # (keep the .zip — no need to unzip). Just setting bulk_csv_path is enough —
-  # whenever that file is present it is used automatically (one fast local pass),
-  # even if mode is left at 'api'; setting mode: bulk is the explicit form. See
-  # "Make provider names fill in fast" in GETTING_STARTED.md.
+  # AUTOMATIC by default: the app keeps CMS's monthly NPPES provider file
+  # (~1.1 GB) in data/nppes by itself — it checks
+  # https://download.cms.gov/nppes/NPI_Files.html at most once a day, downloads
+  # a new month in the background, and resolves every provider in one fast
+  # local pass (measured: ~3.5 min for a fresh install incl. the download, then
+  # seconds). When a new month arrives it also refreshes providers whose name,
+  # specialty or address changed. Nothing to set up.
+  #   mode: api  = the default; uses the local file whenever one is on hand and
+  #                falls back to looking each NPI up online (slow) otherwise.
+  #   mode: bulk = local file only.   mode: "off" = don't identify names.
   mode: api                   # api | bulk | off
+  # auto_download: false      # uncomment to manage the NPPES file yourself
+  # nppes_dir: data/nppes     # where the automatic download is kept
+  # To use a file you downloaded yourself instead, point bulk_csv_path at it
+  # (keep the .zip; a FOLDER also works — its newest NPPES zip is used).
   # On Windows keep the path in single quotes (or use forward slashes) so the
   # backslashes read correctly:
   # bulk_csv_path: 'E:\NPPES_Data_Dissemination_July_2026_V2.zip'
+
+# Practice names for tax IDs with no organization NPI: the CMS Doctors and
+# Clinicians National Downloadable File names the group each clinician is
+# enrolled with. auto = the app downloads it (~900 MB, kept in cms_dac_dir)
+# a couple of minutes after it starts and checks for a newer release monthly.
+# "off" = load it yourself with `mrfx dac --file <path>`.
+cms_dac: auto
+# cms_dac_dir: data/cms_dac
+
+# Which tax IDs are outpatient rehab clinics (the default "Compare against"
+# group): CMS's hospital and nursing-home address lists plus the Medicare
+# Physician & Other Practitioners therapy rows (who bills Medicare as a
+# therapist in private practice). auto = downloaded a few minutes after the
+# app starts and re-checked monthly. "off" = run `mrfx cmsref` yourself.
+cms_reference: auto
+# cms_ref_dir: data/cms_ref
 
 # Keep ONLY therapist rows (PT/OT/SLP + therapy clinics, by NPPES taxonomy) at
 # ingest, dropping the MDs/DOs/NPs who merely bill a 97xxx code. Shrinks the
@@ -214,8 +271,63 @@ enrichment:
 # dropped at ingest are gone — re-ingest those files to pick them up.
 # therapy_only_ingest: false
 
+# fast_scan: true — skip non-target billing codes as raw bytes instead of
+# parsing them (several times faster on big files, identical results). Files it
+# can't vouch for fall back to the classic parser on their own; set false only
+# to rule it out while troubleshooting.
+# fast_scan: true
+
 port: 8377
 confirm_over_gb: 5.0          # files above this wait for confirmation in the Files view
+
+# The settings below are shown with their DEFAULT values, commented out. To
+# change one, remove the "# " in front of it and edit the value.
+#
+# How many files one pasted index (table of contents) may queue. A national
+# index can list tens of thousands; raise this to take more of them.
+# max_toc_files: 2000
+#
+# Delete the downloaded payer file once its rates are loaded (the compact
+# database keeps everything the app needs; the link can download it again).
+# false keeps the raw files in data/downloads.
+# delete_raw_after_ingest: true
+#
+# While the dashboard runs, queue the tested payer indexes again once a month
+# so new months load without re-pasting links. Off by default: it uses your
+# bandwidth and disk, so it is your choice.
+# monthly_refresh: false
+#
+# Once a month, every payer index you loaded (pasted by you or from the
+# catalog) is read again and each of its loaded files is asked — one tiny
+# request — whether the payer changed it; only the changed ones download.
+# The index row on the Files tab says when it was last checked. On by default.
+# monthly_recheck: true
+#
+# Automatic backups. Your store took weeks of downloads to build and lives
+# only on this computer. Name a folder here — best on an external or second
+# drive, e.g. D:/mrfx-backups — and while the dashboard runs it writes a
+# backup there every 7 days without stopping anything, checks it, and keeps
+# the newest 4 (older ones it made are deleted). It never fills the drive:
+# when there is not enough room it skips and says so on the Files tab.
+# Off until you set the folder.
+# backup_dir: D:/mrfx-backups
+# backup_every_days: 7
+# backup_keep: 4
+#
+# Medicare Order & Referring Tracker: where its data lives if it is not in the
+# usual place, and whether a newer eligibility roster it downloaded is loaded
+# automatically at start (off: the Medicare tab offers a button instead).
+# tracker_dir: "E:\\OrfTracker"
+# tracker_auto_import: false
+#
+# JavaScript-only payer pages: render them in a built-in browser to find the
+# file links, and download that browser once by itself when it is missing.
+# render_js: true
+# render_auto_install: true
+#
+# A Medicare fee schedule (code,locality,non_facility_rate CSV) loaded at start;
+# the Benchmark tab's "Load MPFS" button does the same from the dashboard.
+# mpfs_path: data/mpfs.csv
 
 registry_path: config/payer_registry.yaml
 registry_overrides_path: config/registry_overrides.yaml

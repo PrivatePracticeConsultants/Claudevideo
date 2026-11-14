@@ -1,0 +1,80 @@
+{
+ "before": {
+  "rates_total": 385117,
+  "rates_by_payer": {
+   "Moda": 82546,
+   "Blue Cross Blue Shield of North Dakota": 66900
+  },
+  "covered": [
+   "Blue Cross Blue Shield of North Dakota",
+   "Blue Cross Blue Shield of Wyoming",
+   "Highmark WV",
+   "Moda",
+   "Security Health Plan of Wisconsin, Inc,",
+   "Tufts Health Public Plans, Inc."
+  ]
+ },
+ "during_failure": {
+  "analytics": {
+   "state": "failed",
+   "reason": "stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_gb in config/mrfx.yaml helps \u2014 Files tab",
+   "pct": null,
+   "eta_text": "",
+   "covered_files": 7,
+   "done_files": 8,
+   "covered_payers": 0,
+   "loaded_payers": 7,
+   "covered_rows": 6768352,
+   "loaded_rows": 6768604,
+   "sentence": "Analytics cover 0 of 7 payers (7 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_gb in config/mrfx.yaml helps \u2014 Files tab"
+  },
+  "payers_api_covered": [
+   "Blue Cross Blue Shield of North Dakota",
+   "Blue Cross Blue Shield of Wyoming",
+   "Highmark WV",
+   "Moda",
+   "Security Health Plan of Wisconsin, Inc,",
+   "Tufts Health Public Plans, Inc."
+  ],
+  "payers_api_loaded": [
+   "Blue Cross Blue Shield of North Dakota",
+   "Blue Cross Blue Shield of Wyoming",
+   "HEALTHSCOPE BENEFITS",
+   "Highmark WV",
+   "Moda",
+   "Security Health Plan of Wisconsin, Inc,",
+   "Tufts Health Public Plans, Inc."
+  ],
+  "rates_total": 385117,
+  "rates_by_payer": {
+   "Moda": 82546,
+   "Blue Cross Blue Shield of North Dakota": 66900
+  },
+  "code_payer_rank": {
+   "Security Health Plan of Wisconsin, Inc,": 82.7,
+   "Highmark WV": 28.21,
+   "Moda": 26.17,
+   "Tufts Health Public Plans, Inc.": 22.51
+  }
+ },
+ "files_tab_analytics": {
+  "state": "failed",
+  "reason": "stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_gb in config/mrfx.yaml helps \u2014 Files tab",
+  "pct": null,
+  "eta_text": "",
+  "covered_files": 7,
+  "done_files": 8,
+  "covered_payers": 0,
+  "loaded_payers": 7,
+  "covered_rows": 6768352,
+  "loaded_rows": 6768604,
+  "sentence": "Analytics cover 0 of 7 payers (7 of 8 files). stopped: ran out of memory at 2 GB \u2014 it retries with smaller pieces when the queue is idle; raising duckdb_memory_gb in config/mrfx.yaml helps \u2014 Files tab"
+ },
+ "export_note": [
+  "Analytics cover 0 of 7 payers (7 of 8 files). Every number here comes from those; the files loaded since are not in the analytics yet, so payers, practices and months they add are missing from this document."
+ ],
+ "export_files": [
+  "mrfx_explorer_2026-11-12_0853.csv",
+  "mrfx_explorer_2026-11-12_0853_methodology.txt"
+ ]
+}

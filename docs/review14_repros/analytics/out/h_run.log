@@ -1,0 +1,71 @@
+{'pip_e': (0, '\n[notice] A new release of pip is available: 26.2.2 -> 26.3\n[notice] To update, run: /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/H/install/Claudevideo/.venv/bin/python -m pip install --upgrade pip\n'), 'version': '0.7.6 /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/H/install/Claudevideo/mrfx/__init__.py'}
+076 state: {"done_files": 8, "raw_rows": 6768604, "spine_rows": 190445, "expected_rows": 444992, "missing": 254547, "extra": 0, "files_fully_in_spine": 3, "files_rowcount_mismatch": [], "spine_payers": ["Highmark WV", "Moda", "Tufts Health Public Plans, Inc."], "raw_payers": ["Blue Cross Blue Shield of North Dakota", "Blue Cross Blue Shield of Wyoming", "HEALTHSCOPE BENEFITS", "Highmark WV", "Moda", "Security Health Plan of Wisconsin, Inc,", "Tufts Health Public Plans, Inc."], "hash_spine": null, "hash_dir": null, "meta": {"rollup_schema_version": "2", "rollup_covered_through": "2026-11-12 08:32:46.699771", "rollup_covered_names": "[\"wv_hmhs_2026-10-27_000000647_in-network-rates_01_of_02.json.gz\"]"}}
+update rc 0 0.7.7 /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/H/install/Claudevideo/mrfx/__init__.py
+
+{
+ "077_first_answer": {
+  "dt": 4.0,
+  "analytics": {
+   "state": "building",
+   "reason": "Adding the newly loaded files to the analytics",
+   "pct": 0,
+   "eta_text": "",
+   "covered_files": 3,
+   "done_files": 8,
+   "covered_payers": 3,
+   "loaded_payers": 7,
+   "covered_rows": 555202,
+   "loaded_rows": 6768604,
+   "sentence": "Analytics cover 3 of 7 payers (3 of 8 files). Adding the newly loaded files to the analytics"
+  }
+ },
+ "077_timeline": [
+  {
+   "dt": 4.0,
+   "state": "building",
+   "files": "3/8",
+   "payers": "3/7",
+   "sentence": "Analytics cover 3 of 7 payers (3 of 8 files). Adding the newly loaded files to the analytics",
+   "err": null
+  },
+  {
+   "dt": 28.9,
+   "state": "current",
+   "files": "8/8",
+   "payers": "7/7",
+   "sentence": "",
+   "err": null
+  }
+ ],
+ "077_to_current_s": 31.6,
+ "077_truth": {
+  "done_files": 8,
+  "raw_rows": 6768604,
+  "spine_rows": 444992,
+  "expected_rows": 444992,
+  "missing": 0,
+  "extra": 0,
+  "files_fully_in_spine": 8,
+  "files_rowcount_mismatch": [],
+  "spine_payers": [
+   "Blue Cross Blue Shield of North Dakota",
+   "Blue Cross Blue Shield of Wyoming",
+   "HEALTHSCOPE BENEFITS",
+   "Highmark WV",
+   "Moda",
+   "Security Health Plan of Wisconsin, Inc,",
+   "Tufts Health Public Plans, Inc."
+  ],
+  "raw_payers": [
+   "Blue Cross Blue Shield of North Dakota",
+   "Blue Cross Blue Shield of Wyoming",
+   "HEALTHSCOPE BENEFITS",
+   "Highmark WV",
+   "Moda",
+   "Security Health Plan of Wisconsin, Inc,",
+   "Tufts Health Public Plans, Inc."
+  ],
+  "hash_spine": null,
+  "hash_dir": null
+ }
+}

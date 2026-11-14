@@ -25,7 +25,9 @@ import re
 from .benchmark import (BenchmarkError, _market_where, _rates_relation,
                         normalize_market, resolve_subject_tins)
 from .catalog import therapy_taxonomy_sql
-from .store import Store, mask_tin
+from .sqlfn import modal_zip_by_tin
+from .store import Store, generation_cached, mask_tin
+from .rounding import half_up
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +51,7 @@ def _usable_expiry_sql(col: str = "expiration_date") -> str:
     )
 
 
+@generation_cached('contracts.expiration_coverage')
 def expiration_coverage(store: Store, market: dict | None = None) -> dict:
     """How often payers actually publish a usable expiration date, overall and
     per payer. This is the honesty gate for the radar: the UI shows it before
@@ -63,7 +66,7 @@ def expiration_coverage(store: Store, market: dict | None = None) -> dict:
         # pay that twice
         per_payer = [
             {"payer": p, "rows": n, "with_expiry": k,
-             "pct": round(100.0 * k / n, 1) if n else 0.0}
+             "pct": half_up(100.0 * k / n, 1) if n else 0.0}
             for p, n, k in con.execute(
                 f"SELECT t.payer, count(*), count(*) FILTER ({usable}) FROM {rel} t "
                 # _market_where emits td.-qualified state predicates, so the
@@ -74,7 +77,7 @@ def expiration_coverage(store: Store, market: dict | None = None) -> dict:
     ok = sum(r["with_expiry"] for r in per_payer)
     return {
         "rows": total, "with_expiry": ok,
-        "pct": round(100.0 * ok / total, 1) if total else 0.0,
+        "pct": half_up(100.0 * ok / total, 1) if total else 0.0,
         "by_payer": per_payer,
         "note": ("Payers publish `expiration_date` inconsistently — blank, a "
                  "9999/2099 placeholder, or a date already past. Only dates "
@@ -131,7 +134,7 @@ def renewal_radar(store: Store, subjects: list[str] | None = None,
             WHERE {where} AND {usable.replace('expiration_date', 't.expiration_date')}
               AND t.expiration_date <= ?{tin_filter}
             GROUP BY 1, 2, 3, 4
-            ORDER BY t.expiration_date, practice, t.payer
+            ORDER BY t.expiration_date, practice, t.payer, t.tin_value
             LIMIT {max(1, min(int(limit), 5000))}
         """, [today, *params, horizon, *tin_params])
         rows = [dict(zip([c[0] for c in cur.description], r)) for r in cur.fetchall()]
@@ -150,7 +153,7 @@ def new_to_network(store: Store, market: dict | None = None,
                    radius_miles: float | None = None, therapy_only: bool = True,
                    limit: int = 200, centroids_path=None) -> dict:
     """Practices in a payer's published book THIS month that were absent from
-    the same payer LAST month — i.e. newly contracted.
+    every earlier book of the same payer — i.e. newly contracted.
 
     Needs two loaded vintages of the same payer, and says so plainly when it
     doesn't have them. A practice missing last month because the payer's file
@@ -160,12 +163,7 @@ def new_to_network(store: Store, market: dict | None = None,
 
     market = normalize_market(market or {})
     month = market.get("month")
-    if not month or str(month).strip().lower() == "latest":
-        with store.connect() as con:
-            month = (con.execute(
-                "SELECT max(file_month) FROM rates_by_tin").fetchone() or [None])[0]
-    if not month:
-        raise BenchmarkError("no months in the store yet")
+    latest = not month or str(month).strip().lower() == "latest"
     limit = max(1, min(int(limit), 1000))
     therapy = therapy_taxonomy_sql("n.taxonomy_code") if therapy_only else "TRUE"
 
@@ -174,14 +172,28 @@ def new_to_network(store: Store, market: dict | None = None,
         raise BenchmarkError(f"'{zip_code}' is not a 5-digit ZIP code")
     use_radius = bool(zip_code and radius_miles)
 
+    # Which two books each payer is compared across. "latest" = EACH PAYER's
+    # own newest month against its own previous one: the store's newest month
+    # is a month most payers never published in (round 6: one payer's 76-row
+    # file dated a month ahead left every other payer's "now" book empty, and
+    # the panel listed 8 payers as compared while comparing none). A pinned
+    # month compares only payers that published IN that month.
+    from .monitor import payer_months
+    scope_payers = market.get("payers") or None
     with store.connect() as con:
-        # per payer, the newest month strictly before `month` in which THAT
-        # payer published — comparing against a month a payer was absent from
-        # would report its whole book as "new"
-        pairs = con.execute("""
-            SELECT payer, max(file_month) FROM rates_by_tin
-            WHERE file_month < ? GROUP BY payer
-        """, [month]).fetchall()
+        if latest:
+            pairs = [(p, n, o) for p, n, o in payer_months(store, scope_payers) if o]
+        else:
+            pclause = (f"AND payer IN ({', '.join('?' for _ in scope_payers)})"
+                       if scope_payers else "")
+            rows_pm = con.execute(f"""
+                SELECT payer,
+                       bool_or(file_month = ?) AS has_month,
+                       max(file_month) FILTER (file_month < ?) AS prev
+                FROM rates_by_tin WHERE file_month <= ? {pclause}
+                GROUP BY payer ORDER BY payer
+            """, [month, month, month, *(scope_payers or [])]).fetchall()
+            pairs = [(p, month, o) for p, has, o in rows_pm if has and o]
         if prev_month:
             # a payer that did not publish in the requested prev_month has an
             # EMPTY "before" set — its whole book would read as newly signed.
@@ -189,14 +201,17 @@ def new_to_network(store: Store, market: dict | None = None,
             published = {p for (p,) in con.execute(
                 "SELECT DISTINCT payer FROM rates_by_tin WHERE file_month = ?",
                 [prev_month]).fetchall()}
-            pairs = [(p, prev_month) for p, _ in pairs if p in published]
+            pairs = [(p, n, prev_month) for p, n, _ in pairs
+                     if p in published and prev_month < n]
+        label = "latest" if latest else month
         if not pairs:
-            return {"rows": [], "month": month, "compared": [],
+            return {"rows": [], "month": label, "compared": [], "compared_months": [],
                     "reason": ((f"no payer published in {prev_month}, so there is "
                                 "no honest earlier book to compare against")
                                if prev_month else
-                               ("only one month of data is loaded — new-to-network "
-                                "needs two vintages of the same payer to compare")),
+                               ("no payer has two published months in the store yet — "
+                                "new-to-network needs two vintages of the same payer "
+                                "to compare")),
                     "zip": zip_code, "radius_miles": None, "total": 0}
         origin = None
         if use_radius:
@@ -206,32 +221,53 @@ def new_to_network(store: Store, market: dict | None = None,
             if origin is None:
                 raise BenchmarkError(
                     f"ZIP {zip_code} is not in the Census ZCTA centroid list")
-        rows: list[dict] = []
-        for payer, pm in pairs:
-            cur = con.execute("""
-                WITH now AS (
-                    SELECT DISTINCT tin_value FROM rates_by_tin
-                    WHERE payer = ? AND file_month = ?
-                ), before AS (
-                    SELECT DISTINCT tin_value FROM rates_by_tin
-                    WHERE payer = ? AND file_month = ?
-                )
-                SELECT n.tin_value,
-                       coalesce(d.display_name, n.tin_value) AS practice,
-                       any_value(d.cities)  AS cities,
-                       any_value(d.states)  AS states,
-                       count(DISTINCT r.billing_code) AS codes,
-                       round(median(r.negotiated_rate), 2) AS median_rate
-                FROM now n
-                LEFT JOIN tin_directory d ON d.tin_value = n.tin_value
-                LEFT JOIN rates_by_tin r ON r.tin_value = n.tin_value
-                     AND r.payer = ? AND r.file_month = ?
-                WHERE n.tin_value NOT IN (SELECT tin_value FROM before)
-                GROUP BY 1, 2
-            """, [payer, month, payer, pm, payer, month])
-            for r in cur.fetchall():
-                rows.append({"payer": payer, "prev_month": pm,
-                             **dict(zip([c[0] for c in cur.description], r))})
+        # Both books on the HOUSE basis (dollar rates > $0.01, base modifiers,
+        # professional, no NPI-in-the-TIN-slot rows) and the market's own
+        # filters: the panel read the raw spine, so a practice whose only line
+        # was an institutional $900 row was "newly contracted at $900".
+        # therapy_only is applied below on the NPIs (it keeps unidentified
+        # practices), not as the directory's strict practice flag.
+        where, params = _market_where({**market, "month": "latest", "therapy_only": False},
+                                      bool(market.get("include_assistant")),
+                                      bool(market.get("include_non_dollar")))
+        cur = con.execute(f"""
+            WITH pairs AS (SELECT unnest(?::VARCHAR[]) AS payer,
+                                  unnest(?::VARCHAR[]) AS m_now,
+                                  unnest(?::VARCHAR[]) AS m_prev),
+            b AS (
+                SELECT t.payer, t.tin_value, t.billing_code, t.negotiated_rate,
+                       t.file_month = pp.m_now AS is_now
+                FROM rates_by_tin t LEFT JOIN tin_directory td USING (tin_value)
+                -- every month up to this one, not only the previous: a
+                -- practice in the payer's book two months ago that a partly
+                -- loaded middle month lacks is not newly contracted (review
+                -- 10 item 3.8). "New" = absent from EVERY earlier book.
+                JOIN pairs pp ON pp.payer = t.payer AND t.file_month <= pp.m_now
+                WHERE {where}
+            ),
+            -- the newcomers FIRST (in this month's book, absent from the
+            -- previous one), then medians for them alone: the anti-join used
+            -- to run after a median over every practice in every book
+            -- (10.7 s -> 4.4 s on a 99M-rate store, identical rows)
+            keys AS (
+                SELECT payer, tin_value FROM b GROUP BY 1, 2
+                HAVING bool_or(is_now) AND NOT bool_or(NOT is_now)
+            )
+            SELECT b.payer, pp.m_prev AS prev_month, pp.m_now AS month, b.tin_value,
+                   coalesce(any_value(d.display_name), b.tin_value) AS practice,
+                   any_value(d.cities)  AS cities,
+                   any_value(d.states)  AS states,
+                   count(DISTINCT b.billing_code) AS codes,
+                   round(median(b.negotiated_rate), 2) AS median_rate
+            FROM b SEMI JOIN keys k ON k.payer = b.payer AND k.tin_value = b.tin_value
+            JOIN pairs pp ON pp.payer = b.payer
+            LEFT JOIN tin_directory d ON d.tin_value = b.tin_value
+            WHERE b.is_now
+            GROUP BY b.payer, pp.m_prev, pp.m_now, b.tin_value
+        """, [[p for p, _, _ in pairs], [n for _, n, _ in pairs], [o for _, _, o in pairs],
+              *params])
+        cols = [c[0] for c in cur.description]
+        rows: list[dict] = [dict(zip(cols, r)) for r in cur.fetchall()]
         # therapy + geography filters need the member NPIs' directory rows.
         # LEFT JOIN, one scan: a practice whose clinicians are not yet in the
         # NPI directory must be KEPT and flagged "unidentified", never silently
@@ -239,14 +275,18 @@ def new_to_network(store: Store, market: dict | None = None,
         # clinicians are all NON-therapy is excluded (same rule as the
         # Medicare leaderboard).
         if rows:
-            tins = [r["tin_value"] for r in rows]
-            info = {t: (bool(ident), bool(ther), z) for t, ident, ther, z in
+            tins = sorted({r["tin_value"] for r in rows})
+            # placement: the shared rule (sqlfn — 5-digit, zero-padded, a blank
+            # ZIP never wins, ties to the lowest ZIP), as every radius uses
+            zips = dict(con.execute(
+                modal_zip_by_tin("SELECT unnest(?::VARCHAR[])", store.placement_relation()),
+                [tins]).fetchall())
+            info = {t: (bool(ident), bool(ther), zips.get(t)) for t, ident, ther in
                     con.execute(f"""
                 SELECT r.tin_value,
                        bool_or(n.npi IS NOT NULL),
-                       coalesce(bool_or({therapy}), FALSE),
-                       mode(substr(trim(n.zip), 1, 5))
-                FROM rates r LEFT JOIN npi_directory n ON n.npi = r.npi
+                       coalesce(bool_or({therapy}), FALSE)
+                FROM {store.pairs_relation()} r LEFT JOIN npi_directory n ON n.npi = r.npi
                 WHERE r.tin_value IN (SELECT unnest(?::VARCHAR[]))
                 GROUP BY 1
             """, [tins]).fetchall()}
@@ -270,18 +310,23 @@ def new_to_network(store: Store, market: dict | None = None,
                     d = dist.get(r["zip"]) if r["zip"] else None
                     if d is None or d > float(radius_miles):
                         continue
-                    r["miles"] = round(d, 1)
+                    r["miles"] = half_up(d, 1)
                     kept.append(r)
                 out = kept
             rows = out
+    # tin_value completes the order: two practices of one name (and code
+    # count) came back in thread order (invariant 7) — sorted on the RAW tax
+    # id, before masking makes every SSN-pattern one tie
+    rows.sort(key=lambda r: (-(r.get("codes") or 0), r["practice"], r["payer"], r["tin_value"]))
     for r in rows:
         r["cities"] = list(r.get("cities") or [])
         r["states"] = list(r.get("states") or [])
         r["tin_value"] = mask_tin(r["tin_value"])
-    rows.sort(key=lambda r: (-(r.get("codes") or 0), r["practice"]))
-    return {"rows": rows[:limit], "month": month,
-            "compared": sorted({(r["payer"], r["prev_month"]) for r in rows}) or
-                        [(p, pm) for p, pm in pairs],
+    return {"rows": rows[:limit], "month": label,
+            # every payer actually compared, with the two months it was
+            # compared across — whether or not it added anyone
+            "compared": [(p, o) for p, _, o in pairs],
+            "compared_months": [{"payer": p, "month": n, "prev_month": o} for p, n, o in pairs],
             "zip": zip_code, "radius_miles": radius_miles if use_radius else None,
             "total": len(rows), "reason": None,
             "note": ("A practice counts as new to a payer when it appears in that "

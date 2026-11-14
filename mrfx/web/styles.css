@@ -121,9 +121,9 @@ header {
   display: flex; align-items: center; gap: 18px;
   min-height: 54px;
 }
-#topbar-title { font-size: 15px; font-weight: 650; letter-spacing: -0.01em; }
+#topbar-title { font-size: 15px; font-weight: 650; letter-spacing: -0.01em; white-space: nowrap; }
 .topbar-spacer { flex: 1; }
-#dataset-stats { color: var(--muted); font-size: 12.5px; white-space: nowrap; }
+#dataset-stats { color: var(--muted); font-size: 12.5px; white-space: nowrap; min-width: 0; text-align: right; padding: 6px 0; }
 #dataset-stats b { color: var(--ink-2); font-weight: 600; font-variant-numeric: tabular-nums; }
 
 main { width: 100%; max-width: 1440px; margin: 0 auto; padding: 22px 28px 90px; }
@@ -183,6 +183,26 @@ input[type="text"]:focus, input[type="number"]:focus, select:focus, textarea:foc
 }
 .chip:hover { border-color: var(--accent); color: var(--accent); }
 .chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+/* the progress bar of an output (review 13 Group 2) — the Files tab's bar */
+.jobbar-host { margin: 6px 0; }
+.jobbar { display: none; align-items: center; gap: 8px; margin: 4px 0; max-width: 720px; }
+.jobbar.on { display: flex; }
+.jobbar .progress { flex: 1; margin-top: 0; }
+.jobbar .progress-label { justify-content: flex-start; padding-left: 8px; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; }
+.jobbar-stop { font-size: 12px; color: var(--muted); }
+.jobbar.done .jobbar-stop, .jobbar.stopped .jobbar-stop, .jobbar.failed .jobbar-stop { display: none; }
+.jobbar.failed .progress-label { color: var(--warn-ink); }
+.jobbar.indeterminate .progress-fill {
+  background-image: repeating-linear-gradient(45deg, rgba(255,255,255,.25) 0 8px, transparent 8px 16px); }
+/* a payer loaded but not yet in the analytics (review 13 item 1.2) */
+.chip.uncovered { opacity: .5; border-style: dashed; }
+.chip.uncovered.on { opacity: .75; }
+/* its own line under the counts, wrapping: a long "Rolling up the rest —
+   41 %, about 2 h left (Payer 07 · 97110-97140)" was cut off at the edge */
+.cov-line { color: var(--warn-ink); display: block; white-space: normal; max-width: 760px; margin-left: auto; }
+.cov-line a { color: inherit; text-decoration: underline; }
+.cov-line.cov-failed { font-weight: 600; }
 
 .toggle { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; padding: 6px 0; color: var(--ink-2); }
 .toggle input { accent-color: var(--accent); width: 15px; height: 15px; }
@@ -336,9 +356,10 @@ td .rate { font-weight: 650; }
 }
 .badge.done { color: var(--good); border-color: color-mix(in srgb, var(--good) 35%, transparent); background: color-mix(in srgb, var(--good) 7%, transparent); }
 .badge.processing, .badge.queued { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, transparent); background: color-mix(in srgb, var(--accent) 7%, transparent); }
-.badge.skipped { color: var(--muted); border-color: color-mix(in srgb, var(--muted) 35%, transparent); background: color-mix(in srgb, var(--muted) 7%, transparent); }
+.badge.skipped, .badge.stopped { color: var(--muted); border-color: color-mix(in srgb, var(--muted) 35%, transparent); background: color-mix(in srgb, var(--muted) 7%, transparent); }
 .badge.failed, .badge.quarantined { color: var(--critical); border-color: color-mix(in srgb, var(--critical) 35%, transparent); background: color-mix(in srgb, var(--critical) 7%, transparent); }
 .badge.pending_confirmation { color: var(--warn-ink); border-color: color-mix(in srgb, var(--warning) 50%, transparent); background: color-mix(in srgb, var(--warning) 10%, transparent); }
+.badge.needs_choice { color: var(--warn-ink); border-color: color-mix(in srgb, var(--warning) 50%, transparent); background: color-mix(in srgb, var(--warning) 10%, transparent); }
 .warn-text { color: var(--warn-ink); font-size: 12.5px; }
 .err-text { color: var(--critical); font-size: 12.5px; }
 
@@ -464,3 +485,43 @@ code.inline { background: var(--grid); border-radius: 4px; padding: 1px 5px; fon
   margin-right: 6px; min-width: 3px; }
 .idx-up { background: var(--good); }
 .idx-down { background: var(--warning); }
+
+/* previous rows while a new search loads (review 10 1.9) */
+#rates-body.stale { opacity: .45; transition: opacity .15s; }
+
+/* header search box (review 13 Group 6.4) */
+#find-box { display: flex; align-items: center; gap: 6px; margin-right: 14px; flex: 0 1 auto; min-width: 180px; }
+#find-practice { width: 260px; max-width: 100%; padding: 4px 8px; font-size: 12.5px; border: 1px solid var(--line, #d0d5dd); border-radius: 6px; }
+#find-msg { font-size: 11.5px; max-width: 220px; }
+.btn.pdf-twin { white-space: nowrap; }
+
+/* Analytics activity panel (review 14 item 1.2) */
+.an-panel { border: 1px solid var(--line, #d8dde6); border-radius: 8px; padding: 10px 14px;
+  margin: 0 0 14px; background: var(--card, #fff); }
+.an-head h3 { margin: 0; }
+.an-bar { height: 22px; border-radius: 6px; background: #e8ecf2; overflow: hidden; margin: 8px 0 4px; }
+.an-bar > span { display: block; height: 100%; background: #2f7d4f; transition: width .6s; }
+.an-words { font-size: 14px; margin-bottom: 8px; }
+.an-idle { font-size: 14px; margin: 8px 0; }
+.an-sec { margin-top: 12px; }
+.an-sec h4 { margin: 0 0 4px; font-size: 14px; }
+.an-sec table { width: 100%; font-size: 12.5px; border-collapse: collapse; }
+.an-sec td, .an-sec th { padding: 3px 6px; border-bottom: 1px solid #eef1f5; text-align: left; }
+.an-sec td.num, .an-sec th.num { text-align: right; }
+.an-ok { color: #2f7d4f; font-weight: 600; }
+.an-mean { margin-top: 12px; padding: 8px 10px; background: #f4f7fb; border-radius: 6px; font-size: 13px; }
+.an-paused { color: #9a5b00; font-weight: 600; }
+.cov-line { cursor: pointer; }
+
+/* Visit value in this market: the ranked practices behind a row */
+.vv-list-btn { padding: 2px 8px; font-size: 12px; white-space: nowrap; }
+.vv-table tr.vv-detail > td { background: color-mix(in srgb, var(--accent) 4%, transparent); padding: 8px 10px 12px; }
+.vv-table tr.vv-detail:hover > td { background: color-mix(in srgb, var(--accent) 4%, transparent); }
+.vv-plist { white-space: normal; }
+
+/* a merged menu entry's screens (0.8.6): My rates, Market rates */
+.subtabs { display: flex; gap: 4px; margin: 0 0 12px; border-bottom: 1px solid var(--border); }
+.subtabs button { background: none; border: 0; border-bottom: 2px solid transparent; padding: 8px 12px;
+  font: inherit; font-size: 13px; color: var(--muted); cursor: pointer; }
+.subtabs button:hover { color: var(--ink); }
+.subtabs button.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }

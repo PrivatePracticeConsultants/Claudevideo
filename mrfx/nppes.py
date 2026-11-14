@@ -32,6 +32,7 @@ from pathlib import Path
 
 from .catalog import therapy_taxonomy_sql
 from .medicare import haversine_miles_sql, load_centroids
+from .rounding import half_up
 from .states import state_code_or_none
 from .store import Store, sql_path
 
@@ -145,6 +146,46 @@ def closure_status(store: Store) -> dict:
     return out
 
 
+def _feed_page(con, reader: str, where: list[str], params: list, date_expr: str,
+               date_col: str, origin, radius_miles, limit: int) -> tuple[list[dict], int, int]:
+    """One feed page: (rows newest first, how many match in total, how many
+    matched but sit at a ZIP with no Census centroid). With a radius the
+    distance is computed IN the query and filters BEFORE the limit — the
+    newest `limit x 5` events nationwide used to be fetched first and then
+    clipped to the circle, so a 25-mile search with no state saw only the
+    country's newest 1,000 events and answered "capped" instead of with its
+    own (review 12 item 2.7; the referral-leaders query already did this)."""
+    cols = ["npi", "org_name", "entity_type", "taxonomy_code", "city",
+            "state", "zip", "phone", "address", date_col]
+    base = f"""
+        SELECT n.npi, n.org_name, n.entity_type, n.taxonomy_code,
+               n.city, n.state, lpad(substr(trim(n.zip), 1, 5), 5, '0') AS zip,
+               n.phone, n.address, CAST({date_expr} AS DATE) AS {date_col}
+        FROM {reader} n
+        WHERE {' AND '.join(where)}"""
+    if origin is None:
+        total = con.execute(f"SELECT count(*) FROM ({base})", params).fetchone()[0]
+        rows = con.execute(f"{base} ORDER BY {date_col} DESC, n.npi LIMIT {int(limit)}",
+                           params).fetchall()
+        return [dict(zip(cols, r)) for r in rows], int(total), 0
+    miles = haversine_miles_sql("z.lat", "z.lon", origin[0], origin[1])
+    placed = (f"SELECT b.*, {miles} AS miles FROM ({base}) b "
+              "LEFT JOIN _zcta z ON z.zip = b.zip")
+    r_mi = float(radius_miles)        # a float literal: binds in no particular order
+    total, unplaced = con.execute(
+        f"SELECT count(*) FILTER (WHERE miles <= {r_mi!r}), count(*) FILTER (WHERE miles IS NULL) "
+        f"FROM ({placed})", params).fetchone()
+    rows = con.execute(
+        f"SELECT * FROM ({placed}) WHERE miles <= {r_mi!r} ORDER BY {date_col} DESC, npi "
+        f"LIMIT {int(limit)}", params).fetchall()
+    out = []
+    for r in rows:
+        d = dict(zip(cols + ["miles"], r))
+        d["miles"] = half_up(d["miles"], 1)
+        out.append(d)
+    return out, int(total or 0), int(unplaced or 0)
+
+
 def closures(store: Store, zip_code: str | None = None,
              radius_miles: float | None = None, days: int = 365,
              therapy_only: bool = True, limit: int = 200,
@@ -202,40 +243,9 @@ def closures(store: Store, zip_code: str | None = None,
             if origin is None:
                 raise NppesFeedError(
                     f"ZIP {zip_code} is not in the Census ZCTA centroid list")
-        window = limit * 5 if use_radius else limit
-        rows = con.execute(f"""
-            SELECT n.npi, n.org_name, n.entity_type, n.taxonomy_code,
-                   n.city, n.state, lpad(substr(trim(n.zip), 1, 5), 5, '0') AS zip,
-                   n.phone, n.address,
-                   CAST({deact} AS DATE) AS deactivated
-            FROM {reader} n
-            WHERE {' AND '.join(where)}
-            ORDER BY deactivated DESC, n.npi
-            LIMIT {window}
-        """, params).fetchall()
-        capped = len(rows) >= window
-        cols = ["npi", "org_name", "entity_type", "taxonomy_code", "city",
-                "state", "zip", "phone", "address", "deactivated"]
-        out = [dict(zip(cols, r)) for r in rows]
-
-        unplaced = 0
-        if use_radius and out:
-            dist = dict(con.execute(f"""
-                SELECT z.zip, {haversine_miles_sql('z.lat', 'z.lon',
-                                                   origin[0], origin[1])}
-                FROM _zcta z WHERE z.zip IN (SELECT unnest(?::VARCHAR[]))
-            """, [sorted({r["zip"] for r in out if r["zip"]})]).fetchall())
-            kept = []
-            for r in out:
-                d = dist.get(r["zip"]) if r["zip"] else None
-                if d is None:
-                    unplaced += 1
-                    continue
-                if d > float(radius_miles):
-                    continue
-                r["miles"] = round(d, 1)
-                kept.append(r)
-            out = kept
+        out, total, unplaced = _feed_page(con, reader, where, params, deact, "deactivated",
+                                          origin, radius_miles, limit)
+        capped = total > len(out)
         if out:
             known = {n for (n,) in con.execute(
                 "SELECT DISTINCT npi FROM rates WHERE npi IN "
@@ -249,10 +259,9 @@ def closures(store: Store, zip_code: str | None = None,
     out.sort(key=lambda r: (r["deactivated"], r.get("org_name") or ""), reverse=True)
     note = CLOSURE_NOTE
     if capped:
-        note += (f" Only the {window:,} most recently deactivated NPIs were "
-                 "scanned, so older matches in this window may not be listed — "
-                 "narrow the look-back or the area to see all of them.")
-    return {"rows": out[:limit], "total": len(out), "unplaced": unplaced,
+        note += (f" The {len(out):,} most recently deactivated of {total:,} matches are "
+                 "listed — narrow the look-back or the area to see the rest.")
+    return {"rows": out[:limit], "total": total, "unplaced": unplaced,
             "zip": zip_code, "radius_miles": radius_miles if use_radius else None,
             "days": days, "state": state, "since": since, "reason": None,
             "capped": capped, "note": note}
@@ -316,44 +325,9 @@ def new_enumerations(store: Store, zip_code: str | None = None,
             if origin is None:
                 raise NppesFeedError(
                     f"ZIP {zip_code} is not in the Census ZCTA centroid list")
-        # Pull a wider page than `limit` because the radius filter runs after
-        # this, then REPORT whether that window was hit — a geography filter
-        # that quietly discards matches beyond an invisible cap would read as
-        # "that's all there is" (no silent caps).
-        window = limit * 5 if use_radius else limit
-        rows = con.execute(f"""
-            SELECT n.npi, n.org_name, n.entity_type, n.taxonomy_code,
-                   n.city, n.state, lpad(substr(trim(n.zip), 1, 5), 5, '0') AS zip,
-                   n.phone, n.address,
-                   CAST({parsed} AS DATE) AS enumerated
-            FROM {reader} n
-            WHERE {' AND '.join(where)}
-            ORDER BY enumerated DESC, n.npi
-            LIMIT {window}
-        """, params).fetchall()
-        capped = len(rows) >= window
-        cols = ["npi", "org_name", "entity_type", "taxonomy_code", "city",
-                "state", "zip", "phone", "address", "enumerated"]
-        out = [dict(zip(cols, r)) for r in rows]
-
-        unplaced = 0
-        if use_radius and out:
-            dist = dict(con.execute(f"""
-                SELECT z.zip, {haversine_miles_sql('z.lat', 'z.lon',
-                                                   origin[0], origin[1])}
-                FROM _zcta z WHERE z.zip IN (SELECT unnest(?::VARCHAR[]))
-            """, [sorted({r["zip"] for r in out if r["zip"]})]).fetchall())
-            kept = []
-            for r in out:
-                d = dist.get(r["zip"]) if r["zip"] else None
-                if d is None:
-                    unplaced += 1
-                    continue
-                if d > float(radius_miles):
-                    continue
-                r["miles"] = round(d, 1)
-                kept.append(r)
-            out = kept
+        out, total, unplaced = _feed_page(con, reader, where, params, parsed, "enumerated",
+                                          origin, radius_miles, limit)
+        capped = total > len(out)
         # already contracted? one lookup for the whole page, not per row
         if out:
             known = {n for (n,) in con.execute(
@@ -368,10 +342,9 @@ def new_enumerations(store: Store, zip_code: str | None = None,
     out.sort(key=lambda r: (r["enumerated"], r.get("org_name") or ""), reverse=True)
     note = FEED_NOTE
     if capped:
-        note += (f" Only the {window:,} most recently issued NPIs were scanned, "
-                 "so older matches in this window may not be listed — narrow the "
-                 "look-back or the area to see all of them.")
-    return {"rows": out[:limit], "total": len(out), "unplaced": unplaced,
+        note += (f" The {len(out):,} most recently issued of {total:,} matches are listed "
+                 "— narrow the look-back or the area to see the rest.")
+    return {"rows": out[:limit], "total": total, "unplaced": unplaced,
             "zip": zip_code, "radius_miles": radius_miles if use_radius else None,
             "days": days, "state": state, "since": since, "reason": None,
             "capped": capped, "note": note}

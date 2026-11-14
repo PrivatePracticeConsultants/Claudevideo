@@ -1,0 +1,6 @@
+backup 1: mrfx-backup-2026-11-01_0900.zip 3,446,890 bytes; carries earlier backups: []; deleted: []
+backup 2: mrfx-backup-2026-11-02_0900.zip 6,895,584 bytes; carries earlier backups: ['store/backups/mrfx-backup-2026-11-01_0900.zip']; deleted: []
+backup 3: mrfx-backup-2026-11-03_0900.zip 13,793,291 bytes; carries earlier backups: ['store/backups/mrfx-backup-2026-11-01_0900.zip', 'store/backups/mrfx-backup-2026-11-02_0900.zip']; deleted: ['mrfx-backup-2026-11-01_0900.zip']
+backup 4: mrfx-backup-2026-11-04_0900.zip 24,140,330 bytes; carries earlier backups: ['store/backups/mrfx-backup-2026-11-02_0900.zip', 'store/backups/mrfx-backup-2026-11-03_0900.zip']; deleted: ['mrfx-backup-2026-11-02_0900.zip']
+listing: ['mrfx-backup-2026-11-03_0900.zip', 'mrfx-backup-2026-11-04_0900.zip']
+due 3 h after the last (fresh Store): False | due 8 days after: True

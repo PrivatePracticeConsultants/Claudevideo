@@ -1,0 +1,11 @@
+##### E
+== live claim in THIS process ==
+  claimed: 1 fetched live set: {1}
+  inbox scan still waiting after 6 s: True | files row: [('processing', None)]
+  scan ended: True -> [{'file': 'acme_2026-06 (1).json.gz', 'status': 'skipped', 'duplicate_of': 'x_acme_2026-06.json.gz', 'error': 'identical to x_acme_2026-06.json.gz, which is already loaded — not loaded twice (the same file under another name: a second download, a copy, or the file a link already brought in)'}]
+  files rows: [('acme_2026-06 (1).json.gz', 'skipped', 0)]
+== the same row seen by a NEW Store (a new process) ==
+  orphan: loaded in 1.4 s -> [('done', 30)]
+== the link-side content claim (claim_content_ingest) is tracked too ==
+  claim_content_ingest -> None | live set: {1} | row: [('ingesting',)]
+RESULT: held

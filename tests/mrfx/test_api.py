@@ -257,6 +257,11 @@ def test_entity_detail_and_code_views(client):
     assert c["timed"] is True
     assert c["ranked"][0]["median_rate"] >= c["ranked"][-1]["median_rate"]
     assert sum(b["n"] for b in c["histogram"]) == 4
+    # one entry per bucket, empty ones included: evenly spaced bars must mean
+    # evenly spaced dollars
+    steps = {round(b["bucket"] - a["bucket"], 6)
+             for a, b in zip(c["histogram"], c["histogram"][1:])}
+    assert len(steps) <= 1 and len(c["histogram"]) <= 21
 
 
 def test_csv_export_matches_view_exactly(client):
@@ -302,8 +307,8 @@ def test_files_view_surfaces_skips_and_qa(cfg, store):
 def test_trend_and_months(client):
     months = client.get("/api/months").json()["months"]
     assert months == ["2026-06"]
-    t = client.get("/api/trend?cpt=97110").json()["rows"]
-    assert t and t[0]["file_month"] == "2026-06"
+    # one month is not a trend: a payer needs two (review 10 item 3.1)
+    assert client.get("/api/trend?cpt=97110").json()["rows"] == []
 
 
 def test_validation_crosscheck(client):
@@ -374,6 +379,10 @@ elevance_master_index_pattern: https://example.com/{YYYY-MM}-01_anthem_index.jso
     )
     client = TestClient(create_app(cfg, store))
     mo = client.get("/api/sources?state=MO").json()
+    # the registry's own cards first; the tested catalog's other MO sources
+    # follow as "tested_only" cards (review 10 item 3.7)
+    assert [c.get("tested_only", False) for c in mo["state"]][:2] == [False, False]
+    mo["state"] = [c for c in mo["state"] if not c.get("tested_only")]
     assert len(mo["state"]) == 2
     assert mo["state"][0]["verified"] is True
     assert mo["state"][1]["verified"] is False

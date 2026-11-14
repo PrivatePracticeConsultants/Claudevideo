@@ -1,0 +1,288 @@
+{
+ "phase1": {
+  "state": "current",
+  "reason": "",
+  "pct": null,
+  "eta_text": "",
+  "covered_files": 10,
+  "done_files": 10,
+  "covered_payers": 7,
+  "loaded_payers": 7,
+  "covered_rows": 6770152,
+  "loaded_rows": 6770152,
+  "sentence": ""
+ },
+ "kilo_dropped_s": 20.0,
+ "lima_pasted_s": 20.1,
+ "all_current_s": 241.0,
+ "enrichment_last": {
+  "total": 47565,
+  "enriched": 47565,
+  "named": 46808,
+  "remaining": 0
+ },
+ "timeline": [
+  {
+   "dt": 0.0,
+   "state": "current",
+   "files": "10/10",
+   "payers": "7/7",
+   "sentence": "",
+   "err": null
+  },
+  {
+   "dt": 2.0,
+   "state": "building",
+   "files": "9/10",
+   "payers": "7/7",
+   "sentence": "Analytics cover 7 of 7 payers (9 of 10 files). Adding the newly loaded files to the analytics",
+   "err": null
+  },
+  {
+   "dt": 2.5,
+   "state": "current",
+   "files": "10/10",
+   "payers": "7/7",
+   "sentence": "",
+   "err": null
+  },
+  {
+   "dt": 21.6,
+   "state": "building",
+   "files": "10/11",
+   "payers": "7/8",
+   "sentence": "Analytics cover 7 of 8 payers (10 of 11 files). Adding the newly loaded files to the analytics",
+   "err": null
+  },
+  {
+   "dt": 22.1,
+   "state": "building",
+   "files": "11/12",
+   "payers": "8/9",
+   "sentence": "Analytics cover 8 of 9 payers (11 of 12 files). Adding the newly loaded files to the analytics",
+   "err": null
+  },
+  {
+   "dt": 24.0,
+   "state": "current",
+   "files": "12/12",
+   "payers": "9/9",
+   "sentence": "",
+   "err": null
+  },
+  {
+   "dt": 114.8,
+   "state": "building",
+   "files": "12/12",
+   "payers": "9/9",
+   "sentence": "Analytics cover 9 of 9 payers (12 of 12 files). Adding the newly loaded files to the analytics",
+   "err": null
+  },
+  {
+   "dt": 146.4,
+   "state": "current",
+   "files": "12/12",
+   "payers": "9/9",
+   "sentence": "",
+   "err": null
+  }
+ ],
+ "generation_bumps": [
+  [
+   0.0,
+   0
+  ],
+  [
+   2.5,
+   1
+  ],
+  [
+   22.1,
+   2
+  ],
+  [
+   24.0,
+   3
+  ],
+  [
+   116.3,
+   4
+  ],
+  [
+   146.4,
+   5
+  ]
+ ],
+ "false_current": [],
+ "events": [
+  [
+   2.0,
+   "incr_enter",
+   null,
+   null
+  ],
+  [
+   2.1,
+   "delta_enter",
+   null,
+   null
+  ],
+  [
+   2.5,
+   "delta_exit",
+   null,
+   null
+  ],
+  [
+   2.5,
+   "incr_exit",
+   0.4950128060008865,
+   0.4970526695251465
+  ],
+  [
+   21.5,
+   "incr_enter",
+   null,
+   null
+  ],
+  [
+   21.8,
+   "delta_enter",
+   null,
+   null
+  ],
+  [
+   22.4,
+   "delta_exit",
+   null,
+   null
+  ],
+  [
+   22.4,
+   "incr_enter",
+   null,
+   null
+  ],
+  [
+   22.4,
+   "incr_exit",
+   0.8730708780003624,
+   0.8832089900970459
+  ],
+  [
+   22.9,
+   "delta_enter",
+   null,
+   null
+  ],
+  [
+   23.8,
+   "delta_exit",
+   null,
+   null
+  ],
+  [
+   23.8,
+   "incr_exit",
+   1.3616514829991502,
+   1.4102880954742432
+  ],
+  [
+   114.7,
+   "dir_enter",
+   null,
+   null
+  ],
+  [
+   115.1,
+   "full_enter",
+   null,
+   null
+  ],
+  [
+   116.2,
+   "names_hold",
+   null,
+   null
+  ],
+  [
+   146.2,
+   "slice_done",
+   null,
+   30.948643922805786
+  ],
+  [
+   146.3,
+   "full_exit",
+   31.127873341998566,
+   31.13587784767151
+  ]
+ ],
+ "concurrent_entries": [
+  [
+   22.4,
+   "incr_enter"
+  ],
+  [
+   115.1,
+   "full_enter"
+  ]
+ ],
+ "log": [
+  "08:39:57 INFO    mrfx.cli: opening the store at /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/J/store \u2026",
+  "08:39:57 INFO    mrfx.store: analytics memory budget: 2 GB (1.9 GiB, as DuckDB reports it) \u2014 set by duckdb_memory_gb; raise duckdb_memory_gb in config/mrfx.yaml if rebuilds run out",
+  "08:39:58 INFO    mrfx.cli: watching /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/J/inbox",
+  "  store: /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/J/store  (10 file(s) ingested)",
+  "  inbox: /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/J/inbox  (drop .json / .json.gz / .zip here)",
+  "  if the app ever freezes: open /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/J/store/diagnostics/stacks_latest.txt",
+  "08:39:58 INFO    mrfx.cli: monthly refresh 2026-11: 0 dated source(s) queued, 0 not-yet-posted retried, 1 index(es) re-fetched (only sources you have loaded)",
+  "08:39:59 INFO    mrfx.fetch: index re-check: 1 loaded file(s) changed on the server \u2014 queued again",
+  "08:40:00 INFO    mrfx.fetch: updating analytics rollups (1 newly ingested file(s))...",
+  "08:40:00 INFO    mrfx.store: analytics update: 1 new file(s), 1 queued slice(s) \u2014 recomputing 1 payer slice(s) instead of the whole store",
+  "08:40:01 INFO    mrfx.store: analytics update finished in 0s (payer slice, not a full rebuild)",
+  "08:40:20 INFO    mrfx.fetch: updating analytics rollups (1 newly ingested file(s))...",
+  "08:40:20 INFO    mrfx.store: analytics update: 1 new file(s), 0 queued slice(s) \u2014 recomputing 1 payer slice(s) instead of the whole store",
+  "08:40:21 INFO    mrfx.store: analytics update finished in 1s (payer slice, not a full rebuild)",
+  "08:40:21 INFO    mrfx.store: analytics update: 1 new file(s), 0 queued slice(s) \u2014 recomputing 1 payer slice(s) instead of the whole store",
+  "08:40:22 INFO    mrfx.store: analytics update finished in 1s (payer slice, not a full rebuild)",
+  "08:41:54 INFO    mrfx.enrich: scoped name refresh unavailable (13,378 of 13,027 TINs affected \u2014 the full directory rebuild is cheaper) \u2014 full directory rebuild",
+  "08:41:54 INFO    mrfx.store: analytics build: planning (counting rows per payer and code)\u2026",
+  "08:41:54 INFO    mrfx.store: analytics build planned: 1 slice(s) over 6,770,992 rows (0 payer(s))",
+  "08:42:25 INFO    mrfx.store: analytics build finished in 31s"
+ ],
+ "files": null,
+ "truth": {
+  "done_files": 12,
+  "raw_rows": 6770992,
+  "spine_rows": 447556,
+  "expected_rows": 447556,
+  "missing": 0,
+  "extra": 0,
+  "files_fully_in_spine": 12,
+  "files_rowcount_mismatch": [],
+  "spine_payers": [
+   "Blue Cross Blue Shield of North Dakota",
+   "Blue Cross Blue Shield of Wyoming",
+   "Highmark WV",
+   "Juliet Health",
+   "Kilo Benefit Trust",
+   "Lima Care",
+   "Moda",
+   "Security Health Plan of Wisconsin, Inc,",
+   "Tufts Health Public Plans, Inc."
+  ],
+  "raw_payers": [
+   "Blue Cross Blue Shield of North Dakota",
+   "Blue Cross Blue Shield of Wyoming",
+   "Highmark WV",
+   "Juliet Health",
+   "Kilo Benefit Trust",
+   "Lima Care",
+   "Moda",
+   "Security Health Plan of Wisconsin, Inc,",
+   "Tufts Health Public Plans, Inc."
+  ],
+  "hash_spine": null,
+  "hash_dir": null
+ }
+}

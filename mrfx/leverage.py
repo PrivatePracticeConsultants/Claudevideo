@@ -35,7 +35,9 @@ from __future__ import annotations
 
 import logging
 
+from .sqlfn import modal_zip_of, pick_modal_zip, zip_counts_by_tin
 from .store import Store, mask_tin
+from .rounding import half_up
 
 log = logging.getLogger(__name__)
 
@@ -60,9 +62,7 @@ def network_leverage(store: Store, subject: str, payer: str,
                      centroids_path=None) -> dict:
     """The payer's published alternatives to this practice, inside a radius."""
     from .benchmark import (BenchmarkError, _market_where, _rates_relation,
-                            normalize_market, resolve_plan_scope,
-                            resolve_subject_tins)
-    from .catalog import therapy_taxonomy_sql
+                            normalize_market, resolve_plan_scope)
     from .medicare import haversine_miles_sql, load_centroids
 
     payer = str(payer or "").strip()
@@ -70,29 +70,32 @@ def network_leverage(store: Store, subject: str, payer: str,
         raise BenchmarkError(
             "pick the payer you're negotiating with — leverage is per payer, "
             "because each one has a different local network")
-    try:
-        radius = max(1.0, min(float(radius_miles), 250.0))
-    except (TypeError, ValueError):
-        raise BenchmarkError("radius must be a number of miles")
+    radius = _clamp_radius(radius_miles)
 
     m = resolve_plan_scope(store, normalize_market(market or {}))
     m = {**m, "payers": [payer]}
-    subject_tins = resolve_subject_tins(store, subject)
+    # the subject rule (subject_tins_for_market): a name used in two states
+    # is the practice in the market's state (review 10 item 2.9)
+    from .benchmark import subject_tins_for_market
+    subject_tins = subject_tins_for_market(store, subject, m)
     if not subject_tins:
         raise BenchmarkError(f"no practice matches {subject!r}")
+    # the RADIUS is the geography: a State filter dropped alternatives across
+    # the state line (10 with State MO vs 13 without, three Kansas City KS
+    # practices 2 miles away — review 10 item 2.9); the state still decides
+    # which practice a name means (above)
+    m = {k: v for k, v in m.items() if k not in ("state", "city")}
     where, params = _market_where(m, bool(m.get("include_assistant")),
                                   bool(m.get("include_non_dollar")))
     rel = _rates_relation(m)
-    therapy = therapy_taxonomy_sql("n.taxonomy_code", all_col="n.taxonomy_codes")
 
+    # every practice's NPI-ZIP counts, precomputed (Store.placement_relation)
+    place = store.placement_relation()
     with store.connect() as con:
         load_centroids(con, centroids_path)
         # the subject sits at the ZIP most of its own NPIs share
-        home = con.execute("""
-            SELECT mode(lpad(substr(trim(n.zip), 1, 5), 5, '0'))
-            FROM rates r JOIN npi_directory n ON n.npi = r.npi
-            WHERE r.tin_value IN (SELECT unnest(?::VARCHAR[]))
-              AND n.zip IS NOT NULL AND trim(n.zip) <> ''
+        home = con.execute(f"""
+            SELECT * FROM ({modal_zip_of("SELECT unnest(?::VARCHAR[])", place)})
         """, [subject_tins]).fetchone()
         home_zip = home[0] if home else None
         if not home_zip:
@@ -119,15 +122,14 @@ def network_leverage(store: Store, subject: str, payer: str,
                 WHERE {where}
                   AND t.tin_value NOT IN (SELECT unnest(?::VARCHAR[]))
             ),
+            zc AS ({zip_counts_by_tin("SELECT tin_value FROM priced", ", nt, nn",
+                                      place=place)}),
+            -- the ZIP most of its rows carry (ties: lowest, see mrfx/sqlfn);
+            -- an NPI has one ZIP, so per-ZIP distinct counts sum to the total
             placed AS (
-                SELECT r.tin_value,
-                       mode(lpad(substr(trim(n.zip), 1, 5), 5, '0')) AS zip,
-                       count(DISTINCT n.npi) FILTER ({therapy})      AS n_therapy,
-                       count(DISTINCT n.npi)                         AS n_npis
-                FROM rates r JOIN npi_directory n ON n.npi = r.npi
-                WHERE r.tin_value IN (SELECT tin_value FROM priced)
-                  AND n.zip IS NOT NULL AND trim(n.zip) <> ''
-                GROUP BY r.tin_value
+                SELECT tin_value, {pick_modal_zip()} AS zip,
+                       sum(nt) AS n_therapy, sum(nn) AS n_npis
+                FROM zc GROUP BY tin_value
             )
             SELECT p.tin_value, p.zip, p.n_therapy, p.n_npis,
                    any_value(d.display_name) AS display_name,
@@ -156,6 +158,10 @@ def network_leverage(store: Store, subject: str, payer: str,
             population = seniors = None
 
     rows = []
+    # nearest first; a UNIQUE order (invariant 7): practices in one ZIP tie on
+    # miles, and the query hands them back in thread order
+    alts = sorted(alts, key=lambda a: (a[1] not in dist, dist.get(a[1]) or 0,
+                                       a[4] or "", a[0]))
     for tin, zipc, n_therapy, n_npis, name, is_therapy in alts:
         # therapy_only scoping already applied by _market_where when the caller
         # asked for it; is_therapy is carried so the reader can see the mix
@@ -163,15 +169,26 @@ def network_leverage(store: Store, subject: str, payer: str,
             "tin_value": mask_tin(tin),
             "display_name": name or "(name pending)",
             "zip": zipc,
-            "miles": round(dist[zipc], 1) if zipc in dist else None,
+            "miles": half_up(dist[zipc], 1) if zipc in dist else None,
             "npi_count": n_npis,
             "therapy_npis": n_therapy,
             "is_therapy_practice": bool(is_therapy),
         })
-    rows.sort(key=lambda r: (r["miles"] is None, r["miles"] or 0))
 
     n_alt = len(rows)
-    per_alt = (round(seniors / n_alt, 0)
+    # Name what was counted. Without "therapy practices only" a physician
+    # office or chiropractor billing 97110/97140 is a payer alternative too,
+    # and the headline called all of them "therapy practices" (a prospect
+    # dossier said "6 other therapy practices" over 5 PT clinics and an
+    # internal-medicine group). Unknown taxonomy is "not identified yet",
+    # never "not therapy", so only an explicit False counts against.
+    n_non = (0 if m.get("therapy_only") or m.get("peer_group") in ("clinics", "org", "therapy")
+             else sum(1 for a in alts if a[5] is False))
+    s_alt = "s" if n_alt != 1 else ""
+    alts_phrase = (f"{n_alt} other therapy practice{s_alt}" if not n_non else
+                   f"{n_alt} other practice{s_alt} ({n_non} of them "
+                   f"{'not a therapy practice' if n_non == 1 else 'not therapy practices'})")
+    per_alt = (half_up(seniors / n_alt, 0)
                if seniors and n_alt else None)
     band = ("thin" if n_alt <= THIN_ALTERNATIVES
             else "crowded" if n_alt >= CROWDED_ALTERNATIVES else "moderate")
@@ -183,20 +200,19 @@ def network_leverage(store: Store, subject: str, payer: str,
             "has no published local alternative at all.")
     elif band == "thin":
         headline = (
-            f"{payer} publishes rates for only {n_alt} other therapy "
-            f"practice{'s' if n_alt != 1 else ''} within {radius:g} miles"
+            f"{payer} publishes rates for only {alts_phrase} within {radius:g} miles"
             + (f", covering {int(seniors):,} residents aged 65+ — about "
                f"{int(per_alt):,} seniors per remaining practice"
                if per_alt else "")
             + ". That is a thin fallback for the payer.")
     elif band == "crowded":
         headline = (
-            f"{payer} publishes rates for {n_alt} other therapy practices "
+            f"{payer} publishes rates for {alts_phrase} "
             f"within {radius:g} miles. The payer has ready alternatives here, "
             "so leverage has to come from the rate case itself, not from scarcity.")
     else:
         headline = (
-            f"{payer} publishes rates for {n_alt} other therapy practices "
+            f"{payer} publishes rates for {alts_phrase} "
             f"within {radius:g} miles"
             + (f" ({int(per_alt):,} seniors each)" if per_alt else "")
             + " — a moderate fallback.")
@@ -218,6 +234,17 @@ def network_leverage(store: Store, subject: str, payer: str,
     }
 
 
+def _clamp_radius(radius_miles) -> float:
+    """1-250 miles. One rule for the per-payer view and the summary: the
+    summary printed the radius as REQUESTED ("within 900 miles") over counts
+    measured at the 250 the per-payer call had silently clamped to."""
+    from .benchmark import BenchmarkError
+    try:
+        return max(1.0, min(float(radius_miles), 250.0))
+    except (TypeError, ValueError):
+        raise BenchmarkError("radius must be a number of miles")
+
+
 def leverage_summary(store: Store, subject: str, market: dict | None = None,
                      *, radius_miles: float = 15.0) -> dict:
     """Leverage against EVERY payer the subject contracts with, thinnest first.
@@ -228,6 +255,7 @@ def leverage_summary(store: Store, subject: str, market: dict | None = None,
     """
     from .benchmark import BenchmarkError, subject_payers
 
+    radius_miles = _clamp_radius(radius_miles)
     payers = subject_payers(store, subject, market or {})
     out, skipped = [], []
     for p in payers:

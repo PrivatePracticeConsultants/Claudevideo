@@ -1,0 +1,12 @@
+During handling of the above exception, another exception occurred:
+
+mrfx.progress.Stopped: stopped
+stopped backup answered: (409, '{"detail":"stopped"}')
+backup dir after Stop: [('mrfx-backup-2026-11-12_0809.zip.part', 3427261)]
+backup failed
+EIO backup refused: it failed (OSError: [Errno 5] Input/output error)
+backup dir after EIO: [('mrfx-backup-2026-11-12_0809.zip.part', 3427261), ('mrfx-backup-2026-11-13_0900.zip.part', 3427261)]
+good backup: mrfx-backup-2026-11-14_0900.zip
+backup dir after a good run: [('mrfx-backup-2026-11-12_0809.zip.part', 3427261), ('mrfx-backup-2026-11-13_0900.zip.part', 3427261), ('mrfx-backup-2026-11-14_0900.zip', 3449168)]
+snapshot dir left in store: False
+Files-tab sentence: Last backup: 2026-11-14 09:00 UTC, 3.4 MB, /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/diff_ui/t04_4a9b68lh/bk/
