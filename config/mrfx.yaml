@@ -250,6 +250,14 @@ enrichment:
 cms_dac: auto
 # cms_dac_dir: data/cms_dac
 
+# Which tax IDs are outpatient rehab clinics (the default "Compare against"
+# group): CMS's hospital and nursing-home address lists plus the Medicare
+# Physician & Other Practitioners therapy rows (who bills Medicare as a
+# therapist in private practice). auto = downloaded a few minutes after the
+# app starts and re-checked monthly. "off" = run `mrfx cmsref` yourself.
+cms_reference: auto
+# cms_ref_dir: data/cms_ref
+
 # Keep ONLY therapist rows (PT/OT/SLP + therapy clinics, by NPPES taxonomy) at
 # ingest, dropping the MDs/DOs/NPs who merely bill a 97xxx code. Shrinks the
 # store several-fold and speeds every rebuild/query. Off by default. It

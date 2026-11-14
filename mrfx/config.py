@@ -154,6 +154,13 @@ class MrfxConfig(BaseModel):
     # newer release once a month. "off": only `mrfx dac --file …` loads it.
     cms_dac: Literal["auto", "off"] = "auto"
     cms_dac_dir: Path = Path("data/cms_dac")
+    # Practice TYPE evidence (0.8.6, naming.profile_sql): CMS's hospital and
+    # nursing-home address lists, and the Medicare Physician & Other
+    # Practitioners therapy-code rows (who bills as a therapist in private
+    # practice, and where). "auto": `serve` fetches both (~20 MB + a few
+    # minutes of API paging) and checks monthly. "off": `mrfx cmsref` only.
+    cms_reference: Literal["auto", "off"] = "auto"
+    cms_ref_dir: Path = Path("data/cms_ref")
 
     @field_validator("backup_dir", mode="before")
     @classmethod
@@ -344,7 +351,8 @@ class MrfxConfig(BaseModel):
 _ANCHORED_FIELDS = ("inbox_dir", "processed_dir", "failed_dir", "store_dir",
                     "downloads_dir", "entity_map_path", "mpfs_path",
                     "duckdb_temp_dir", "tracker_dir", "packets_dir", "backup_dir", "registry_path",
-                    "registry_overrides_path", "known_sources_path", "cms_dac_dir")
+                    "registry_overrides_path", "known_sources_path", "cms_dac_dir",
+                    "cms_ref_dir")
 
 
 def _project_root_of(config_path: Path) -> Path:

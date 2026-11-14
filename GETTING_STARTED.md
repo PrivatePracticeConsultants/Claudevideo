@@ -1055,6 +1055,50 @@ Downloads and files:
 - **"fee for service" / "fee_schedule"** spelled differently by a payer no
   longer drop rates.
 
+## What changed in version 0.8.6
+
+Built around one job: showing a practice owner how their rates compare with
+**other outpatient rehab clinics**, and naming the clinics a payer pays more.
+
+- **"Compare against" on every comparison screen**, set to **outpatient
+  rehab clinics** by default (it replaces the "therapy practices only"
+  checkbox). Other choices: clinics by organization NPI taxonomy, therapy
+  practices (the old checkbox), and all practices. A practice counts as an
+  outpatient rehab clinic when the evidence says so:
+  - its organization NPI is registered as a therapy clinic (261QP2000X …)
+    or a therapist group (225100000X …). Payer files rarely list a
+    clinic's own organization NPI, so the app also looks the practice up by
+    its legal name in the NPPES file (registered *only* as therapy counts;
+    a multi-specialty registration does not);
+  - most of its clinicians are PT/OT/SLP;
+  - most of its Medicare therapy services are billed by therapists in
+    private practice (CMS Medicare Physician & Other Practitioners data);
+  - and NOT when most of its practice addresses are CMS-listed hospitals or
+    nursing homes (those are hospital / facility therapy).
+  Orthopedic and other physician groups whose therapists bill most of their
+  therapy are kept apart as "physician-owned therapy" — on BCBS Tennessee
+  they were paid $42.33 for 97110 against $24.23 at clinics. Hover a
+  practice's name to read why it was classed the way it was.
+- **Negotiate now names the clinics the payer pays more.** After Compare,
+  "Clinics … pays more" lists every comparable clinic the same payer pays
+  more than you for at least one of your codes — in your city when 5 or
+  more comparable clinics are there, otherwise your state — with each
+  clinic's rate and gap per code, your rate, their median and the highest.
+  **Download CSV** saves it for a rate request.
+- **Fewer menu entries, nothing removed.** **My rates** holds the Rate card
+  (with Price a visit and Visit value) and Benchmark; **Market rates** holds
+  Browse rates (the old Explorer), By code (Code comparison), A code's
+  market (Markets) and A payer's clinics (Payer roster). A row of tabs at
+  the top of each moves between them; old links still open the same screen.
+- **The CMS lists download themselves**: the hospital and nursing-home
+  address lists and the Medicare therapy rows, a few minutes after the app
+  starts and once a month after that (`cms_reference: off` in
+  config/mrfx.yaml turns it off; `mrfx cmsref` runs it by hand).
+- On a real BCBS Tennessee store (5,660 practices): 443 outpatient rehab
+  clinics, 219 hospitals, 191 facilities, 12 physician-owned therapy groups,
+  4,775 physician / other practices, 20 unknown; 132 practices have an
+  organization NPI registered as therapy (4 before the NPPES name lookup).
+
 ## What changed in version 0.8.5
 
 - **Practice names are right.** A practice (tax ID) with no organization

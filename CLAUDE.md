@@ -60,6 +60,7 @@ commercial rate), `mrfx enrich --weekly <NPPES weekly>` (fold a week's NPPES
 changes into the cache), `mrfx hospital <file> [--state … --parity <practice>]` (a hospital's CMS
 standard-charges file + what the same payer pays the hospital vs the practice),
 `mrfx dac [--file … --release … --refresh]` (the CMS Doctors and Clinicians file: names practices with no organization NPI — mrfx/naming.py; `serve` fetches it monthly),
+`mrfx cmsref [--refresh]` (CMS hospital / nursing-home address lists + Medicare therapy rows → each practice's `practice_type`; the default "Compare against" group is outpatient rehab clinics; `serve` fetches them monthly),
 `mrfx inflation [--year YYYY --value N]` (the price index behind real-terms
 erosion; a year with no value is refused, never estimated),
 `mrfx packets [--pdf]` (monthly client packets; `--pdf` prints each beside it), `mrfx renewals [--clients]`,

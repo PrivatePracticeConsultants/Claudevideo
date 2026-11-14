@@ -303,6 +303,40 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
                 if stop.wait(24 * 3600):
                     return
         threading.Thread(target=_dac_loop, name="mrfx-cms-dac", daemon=True).start()
+    if getattr(cfg, "cms_reference", "auto") == "auto":
+        # practice-type evidence (0.8.6): CMS hospital + nursing-home address
+        # lists and the Medicare therapy rows — three minutes after start when
+        # never fetched, then monthly; each source fails alone and is retried
+        # the next day, the classification using whatever evidence is loaded
+        def _cmsref_loop():
+            import datetime as dt
+
+            from .cmsref import ensure_cmsref
+            if stop.wait(180):
+                return
+            while True:
+                due = True
+                try:
+                    with store.connect() as con:
+                        last = store._meta_get(con, "cmsref_checked_at")
+                    due = (not last or (dt.datetime.now() - dt.datetime.fromisoformat(last))
+                           > dt.timedelta(days=30))
+                except Exception:  # noqa: BLE001
+                    pass
+                if due:
+                    try:
+                        got = ensure_cmsref(store, cfg.cms_ref_dir)
+                        for k, v in got.items():
+                            if isinstance(v, str) and v.startswith("not loaded"):
+                                log.warning("CMS %s list %s — trying again in a month "
+                                            "(or run `mrfx cmsref`)", k, v)
+                        store.refresh_practice_names()
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("CMS reference lists not refreshed (%s) — "
+                                    "trying again tomorrow", e)
+                if stop.wait(24 * 3600):
+                    return
+        threading.Thread(target=_cmsref_loop, name="mrfx-cms-ref", daemon=True).start()
     threading.Thread(
         target=_watcher_loop, args=(cfg, store, stop), name="mrfx-watcher", daemon=True
     ).start()
@@ -1506,6 +1540,43 @@ def cmd_hospital(cfg: MrfxConfig, args) -> int:
     return 0
 
 
+def cmd_cmsref(cfg: MrfxConfig, args) -> int:
+    """Fetch CMS's hospital + nursing-home address lists and the Medicare
+    therapy rows, then re-classify every practice (naming.profile_sql)."""
+    from .cmsref import ensure_cmsref, fetch_medicare_therapy
+
+    if _something_owns_the_port(cfg, "writing to the store locally"):
+        return 1
+    store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir)
+    got = ensure_cmsref(store, cfg.cms_ref_dir)
+    if args.refresh:
+        try:
+            got["medicare"] = fetch_medicare_therapy(store, force=True)
+        except Exception as e:  # noqa: BLE001
+            got["medicare"] = f"not loaded: {e}"
+    bad = 0
+    f = got.get("facilities")
+    if isinstance(f, str) and f.startswith("not loaded"):
+        bad += 1
+        print(f"Hospital / nursing-home lists {f}", file=sys.stderr)
+    else:
+        print("Hospital / nursing-home address lists: "
+              + ("already current." if f == "current" else f"{f:,} hospitals and nursing homes loaded."))
+    m = got.get("medicare")
+    if isinstance(m, str):
+        bad += 1
+        print(f"Medicare therapy rows {m}", file=sys.stderr)
+    else:
+        print(f"Medicare Physician & Other Practitioners, {m['year']}: "
+              + (f"{m['rows']:,} therapy-code rows fetched." if m["fetched"] else "already current."))
+    if store.refresh_practice_names(force=True):
+        with store.connect() as con:
+            rows = con.execute("SELECT practice_type, count(*) FROM practice_names_tbl "
+                               "GROUP BY 1 ORDER BY 2 DESC, 1").fetchall()
+        print("Practices re-classified: " + ", ".join(f"{t} {n:,}" for t, n in rows))
+    return 1 if bad == 2 else 0
+
+
 def cmd_dac(cfg: MrfxConfig, args) -> int:
     """Load the CMS Doctors and Clinicians file (practice names for tax IDs
     with no organization NPI — mrfx/naming.py) and re-resolve the names."""
@@ -2192,6 +2263,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--month", default="latest", help="as-of month for the parity table")
 
     p = sub.add_parser(
+        "cmsref",
+        help="fetch CMS hospital/nursing-home lists + Medicare therapy rows (practice types)")
+    p.add_argument("--refresh", action="store_true",
+                   help="fetch the Medicare rows again even when the year is unchanged")
+
+    p = sub.add_parser(
         "dac",
         help="load the CMS Doctors and Clinicians file (names practices with no organization NPI)")
     p.add_argument("--file", default=None,
@@ -2311,6 +2388,7 @@ def main(argv: list[str] | None = None) -> int:
         "newclinics": cmd_newclinics,
         "closures": cmd_closures,
         "inflation": cmd_inflation,
+        "cmsref": cmd_cmsref,
         "dac": cmd_dac,
         "hospital": cmd_hospital,
         "floors": cmd_floors,

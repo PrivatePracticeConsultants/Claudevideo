@@ -2754,23 +2754,24 @@ class Store:
             return ("SELECT t.*, CASE WHEN coalesce(t.npi_count, 0) = 0 THEN 'no_npi' "
                     "ELSE 'pending' END AS name_source, "
                     f"{fallback} AS practice_type, NULL::VARCHAR AS type_reason, "
-                    "[]::VARCHAR[] AS org_taxonomies FROM tin_directory_tbl t")
+                    "[]::VARCHAR[] AS org_taxonomies, FALSE AS org_clinic FROM tin_directory_tbl t")
         cols = {r[0] for r in con.execute(
             "SELECT column_name FROM information_schema.columns "
             "WHERE table_name = 'practice_names_tbl'").fetchall()}
         typed = "practice_type" in cols
+        oc = ("coalesce(n.org_clinic, FALSE)" if "org_clinic" in cols else "FALSE") + " AS org_clinic "
         return ("SELECT t.* REPLACE (coalesce(n.practice_name, t.display_name) AS display_name, "
                 "CASE WHEN len(n.cities) > 0 THEN n.cities ELSE t.cities END AS cities), "
                 "coalesce(n.name_source, CASE WHEN coalesce(t.npi_count, 0) = 0 THEN 'no_npi' "
                 "ELSE 'pending' END) AS name_source, "
                 + (f"coalesce(n.practice_type, {fallback}) AS practice_type, n.type_reason, "
-                   "coalesce(n.org_taxonomies, []::VARCHAR[]) AS org_taxonomies "
+                   "coalesce(n.org_taxonomies, []::VARCHAR[]) AS org_taxonomies, " + oc
                    if typed else
                    f"{fallback} AS practice_type, NULL::VARCHAR AS type_reason, "
-                   "[]::VARCHAR[] AS org_taxonomies ")
+                   "[]::VARCHAR[] AS org_taxonomies, " + oc)
                 + "FROM tin_directory_tbl t LEFT JOIN practice_names_tbl n USING (tin_value)")
 
-    NAMES_SCHEMA = 2
+    NAMES_SCHEMA = 3
 
     def _names_stamp(self) -> str:
         """What the practice names are computed from: the (TIN, NPI) pairs
@@ -2786,8 +2787,10 @@ class Store:
         util = sorted((p.name, p.stat().st_size, p.stat().st_mtime_ns)
                       for p in (self.dir / "utilization").glob("*.parquet")) \
             if (self.dir / "utilization").exists() else []
+        nppes = self.dir / "nppes_cache.parquet"
+        npf = [nppes.stat().st_size, nppes.stat().st_mtime_ns] if nppes.exists() else []
         return hashlib.sha1(json.dumps(
-            [pairs, list(npi), dac, rel, fac, util, dver, self.NAMES_SCHEMA],
+            [pairs, list(npi), dac, rel, fac, util, dver, npf, self.NAMES_SCHEMA],
             default=str).encode()).hexdigest()[:16]
 
     def refresh_practice_names(self, force: bool = False) -> bool:
@@ -2796,8 +2799,9 @@ class Store:
         lock held, swapped in under the writer lock in one transaction.
         True when it rebuilt. `serve` runs it in the background
         (warm_part_sets); never raises."""
-        from .naming import (ORG_NAME_FREQ_SQL, PRACTICE_TYPE_SQL, TYPE_REASON_SQL,
-                             names_sql, profile_sql)
+        from .naming import (NO_NAMED_ORGS, ORG_NAME_FREQ_SQL, PRACTICE_TYPE_SQL,
+                             TYPE_REASON_SQL, named_orgs_sql, names_sql, norm_sql,
+                             org_clinic_only_sql, profile_sql)
         try:
             stamp = self._names_stamp()
             with self.connect() as con:
@@ -2825,12 +2829,28 @@ class Store:
                     tdr = ("tin_directory_tbl" if has_dir else
                            "(SELECT NULL::VARCHAR AS tin_value, NULL::BOOLEAN AS has_hospital, "
                            "NULL::BOOLEAN AS has_facility, NULL::BOOLEAN AS is_therapy, "
-                           "NULL::BIGINT AS therapy_npi_count, NULL::BIGINT AS classified_npi_count "
-                           "WHERE FALSE)")
-                    sql = (f"SELECT n.*, p.org_taxonomies, p.n_addr, p.n_hosp_addr, p.n_snf_addr, "
+                           "NULL::BIGINT AS therapy_npi_count, NULL::BIGINT AS classified_npi_count, "
+                           "NULL::VARCHAR[] AS states WHERE FALSE)")
+                    # the practice's own organization NPIs, found by its legal
+                    # name in the NPPES file (payers list the clinicians)
+                    nppes = self.dir / "nppes_cache.parquet"
+                    orgs = named_orgs_sql(sql_path(nppes)) if nppes.exists() else NO_NAMED_ORGS
+                    sql = (f"WITH n AS ({names}), "
+                           f"nmo AS (SELECT x.tin_value, x.prim, {org_clinic_only_sql('x.prim')} AS named_clinic "
+                           f"       FROM (SELECT n.tin_value, list_sort(list_distinct(flatten(list(o.prim)))) AS prim "
+                           f"             FROM n JOIN {tdr} td2 ON td2.tin_value = n.tin_value "
+                           f"             JOIN {orgs} o ON o.k = {norm_sql('n.practice_name')} "
+                           f"                  AND list_contains(td2.states, o.st) "
+                           f"             WHERE n.name_source IN ('nppes_org', 'cms_dac') GROUP BY 1) x) "
+                           f"SELECT n.*, list_sort(list_distinct(list_concat("
+                           f"coalesce(p.org_taxonomies, []::VARCHAR[]), coalesce(nmo.prim, []::VARCHAR[])))) "
+                           f"AS org_taxonomies, "
+                           f"(coalesce(p.org_clinic, FALSE) OR coalesce(nmo.named_clinic, FALSE)) AS org_clinic, "
+                           f"p.n_addr, p.n_hosp_addr, p.n_snf_addr, "
                            f"p.mc_npis, p.mc_ptpp, p.mc_ptpp_share, p.mc_office_share, "
                            f"{PRACTICE_TYPE_SQL} AS practice_type, {TYPE_REASON_SQL} AS type_reason "
-                           f"FROM ({names}) n LEFT JOIN ({prof}) p ON p.tin_value = n.tin_value "
+                           f"FROM n LEFT JOIN ({prof}) p ON p.tin_value = n.tin_value "
+                           f"LEFT JOIN nmo ON nmo.tin_value = n.tin_value "
                            f"LEFT JOIN {tdr} td ON td.tin_value = n.tin_value")
                     con.execute(f"COPY ({sql} ORDER BY n.tin_value) TO '{sql_path(tmp_n)}' "
                                 "(FORMAT PARQUET)")

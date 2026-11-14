@@ -127,6 +127,8 @@ _MARKET_TEXT = ("month", "prev_month", "billing_class", "discipline", "pos", "ci
                 "plan", "peer_set", "primary_discipline", "entity_kind", "peer_group")
 # who the comparison practices are (0.8.6, mrfx/naming.py practice_type)
 PEER_GROUPS = {"clinics": "outpatient rehab clinics",
+               "org": "practices with an organization NPI registered as a therapy clinic "
+                      "or therapist group (261QP2000X, 225100000X …)",
                "therapy": "therapy practices (PT/OT/SLP clinician mix)",
                "all": "every practice the payer prices"}
 _MARKET_FLAGS = ("base_only", "include_assistant", "include_non_dollar", "therapy_only",
@@ -566,6 +568,10 @@ def _practice_attr_where(market: dict) -> tuple[list, list]:
         clauses.append("td.practice_type = 'outpatient_clinic'")
     elif group == "therapy":
         clauses.append("coalesce(td.is_therapy, FALSE)")
+    elif group == "org":
+        # the organization NPI's own NPPES registration alone: one a payer
+        # lists, or the NPPES organization of the practice's legal name
+        clauses.append("coalesce(td.org_clinic, FALSE)")
     if market.get("org_taxonomy"):
         clauses.append("list_has_any(coalesce(td.org_taxonomies, []::VARCHAR[]), ?::VARCHAR[])")
         params.append(list(market["org_taxonomy"]))
@@ -2566,8 +2572,13 @@ def clinics_paid_more(store: Store, subject: str, payer: str, market: dict, *,
         tin = x.pop("_tin")
         nm = info.get(tin, {})
         pt, why, n_npi = meta.get(tin, (None, None, None))
+        cities = list(nm.get("top_cities") or [])
+        if level == "city" and city:
+            # every clinic on a city list has a clinician there (the filter),
+            # though a multi-site group's top three may be elsewhere — lead with it
+            cities = [city] + [c for c in cities if c != city][:2]
         x.update(rank=rank, tin=mask_tin(tin), name=nm.get("practice_name") or f"TIN {mask_tin(tin)}",
-                 name_source=nm.get("name_source"), cities=nm.get("top_cities") or [],
+                 name_source=nm.get("name_source"), cities=cities,
                  practice_type=pt, type_reason=why, npi_count=n_npi)
     group = PEER_GROUPS.get(m.get("peer_group"), "every practice the payer prices")
     where = f"{city}, {state}" if level == "city" else state

@@ -280,17 +280,55 @@ function moveTip(ev) {
 function hideTip() { tip.style.display = "none"; }
 
 /* ---------- nav ---------- */
-$$("nav button").forEach((b) => b.addEventListener("click", () => switchView(b.dataset.view)));
+// Two menu entries each gather screens that answer one question (0.8.6):
+// "My rates" (your rate card; how you sit against the market) and "Market
+// rates" (browse every rate; one code; a code's market; a payer's clinics).
+// Each member keeps its own screen; a tab strip moves between them.
+const VIEW_GROUPS = {
+  myrates: { label: "My rates", views: [["ratecard", "Rate card & visit value"], ["benchmark", "Benchmark vs the market"]] },
+  market: { label: "Market rates", views: [["explorer", "Browse rates"], ["cpt", "By code"],
+                                           ["markets", "A code's market"], ["roster", "A payer's clinics"]] },
+};
+const groupOf = (view) => Object.keys(VIEW_GROUPS).find((g) => VIEW_GROUPS[g].views.some(([v]) => v === view));
+function renderSubtabs(view) {
+  $$(".subtabs").forEach((el) => el.remove());
+  const g = groupOf(view);
+  if (!g) return;
+  const sec = $(`#view-${view}`);
+  if (!sec) return;
+  const bar = document.createElement("div");
+  bar.className = "subtabs";
+  bar.innerHTML = VIEW_GROUPS[g].views.map(([v, label]) =>
+    `<button data-subview="${v}" class="${v === view ? "active" : ""}">${esc(label)}</button>`).join("");
+  bar.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-subview]");
+    if (b && b.dataset.subview !== state.view) switchView(b.dataset.subview);
+  });
+  sec.prepend(bar);
+}
+$$("nav button").forEach((b) => b.addEventListener("click", () => {
+  // a group's entry reopens the member last used
+  const g = b.dataset.group;
+  switchView(g && state.lastInGroup && state.lastInGroup[g] ? state.lastInGroup[g] : b.dataset.view);
+}));
+renderSubtabs(state.view);   // the screen the page opens on (no switchView ran)
 function switchView(view) {
   state.view = view;
   // the address bar follows the screen (review 13 6.4); a link's own
   // subject/state stay while that link is being opened
   if (!_openingHash && parseHash().view !== view) setHash(view, undefined, true);
-  $$("nav button").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
+  const g = groupOf(view);
+  if (g) (state.lastInGroup = state.lastInGroup || {})[g] = view;
+  $$("nav button").forEach((b) => b.classList.toggle("active",
+    b.dataset.view === view || (g && b.dataset.group === g)));
   $$(".view").forEach((v) => v.classList.toggle("active", v.id === `view-${view}`));
-  const active = $$("nav button").find((b) => b.dataset.view === view);
+  renderSubtabs(view);
+  const active = $$("nav button").find((b) => b.dataset.view === view || (g && b.dataset.group === g));
   const tt = $("#topbar-title");
-  if (active && tt) tt.textContent = active.textContent;
+  if (active && tt) {
+    const member = g && VIEW_GROUPS[g].views.find(([v]) => v === view);
+    tt.textContent = member ? `${VIEW_GROUPS[g].label} — ${member[1]}` : active.textContent;
+  }
   clearInterval(state.filesTimer);
   if (view !== "files") stopAnalyticsPoll();
   // the tracker-import poll belongs to the Medicare tab; leaving it stops it
@@ -341,7 +379,7 @@ const DEEP = {
   changes: { subject: "#ch-subject", ready: "#ch-month", run: () => runChanges() },
   medicare: { subject: "#md-subject", run: () => runMedicareOrg() },
 };
-function viewExists(v) { return $$("nav button").some((b) => b.dataset.view === v); }
+function viewExists(v) { return !!groupOf(v) || $$("nav button").some((b) => b.dataset.view === v); }
 function parseHash(h) {
   const raw = (h == null ? location.hash : h).replace(/^#/, "");
   const i = raw.indexOf("?");
@@ -1245,7 +1283,7 @@ function renderRoster(out, d) {
   // rendering a real table, or the table inherits placeholder framing
   out.classList.toggle("empty", !d.organizations.length);
   if (!d.organizations.length) {
-    out.innerHTML = `<div class="empty"><h3>No organizations found</h3>No practices publish therapy rates with ${esc(d.payer)} under the current filters. ${$("#ro-peer").value !== "all" ? "\"Compare against\" is limited to " + ($("#ro-peer").value === "clinics" ? "outpatient rehab clinics" : "therapy practices") + " — choose \"all practices\", or let NPI identification finish, to see more." : "Widen the state/discipline or lower min codes."}</div>`;
+    out.innerHTML = `<div class="empty"><h3>No organizations found</h3>No practices publish therapy rates with ${esc(d.payer)} under the current filters. ${$("#ro-peer").value !== "all" ? "\"Compare against\" is limited to " + $("#ro-peer").selectedOptions[0].textContent + " — choose \"all practices\", or let NPI identification finish, to see more." : "Widen the state/discipline or lower min codes."}</div>`;
     return;
   }
   const rows = d.organizations.map((o, i) => `<tr>
@@ -4829,7 +4867,7 @@ async function runLeads() {
 function renderLeads(out, data) {
   if (!data.leads.length) {
     const therapyOn = $("#ld-peer") && $("#ld-peer").value !== "all";
-    out.innerHTML = `<div class="empty"><h3>No leads found</h3>No practices at or below p${data.threshold_percentile} that price at least ${data.min_codes} codes with a market. Widen the cutoff or lower the min codes.${therapyOn ? ` <br><span class="muted">"Compare against" is limited to ${$("#ld-peer").value === "clinics" ? "outpatient rehab clinics" : "therapy practices"} — it excludes hospital systems, facilities and physician groups (and practices not yet identified). Choose "all practices", or let NPI identification finish, to see more.</span>` : ""}</div>`;
+    out.innerHTML = `<div class="empty"><h3>No leads found</h3>No practices at or below p${data.threshold_percentile} that price at least ${data.min_codes} codes with a market. Widen the cutoff or lower the min codes.${therapyOn ? ` <br><span class="muted">"Compare against" is limited to ${esc($("#ld-peer").selectedOptions[0].textContent)} — it excludes hospital systems, facilities and physician groups (and practices not yet identified). Choose "all practices", or let NPI identification finish, to see more.</span>` : ""}</div>`;
     return;
   }
   const rows = data.leads.map((l) => `<tr>

@@ -182,7 +182,7 @@ def network_leverage(store: Store, subject: str, payer: str,
     # dossier said "6 other therapy practices" over 5 PT clinics and an
     # internal-medicine group). Unknown taxonomy is "not identified yet",
     # never "not therapy", so only an explicit False counts against.
-    n_non = (0 if m.get("therapy_only") or m.get("peer_group") in ("clinics", "therapy")
+    n_non = (0 if m.get("therapy_only") or m.get("peer_group") in ("clinics", "org", "therapy")
              else sum(1 for a in alts if a[5] is False))
     s_alt = "s" if n_alt != 1 else ""
     alts_phrase = (f"{n_alt} other therapy practice{s_alt}" if not n_non else

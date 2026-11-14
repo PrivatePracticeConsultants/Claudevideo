@@ -151,6 +151,15 @@ def test_org_npi_taxonomy_filter_and_validation(typed):
                                                  "org_taxonomy": ["261qp2000x"]})
     row = next(r for r in got["rows"] if r["billing_code"] == "97110")
     assert (row["n_peers"], row["p50"]) == (1, 40.0)
+    # "Compare against: clinics by organization NPI taxonomy" — RIVER PT
+    # (261QP2000X) and HILL THERAPY (a group NPI as 225100000X); not CITY
+    # HOSPITAL (282N00000X) nor any practice without an org NPI
+    org = compute_benchmark(typed, "500000005", {"month": "latest", "state": "TN",
+                                                 "peer_group": "org"})
+    row = next(r for r in org["rows"] if r["billing_code"] == "97110")
+    assert (row["n_peers"], row["p50"]) == (2, 41.0)
+    assert "organization NPI registered as a therapy clinic" in market_in_words(
+        normalize_market({"peer_group": "org"}))
     with pytest.raises(BenchmarkError, match="peer_group must be one of"):
         normalize_market({"peer_group": "nursing"})
 
@@ -206,3 +215,135 @@ def test_negotiate_lists_the_clinics_the_payer_pays_more(typed):
     assert client.post("/api/negotiate/paid-more", json=body).json()["clinics_paid_more"] == 1
     csv = client.post("/api/negotiate/paid-more.csv", json=body).text
     assert "HILL THERAPY PC" in csv and "YOUR RATE" in csv and "rate_97110" in csv
+
+
+def test_a_city_list_leads_with_that_city(typed, monkeypatch):
+    """A multi-site practice on the NASHVILLE list whose three biggest sites are
+    elsewhere (2 Memphis, 2 Jackson, 2 Knoxville clinicians, 1 Nashville) is
+    shown as 'NASHVILLE; …' — the reason it is on the list. was: its top
+    three only, with no sign of Nashville (live: a Smyrna list read as
+    Nashville / Chattanooga clinics)."""
+    import mrfx.benchmark as bm
+    from mrfx.benchmark import clinics_paid_more
+    recs = []
+    sites = [("MEMPHIS", "381030000"), ("MEMPHIS", "381030000"), ("JACKSON", "383010000"),
+             ("JACKSON", "383010000"), ("KNOXVILLE", "379020000"), ("KNOXVILLE", "379020000"),
+             ("NASHVILLE", "372030000")]
+    for i, (city, z) in enumerate(sites, 1):
+        npi = f"50000009{i:02d}"
+        typed.save_npi(npi, f"PT {i}", PT, None, city, "TN", entity_type="NPI-1",
+                       address=f"{i} MAIN ST", zip_code=z, taxonomy_codes=PT)
+        recs.append(dict(RATE, tin_value="500000009", tin_type="ein", npi=npi,
+                         negotiated_rate=45.0, source_file="tn2.json", state="TN"))
+    with typed.rates_part_writer("tn2.json") as w:
+        w.write_batch(recs)
+    typed.upsert_file("tn2.json", payer="BCBS TN", file_type="in_network", status="done",
+                      rows_emitted=len(recs), finished_at=FINISHED_NOW)
+    typed.rebuild_rollups()
+    typed.refresh_practice_names(force=True)
+    top = typed.practice_names_for(["500000009"], "TN")["500000009"]["top_cities"]
+    assert "NASHVILLE" not in top and len(top) == 3
+    monkeypatch.setattr(bm, "PAID_MORE_MIN_CITY", 2)
+    d = clinics_paid_more(typed, "500000001", "BCBS TN", {"month": "latest", "state": "TN"})
+    assert (d["geography"], d["where"]) == ("city", "NASHVILLE, TN")
+    delta = next(x for x in d["clinics"] if x["tin"] == "500000009")
+    assert delta["cities"][0] == "NASHVILLE" and len(delta["cities"]) == 3
+    assert delta["cities"][1:] == top[:2]
+
+
+def test_cmsref_command_reclassifies(typed, monkeypatch, capsys):
+    """`mrfx cmsref` fetches the CMS lists (here: stubbed, no network),
+    reports each source in a sentence, and re-classifies every practice."""
+    import argparse
+
+    import mrfx.cmsref as cr
+    from mrfx.cli import cmd_cmsref
+    from mrfx.config import MrfxConfig
+    monkeypatch.setattr(cr, "ensure_cmsref", lambda store, d: {
+        "facilities": "current", "medicare": {"year": "2024", "rows": None, "fetched": False}})
+    cfg = MrfxConfig(store_dir=typed.dir, cms_dac="off", cms_reference="off", port=1)
+    assert cmd_cmsref(cfg, argparse.Namespace(refresh=False)) == 0
+    out = capsys.readouterr().out
+    assert "address lists: already current." in out
+    assert "Medicare Physician & Other Practitioners, 2024: already current." in out
+    assert "Practices re-classified: " in out and "outpatient_clinic 3" in out
+    monkeypatch.setattr(cr, "ensure_cmsref", lambda store, d: {
+        "facilities": "not loaded: HTTP 503", "medicare": "not loaded: HTTP 503"})
+    assert cmd_cmsref(cfg, argparse.Namespace(refresh=False)) == 1
+    assert "not loaded: HTTP 503" in capsys.readouterr().err
+
+
+def test_merged_menu_entries_cover_every_screen():
+    """My rates (Rate card + Benchmark) and Market rates (Explorer, Code,
+    Markets, Payer roster) are one menu entry each; every member keeps its
+    section, so old links (#benchmark, #roster, …) still open it."""
+    import re
+    from pathlib import Path
+    web = Path(__file__).resolve().parents[2] / "mrfx" / "web"
+    html = (web / "index.html").read_text(encoding="utf-8")
+    js = (web / "app.js").read_text(encoding="utf-8")
+    nav = re.search(r"<nav.*?</nav>", html, re.S).group(0)
+    assert 'data-group="myrates"' in nav and 'data-group="market"' in nav
+    for gone in ('data-view="benchmark"', 'data-view="cpt"', 'data-view="markets"',
+                 'data-view="roster"'):
+        assert gone not in nav
+    groups = re.search(r"const VIEW_GROUPS = \{(.*?)\n\};", js, re.S).group(1)
+    members = re.findall(r'\["([a-z]+)", "', groups)
+    assert members == ["ratecard", "benchmark", "explorer", "cpt", "markets", "roster"]
+    for v in members:
+        assert f'id="view-{v}"' in html
+    assert "!!groupOf(v) ||" in js       # viewExists: a link to a member still opens it
+
+
+def test_a_practice_found_by_its_legal_name_in_nppes(typed, tmp_path):
+    """(org NPI taxonomy) Payers list clinicians, rarely the clinic's own
+    organization NPI. A practice named from the CMS file is looked up by
+    that legal name (normalized) among NPPES organization NPIs in its state:
+    registered ONLY as therapy (225100000X) -> its organization is a
+    therapy clinic (MAIN STREET PHYSICAL THERAPY, the GUS/HAL TIN); a
+    multi-specialty registration (207Q00000X + 225100000X) is not (ELM
+    GROUP); a namesake in another state never counts.
+    was: only org NPIs a payer listed counted — 4 of 5,660 TN practices."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from mrfx.benchmark import compute_benchmark
+    dac = tmp_path / "DAC_NationalDownloadableFile.csv"
+    head = ("NPI,Ind_PAC_ID,Ind_enrl_ID,Provider Last Name,Provider First Name,Facility Name,"
+            "org_pac_id,num_org_mem,adr_ln_1,City/Town,State,ZIP Code")
+    rows = [("5000000501", "Main Street Physical Therapy, L.L.C."),
+            ("5000000502", "Main Street Physical Therapy, L.L.C."),
+            ("5000000701", "ELM GROUP PC"), ("5000000702", "ELM GROUP PC")]
+    dac.write_text(head + "\n" + "\n".join(
+        f'{n},{9000 + i},I{i},L,F,"{o}",{5000 + i},2,"1 MAIN ST",NASHVILLE,TN,37203'
+        for i, (n, o) in enumerate(rows)) + "\n")
+    typed.load_dac(dac, release="2026-10-30", source="test")
+    blank = dict(taxonomy_codes=None, city="NASHVILLE", address="1 MAIN ST", zip="37203",
+                 phone=None, enumeration_date=None, deactivation_date=None, reactivation_date=None)
+    orgs = [dict(blank, npi="1999999901", org_name="MAIN STREET PHYSICAL THERAPY LLC",
+                 entity_type="NPI-2", taxonomy_code="225100000X", state="TN"),
+            dict(blank, npi="1999999902", org_name="ELM GROUP, P.C.", entity_type="NPI-2",
+                 taxonomy_code="207Q00000X", state="TN"),
+            dict(blank, npi="1999999903", org_name="ELM GROUP PC", entity_type="NPI-2",
+                 taxonomy_code="225100000X", state="TN"),
+            # a namesake in another state, registered as a therapy clinic
+            dict(blank, npi="1999999904", org_name="ELM GROUP", entity_type="NPI-2",
+                 taxonomy_code="261QP2000X", state="KY")]
+    pq.write_table(pa.Table.from_pylist(orgs), typed.dir / "nppes_cache.parquet")
+    assert typed.refresh_practice_names() is True      # the NPPES file is in the stamp
+    with typed.connect() as con:
+        got = {t: (n, s, k, oc, why) for t, n, s, k, oc, why in con.execute(
+            "SELECT tin_value, display_name, name_source, practice_type, org_clinic, type_reason "
+            "FROM tin_directory WHERE tin_value IN ('500000005', '500000007')").fetchall()}
+    name, src, kind, oc, why = got["500000005"]
+    assert (src, kind, oc) == ("cms_dac", "outpatient_clinic", True)
+    assert "registered in NPPES only as a therapy clinic or therapist group (225100000X)" in why
+    assert got["500000007"][2:4] == ("outpatient_clinic", False)    # Medicare evidence, not org
+    with typed.connect() as con:      # matched (both TN registrations), then refused as mixed
+        assert con.execute("SELECT org_taxonomies FROM tin_directory WHERE tin_value = "
+                           "'500000007'").fetchone()[0] == ["207Q00000X", "225100000X"]
+    # "Compare against: clinics by organization NPI taxonomy" now holds it
+    org = compute_benchmark(typed, "500000008", {"month": "latest", "state": "TN",
+                                                 "peer_group": "org"})
+    row = next(r for r in org["rows"] if r["billing_code"] == "97110")
+    assert (row["n_peers"], row["p50"]) == (3, 40.0)        # $40, $42 and the $30 TIN

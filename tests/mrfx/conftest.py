@@ -29,6 +29,7 @@ def cfg(tmp_path) -> MrfxConfig:
         confirm_over_gb=5.0,
         # never a ~900 MB CMS download from a test that runs serve (0.8.5)
         cms_dac="off",
+        cms_reference="off",
     )
     c.ensure_dirs()
     return c

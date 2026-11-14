@@ -518,3 +518,10 @@ code.inline { background: var(--grid); border-radius: 4px; padding: 1px 5px; fon
 .vv-table tr.vv-detail > td { background: color-mix(in srgb, var(--accent) 4%, transparent); padding: 8px 10px 12px; }
 .vv-table tr.vv-detail:hover > td { background: color-mix(in srgb, var(--accent) 4%, transparent); }
 .vv-plist { white-space: normal; }
+
+/* a merged menu entry's screens (0.8.6): My rates, Market rates */
+.subtabs { display: flex; gap: 4px; margin: 0 0 12px; border-bottom: 1px solid var(--border); }
+.subtabs button { background: none; border: 0; border-bottom: 2px solid transparent; padding: 8px 12px;
+  font: inherit; font-size: 13px; color: var(--muted); cursor: pointer; }
+.subtabs button:hover { color: var(--ink); }
+.subtabs button.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }

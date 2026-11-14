@@ -972,6 +972,72 @@ Pinned by `tests/mrfx/test_review14.py` (every Group 1-3 case fails on
   paste is durable (`meta('pending_paste')`, `resume_pending_paste`). A
   hospital of an already-loaded name from another file is refused.
 
+### 0.8.6 additions (Nov 14, 2026) — outpatient rehab clinics as the comparison group
+
+User ask: optimize the outputs for a private practice owner — compare with
+other outpatient rehab clinics; name the clinics in their city/state a
+payer pays more; filter by org NPI taxonomy; use Medicare place of service
+and CMS hospital / nursing-home addresses. Review: `docs/OUTPUTS_REVIEW.md`.
+Tests: `tests/mrfx/test_practice_type.py` (9, all fail on 0.8.5).
+
+- **`naming.profile_sql` + `PRACTICE_TYPE_SQL` / `TYPE_REASON_SQL`** (run in
+  `Store.refresh_practice_names`, columns of `practice_names_tbl`, exposed by
+  the `tin_directory` view: `practice_type`, `type_reason`, `org_taxonomies`,
+  `org_clinic`). Ordered rules: hospital (hospital org NPI, directory
+  has_hospital, or > half the distinct practice addresses at CMS-listed
+  hospitals — `cms_facilities`, `cmsref.addr_key_sql` = ZIP5|street with the
+  unit dropped and words abbreviated) → facility (same with nursing homes /
+  facility taxonomies) → outpatient_clinic (org NPI therapy-registered —
+  `org_clinic_sql`; the NAMED org (below) registered only as therapy —
+  `org_clinic_only_sql`; directory is_therapy; or Medicare PTPP share of
+  therapy SERVICES >= 0.5 with therapists >= half the classified NPIs) →
+  physician_therapy (PTPP share >= 0.5, therapists >= 25%) → physician_other
+  (any classified NPI) → unknown. Before the refresh has run, the view falls
+  back to the directory flags (never an empty market).
+- **Named organizations** (`naming.named_orgs_sql`): payers list clinicians,
+  rarely the clinic's org NPI (4 of 5,660 TN TINs had one). The practice's
+  resolved legal name (name_source nppes_org / cms_dac) is matched,
+  normalized (`norm_sql`), to ACTIVE NPI-2 rows of `store/nppes_cache.parquet`
+  in one of the TIN's states; their PRIMARY taxonomies (`prim`) join
+  `org_taxonomies`, and all-therapy -> `org_clinic`. Measured on TN: 132
+  org-registered practices (128 typed clinic). Address matching against
+  therapy-org NPPES addresses was tried and REJECTED: 1,090 physician TINs
+  "matched" (multi-tenant buildings; the key drops the suite). The NPPES file
+  is in `_names_stamp`; NAMES_SCHEMA = 3.
+- **Medicare place of service**: `cmsref.fetch_medicare_therapy` pages the
+  CMS API (by Provider and Service, newest year from data.json; 78 codes,
+  474,201 rows nationally for 2024, ~3 min) into utilization/<year>.parquet
+  with provider_type. Finding: POS 'F' is nearly absent for therapy codes
+  (TN 97110: 1,959 office vs 1 facility rows) — the useful signal is WHO
+  bills (therapist-in-private-practice provider types), shares weighted by
+  services so a physician's few 97110s don't outvote the therapists.
+- **Peer groups** (`benchmark.PEER_GROUPS`, `market.peer_group`, a
+  PEER_ONLY_KEY like therapy_only): clinics (`td.practice_type =
+  'outpatient_clinic'`), org (`td.org_clinic`), therapy (`td.is_therapy`),
+  all. Free-form `market.org_taxonomy` (a code list, `list_has_any` on
+  org_taxonomies) is API-only. Every comparison screen sends its
+  "Compare against" select (ids `{b,rc,ng,mk,ro,ld}-peer`), default clinics.
+  `leverage` counts no non-therapy practices for clinics/org/therapy.
+- **`benchmark.clinics_paid_more(store, subject, payer, market, limit)`**
+  (`POST /api/negotiate/paid-more` + `.csv`; Negotiate's `#ng-paidmore`
+  panel): every peer (default clinics unless the caller sent a peer_group)
+  the payer prices for >= 1 of the subject's codes on the subject's basis,
+  in the subject's main city when >= PAID_MORE_MIN_CITY (5) comparable
+  practices are there, else the state; ranked codes paid more DESC, median
+  gap DESC, TIN (unique). On a city list a practice's cities lead with that
+  city (it matched the filter; its top three may be elsewhere). TN: 0.8 s.
+- **Menus** (app.js `VIEW_GROUPS`): "My rates" = ratecard + benchmark,
+  "Market rates" = explorer + cpt + markets + roster. One nav button per
+  group (`data-group`), a `.subtabs` strip rendered into the active member's
+  section, the group's button reopens its last member; `viewExists` accepts
+  members so `#benchmark` / `#roster` links keep working. Sections, ids and
+  initializers are unchanged.
+- **serve**: `mrfx-cms-ref` thread (`cms_reference: auto|off`,
+  `cms_ref_dir`) runs `cmsref.ensure_cmsref` 3 min after start, then
+  monthly (meta cmsref_checked_at); each source fails alone. `mrfx cmsref
+  [--refresh]` by hand. data.cms.gov refuses a User-Agent containing
+  "Explorer" (403) — every CMS fetch sends `mrfx/<version>`.
+
 ### 0.8.5 additions (Nov 14, 2026) — practice names and cities, one ranked rule
 
 Field report: a BCBS Tennessee visit-value export named TINs with no org
