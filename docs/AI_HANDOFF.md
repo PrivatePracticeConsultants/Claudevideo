@@ -1013,7 +1013,8 @@ Tests: `tests/mrfx/test_practice_type.py` (9, all fail on 0.8.5).
   services so a physician's few 97110s don't outvote the therapists.
 - **Peer groups** (`benchmark.PEER_GROUPS`, `market.peer_group`, a
   PEER_ONLY_KEY like therapy_only): clinics (`td.practice_type =
-  'outpatient_clinic'`), org (`td.org_clinic`), therapy (`td.is_therapy`),
+  'outpatient_clinic'`), org (`td.org_clinic`, not typed hospital / facility — a
+  hospital TIN's org NPIs listed 225100000X among 14 codes), therapy (`td.is_therapy`),
   all. Free-form `market.org_taxonomy` (a code list, `list_has_any` on
   org_taxonomies) is API-only. Every comparison screen sends its
   "Compare against" select (ids `{b,rc,ng,mk,ro,ld}-peer`), default clinics.

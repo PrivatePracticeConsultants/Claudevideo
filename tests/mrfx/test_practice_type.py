@@ -313,7 +313,9 @@ def test_a_practice_found_by_its_legal_name_in_nppes(typed, tmp_path):
             "org_pac_id,num_org_mem,adr_ln_1,City/Town,State,ZIP Code")
     rows = [("5000000501", "Main Street Physical Therapy, L.L.C."),
             ("5000000502", "Main Street Physical Therapy, L.L.C."),
-            ("5000000701", "ELM GROUP PC"), ("5000000702", "ELM GROUP PC")]
+            ("5000000701", "ELM GROUP PC"), ("5000000702", "ELM GROUP PC"),
+            # therapists at a CMS-listed hospital address (typed hospital)
+            ("5000000301", "CAL DEE REHAB INC"), ("5000000302", "CAL DEE REHAB INC")]
     dac.write_text(head + "\n" + "\n".join(
         f'{n},{9000 + i},I{i},L,F,"{o}",{5000 + i},2,"1 MAIN ST",NASHVILLE,TN,37203'
         for i, (n, o) in enumerate(rows)) + "\n")
@@ -326,6 +328,8 @@ def test_a_practice_found_by_its_legal_name_in_nppes(typed, tmp_path):
                  taxonomy_code="207Q00000X", state="TN"),
             dict(blank, npi="1999999903", org_name="ELM GROUP PC", entity_type="NPI-2",
                  taxonomy_code="225100000X", state="TN"),
+            dict(blank, npi="1999999905", org_name="CAL DEE REHAB, INC.", entity_type="NPI-2",
+                 taxonomy_code="225100000X", state="TN"),
             # a namesake in another state, registered as a therapy clinic
             dict(blank, npi="1999999904", org_name="ELM GROUP", entity_type="NPI-2",
                  taxonomy_code="261QP2000X", state="KY")]
@@ -334,7 +338,8 @@ def test_a_practice_found_by_its_legal_name_in_nppes(typed, tmp_path):
     with typed.connect() as con:
         got = {t: (n, s, k, oc, why) for t, n, s, k, oc, why in con.execute(
             "SELECT tin_value, display_name, name_source, practice_type, org_clinic, type_reason "
-            "FROM tin_directory WHERE tin_value IN ('500000005', '500000007')").fetchall()}
+            "FROM tin_directory WHERE tin_value IN ('500000003', '500000005', '500000007')"
+        ).fetchall()}
     name, src, kind, oc, why = got["500000005"]
     assert (src, kind, oc) == ("cms_dac", "outpatient_clinic", True)
     assert "registered in NPPES only as a therapy clinic or therapist group (225100000X)" in why
@@ -342,7 +347,10 @@ def test_a_practice_found_by_its_legal_name_in_nppes(typed, tmp_path):
     with typed.connect() as con:      # matched (both TN registrations), then refused as mixed
         assert con.execute("SELECT org_taxonomies FROM tin_directory WHERE tin_value = "
                            "'500000007'").fetchone()[0] == ["207Q00000X", "225100000X"]
-    # "Compare against: clinics by organization NPI taxonomy" now holds it
+    # registered as therapy, but most of its addresses are a CMS hospital
+    assert got["500000003"][2:4] == ("hospital", True)
+    # "Compare against: clinics by organization NPI taxonomy" now holds it —
+    # and not the hospital-typed one ($55)
     org = compute_benchmark(typed, "500000008", {"month": "latest", "state": "TN",
                                                  "peer_group": "org"})
     row = next(r for r in org["rows"] if r["billing_code"] == "97110")

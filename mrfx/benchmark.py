@@ -570,8 +570,10 @@ def _practice_attr_where(market: dict) -> tuple[list, list]:
         clauses.append("coalesce(td.is_therapy, FALSE)")
     elif group == "org":
         # the organization NPI's own NPPES registration alone: one a payer
-        # lists, or the NPPES organization of the practice's legal name
-        clauses.append("coalesce(td.org_clinic, FALSE)")
+        # lists, or the NPPES organization of the practice's legal name — not
+        # a hospital / facility that also registered a rehab NPI
+        clauses.append("coalesce(td.org_clinic, FALSE) "
+                       "AND td.practice_type NOT IN ('hospital', 'facility')")
     if market.get("org_taxonomy"):
         clauses.append("list_has_any(coalesce(td.org_taxonomies, []::VARCHAR[]), ?::VARCHAR[])")
         params.append(list(market["org_taxonomy"]))
