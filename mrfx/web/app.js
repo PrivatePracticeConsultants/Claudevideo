@@ -974,7 +974,7 @@ function marketFromMk() {
   if (st) market.state = st.toUpperCase();
   if ($("#mk-disc").value) market.discipline = $("#mk-disc").value;
   if (payer) market.payers = [payer];
-  if ($("#mk-therapy").checked) market.therapy_only = true;
+  market.peer_group = $("#mk-peer").value;
   return market;
 }
 
@@ -1217,7 +1217,7 @@ function rosterBody() {
   const market = { month: "latest" };
   if ($("#ro-state").value.trim()) market.state = $("#ro-state").value.trim().toUpperCase();
   if ($("#ro-disc").value) market.discipline = $("#ro-disc").value;
-  if ($("#ro-therapy").checked) market.therapy_only = true;
+  market.peer_group = $("#ro-peer").value;
   // send an explicit limit so the CSV contains exactly the list on screen —
   // the endpoints' own defaults differ (500 vs 2000), which made the "showing
   // the first 500" note wrong for the export
@@ -1245,7 +1245,7 @@ function renderRoster(out, d) {
   // rendering a real table, or the table inherits placeholder framing
   out.classList.toggle("empty", !d.organizations.length);
   if (!d.organizations.length) {
-    out.innerHTML = `<div class="empty"><h3>No organizations found</h3>No practices publish therapy rates with ${esc(d.payer)} under the current filters. ${$("#ro-therapy").checked ? "\"Therapy only\" is on — uncheck it, or let NPI identification finish, to see more." : "Widen the state/discipline or lower min codes."}</div>`;
+    out.innerHTML = `<div class="empty"><h3>No organizations found</h3>No practices publish therapy rates with ${esc(d.payer)} under the current filters. ${$("#ro-peer").value !== "all" ? "\"Compare against\" is limited to " + ($("#ro-peer").value === "clinics" ? "outpatient rehab clinics" : "therapy practices") + " — choose \"all practices\", or let NPI identification finish, to see more." : "Widen the state/discipline or lower min codes."}</div>`;
     return;
   }
   const rows = d.organizations.map((o, i) => `<tr>
@@ -2216,7 +2216,7 @@ function benchmarkPayload() {
     billing_class: $("#b-class").value,
     target_percentile: +$("#b-target").value,
   };
-  if ($("#b-therapy").checked) market.therapy_only = true;
+  market.peer_group = $("#b-peer").value;
   if ($("#b-disc").value) market.discipline = $("#b-disc").value;
   if ($("#b-state").value.trim()) market.state = $("#b-state").value.trim();
   if ($("#b-city").value.trim()) market.city = $("#b-city").value.trim();
@@ -2669,7 +2669,7 @@ async function runProposal() {
 // visit is worth" panels sent month + therapy only, so a name used in two
 // states was the wrong practice there (review 10 item 2.9)
 function ngMarket() {
-  const market = { month: $("#ng-month").value || "latest", therapy_only: $("#ng-therapy").checked };
+  const market = { month: $("#ng-month").value || "latest", peer_group: $("#ng-peer").value };
   if ($("#ng-state").value.trim()) market.state = $("#ng-state").value.trim().toUpperCase();
   if ($("#ng-disc").value) market.discipline = $("#ng-disc").value;
   return market;
@@ -2681,7 +2681,7 @@ function negotiatePayload() {
   const month = $("#ng-month").value || "latest"; // empty = newest rate per contract
   if (!subject) throw new Error("enter your practice (subject)");
   if (!payer) throw new Error("pick the payer you're negotiating with");
-  const market = { month, therapy_only: $("#ng-therapy").checked };
+  const market = { month, peer_group: $("#ng-peer").value };
   if ($("#ng-state").value.trim()) market.state = $("#ng-state").value.trim().toUpperCase();
   if ($("#ng-disc").value) market.discipline = $("#ng-disc").value;
   return { subject, payer, market, comparables: state.ngComps.slice() };
@@ -2791,7 +2791,8 @@ function visitMarketPayload() {
   if (!st) throw new Error("pick a State above — a visit's value is a market figure, and a market is one state");
   if (!disc) throw new Error("pick a Discipline above (PT, OT or SLP) — a visit is priced on one discipline's rates");
   const market = { month: $("#rc-month").value || "latest", state: st, discipline: disc,
-                   payers: $$("#rc-payer-chips .chip.on").map((c) => c.dataset.payer) };
+                   payers: $$("#rc-payer-chips .chip.on").map((c) => c.dataset.payer),
+                   peer_group: $("#rc-peer").value };
   const subject = $("#rc-subject").value.trim();
   return { market, ...visitBasket(), ...(subject ? { subject } : {}) };
 }
@@ -3110,7 +3111,7 @@ function ratecardPayload() {
   // scope the per-cell peer comparison (blank = pooled, and the printable card
   // prints a national-comparison banner saying so)
   if ($("#rc-state").value.trim()) market.state = $("#rc-state").value.trim().toUpperCase();
-  if ($("#rc-therapy").checked) market.therapy_only = true;
+  market.peer_group = $("#rc-peer").value;
   // the printable card and its CSV carry "Visit value in this market" when
   // its two required scopes are set (review 12 Group 3)
   const vm = market.state && market.discipline ? { visit_market: true, ...visitBasket() } : {};
@@ -3746,7 +3747,7 @@ async function runFloorCompare() {
       payer: $("#ng-payer").value || null,
       state: st,
       market: { month: $("#ng-month").value || "latest",
-                therapy_only: $("#ng-therapy").checked },
+                peer_group: $("#ng-peer").value },
     });
   } catch (e) { out.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
   if (!d.loaded || !d.rows.length) {
@@ -4026,7 +4027,7 @@ async function runHospitalParity() {
       payer: $("#ng-payer").value || null,
       state: $("#hp-state").value.trim() || $("#ng-state").value.trim() || null,
       market: { month: $("#ng-month").value || "latest",
-                therapy_only: $("#ng-therapy").checked },
+                peer_group: $("#ng-peer").value },
     });
   } catch (e) { out.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
   if (!d.loaded || !d.rows.length) {
@@ -4747,7 +4748,7 @@ function leadsPayload() {
   const market = { month, payers: $$("#ld-payer-chips .chip.on").map((c) => c.dataset.payer) };
   if ($("#ld-state").value.trim()) market.state = $("#ld-state").value.trim();
   if ($("#ld-disc").value) market.discipline = $("#ld-disc").value;
-  if ($("#ld-therapy").checked) market.therapy_only = true;
+  market.peer_group = $("#ld-peer").value;
   const p = { market, threshold_percentile: +$("#ld-threshold").value, min_codes: +$("#ld-mincodes").value || 3 };
   if ($("#ld-exclude").value.trim()) p.exclude_subject = $("#ld-exclude").value.trim();
   return p;
@@ -4774,8 +4775,8 @@ async function runLeads() {
 
 function renderLeads(out, data) {
   if (!data.leads.length) {
-    const therapyOn = $("#ld-therapy") && $("#ld-therapy").checked;
-    out.innerHTML = `<div class="empty"><h3>No leads found</h3>No practices at or below p${data.threshold_percentile} that price at least ${data.min_codes} codes with a market. Widen the cutoff or lower the min codes.${therapyOn ? ` <br><span class="muted">"Therapy practices only" is on — it keeps practices whose identified providers are MOSTLY PT/OT/SLP and excludes hospital systems and physician groups (and practices not yet identified). Uncheck it, or let NPI identification finish, to see more.</span>` : ""}</div>`;
+    const therapyOn = $("#ld-peer") && $("#ld-peer").value !== "all";
+    out.innerHTML = `<div class="empty"><h3>No leads found</h3>No practices at or below p${data.threshold_percentile} that price at least ${data.min_codes} codes with a market. Widen the cutoff or lower the min codes.${therapyOn ? ` <br><span class="muted">"Compare against" is limited to ${$("#ld-peer").value === "clinics" ? "outpatient rehab clinics" : "therapy practices"} — it excludes hospital systems, facilities and physician groups (and practices not yet identified). Choose "all practices", or let NPI identification finish, to see more.</span>` : ""}</div>`;
     return;
   }
   const rows = data.leads.map((l) => `<tr>

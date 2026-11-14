@@ -367,7 +367,7 @@
       <label class="toggle" style="text-transform:none">Sort
         <select id="ro-sort"><option value="name">name</option><option value="size">size (NPIs)</option><option value="paid">best-paid</option><option value="codes">most codes</option></select>
       </label>
-      <label class="toggle" title="keep only PT/OT/SLP providers & therapy practices (by NPPES taxonomy)"><input type="checkbox" id="ro-therapy"> therapy only</label>
+      <label class="toggle" style="text-transform:none" title="who your rates are compared with: OUTPATIENT REHAB CLINICS (an organization NPI registered as a therapy clinic or therapist group, a PT/OT/SLP clinician mix, or therapists billing Medicare in private practice — and not at a CMS-listed hospital or nursing-home address), therapy practices (the clinician-mix test alone), or every practice the payer prices">Compare against <select id="ro-peer"><option value="clinics" selected>outpatient rehab clinics</option><option value="therapy">therapy practices</option><option value="all">all practices</option></select></label>
       <button class="btn primary" id="ro-run">Run</button>
       <button class="btn" id="ro-csv" disabled>Download CSV</button>
     </div>
@@ -396,7 +396,7 @@
         <input type="text" id="mk-payer" list="mk-payer-opts" placeholder="all" style="width:130px;margin-left:4px">
         <datalist id="mk-payer-opts"></datalist>
       </label>
-      <label class="toggle" title="keep only PT/OT/SLP providers & therapy practices (by NPPES taxonomy)"><input type="checkbox" id="mk-therapy"> therapy only</label>
+      <label class="toggle" style="text-transform:none" title="who your rates are compared with: OUTPATIENT REHAB CLINICS (an organization NPI registered as a therapy clinic or therapist group, a PT/OT/SLP clinician mix, or therapists billing Medicare in private practice — and not at a CMS-listed hospital or nursing-home address), therapy practices (the clinician-mix test alone), or every practice the payer prices">Compare against <select id="mk-peer"><option value="clinics" selected>outpatient rehab clinics</option><option value="therapy">therapy practices</option><option value="all">all practices</option></select></label>
       <label class="toggle" style="text-transform:none" title="a 5-digit ZIP: adds a distance-band view — does this code pay differently a short drive away?">ZIP
         <input type="text" id="mk-zip" placeholder="63103" style="width:66px;margin-left:4px">
       </label>
@@ -443,9 +443,7 @@
         <div class="field"><label>Target percentile</label>
           <select id="b-target"><option value="50">median (p50)</option><option value="75">p75</option></select>
         </div>
-        <label class="toggle" title="keep only OUTPATIENT PT/OT/SLP practices: at least 75% of the practice's identified providers are PT/OT/SLP (incl. PTA/OTA) or it is a Physical-Therapy clinic; at least half its providers must be identified; and it carries no hospital, skilled-nursing, home-health, residential or hospice NPI. Hides physician and chiropractic groups, multispecialty/physiatry rehab groups, hospital systems and facilities that merely bill 97xxx codes. Needs NPI identification.">
-          <input type="checkbox" id="b-therapy" checked> therapy practices only
-        </label>
+        <label class="toggle" style="text-transform:none" title="who your rates are compared with: OUTPATIENT REHAB CLINICS (an organization NPI registered as a therapy clinic or therapist group, a PT/OT/SLP clinician mix, or therapists billing Medicare in private practice — and not at a CMS-listed hospital or nursing-home address), therapy practices (the clinician-mix test alone), or every practice the payer prices">Compare against <select id="b-peer"><option value="clinics" selected>outpatient rehab clinics</option><option value="therapy">therapy practices</option><option value="all">all practices</option></select></label>
         <div class="field"><label>Peer set</label>
           <select id="b-peerset"><option value="">auto — all entities in market</option></select>
         </div>
@@ -505,9 +503,7 @@
         <div class="field"><label>Discipline</label>
           <select id="ng-disc"><option value="">any</option><option>PT</option><option>OT</option><option>SLP</option></select>
         </div>
-        <label class="toggle" title="market = only therapy practices (majority PT/OT/SLP, no hospitals). Needs NPI identification.">
-          <input type="checkbox" id="ng-therapy" checked> therapy practices only
-        </label>
+        <label class="toggle" style="text-transform:none" title="who your rates are compared with: OUTPATIENT REHAB CLINICS (an organization NPI registered as a therapy clinic or therapist group, a PT/OT/SLP clinician mix, or therapists billing Medicare in private practice — and not at a CMS-listed hospital or nursing-home address), therapy practices (the clinician-mix test alone), or every practice the payer prices">Compare against <select id="ng-peer"><option value="clinics" selected>outpatient rehab clinics</option><option value="therapy">therapy practices</option><option value="all">all practices</option></select></label>
         <div class="field"><label>Comparable entities <span class="muted" style="text-transform:none">(each adds a column)</span></label>
           <div style="display:flex;gap:6px">
             <input type="text" id="ng-comp" list="ng-comps" placeholder="entity name, TIN, or NPI…" style="flex:1">
@@ -657,9 +653,7 @@
         <div class="field"><label>Billing class</label>
           <select id="rc-class"><option value="professional">professional</option><option value="institutional">institutional</option></select>
         </div>
-        <label class="toggle" title="compare against OUTPATIENT PT/OT/SLP practices only (same rule as the other tabs' therapy filter) — hides physician groups, hospitals and facilities from the peer median">
-          <input type="checkbox" id="rc-therapy"> therapy practices only (peers)
-        </label>
+        <label class="toggle" style="text-transform:none" title="who your rates are compared with: OUTPATIENT REHAB CLINICS (an organization NPI registered as a therapy clinic or therapist group, a PT/OT/SLP clinician mix, or therapists billing Medicare in private practice — and not at a CMS-listed hospital or nursing-home address), therapy practices (the clinician-mix test alone), or every practice the payer prices">Compare against <select id="rc-peer"><option value="clinics" selected>outpatient rehab clinics</option><option value="therapy">therapy practices</option><option value="all">all practices</option></select></label>
         <div class="mpfs-row">
           <span id="rc-mpfs-status" class="muted">MPFS: not loaded</span>
           <span class="muted" style="text-transform:none">load one on the Benchmark tab to add % of Medicare</span>
@@ -799,9 +793,7 @@
           <select id="ld-threshold"><option value="25">at/below p25</option><option value="10">at/below p10</option><option value="40">at/below p40</option><option value="50">at/below median</option></select>
         </div>
         <div class="field"><label>Min. codes priced</label><input type="number" id="ld-mincodes" value="3" min="1" style="width:64px"></div>
-        <label class="toggle" title="keep only PT/OT/SLP providers & therapy practices (by NPPES taxonomy) — drops MDs/DOs/NPs. Needs NPI identification.">
-          <input type="checkbox" id="ld-therapy" checked> therapy practices only
-        </label>
+        <label class="toggle" style="text-transform:none" title="who your rates are compared with: OUTPATIENT REHAB CLINICS (an organization NPI registered as a therapy clinic or therapist group, a PT/OT/SLP clinician mix, or therapists billing Medicare in private practice — and not at a CMS-listed hospital or nursing-home address), therapy practices (the clinician-mix test alone), or every practice the payer prices">Compare against <select id="ld-peer"><option value="clinics" selected>outpatient rehab clinics</option><option value="therapy">therapy practices</option><option value="all">all practices</option></select></label>
         <div class="field"><label>Exclude a practice <span class="muted" style="text-transform:none">(your client — TIN/entity)</span></label>
           <input type="text" id="ld-exclude" list="ld-subjects" placeholder="optional">
           <datalist id="ld-subjects"></datalist>
