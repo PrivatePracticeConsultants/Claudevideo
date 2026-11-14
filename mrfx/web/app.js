@@ -2884,6 +2884,18 @@ async function downloadVisitMarketCsv() {
 /* ---- the practices behind one Visit-value row, ranked (visit_market.py) -- */
 const VV_PAGE = 50;
 
+// where a practice's name came from (mrfx/naming.py name_source)
+const NAME_SOURCE_TEXT = {
+  nppes_org: "the legal business name of its organization NPIs (NPPES)",
+  cms_dac: "the group most of its clinicians are enrolled with (CMS Doctors and Clinicians file)",
+  solo_npi: "its one provider (a solo practice)",
+  unnamed_group: "no organization name found — labelled by clinician count and main city",
+  no_npi: "no NPI is published under this tax ID",
+  pending: "loaded since names were last resolved — refreshed within minutes",
+};
+const NAME_SOURCE_TAG = { cms_dac: "name: CMS file", solo_npi: "solo provider",
+  unnamed_group: "no org name found", pending: "name pending" };
+
 function vvPracticeRow(x, perPayer) {
   const where = [(x.cities || []).join(", "), x.state].filter(Boolean).join(" · ");
   // one NPI on the row (the organisation's own when it has one — listed
@@ -2901,7 +2913,10 @@ function vvPracticeRow(x, perPayer) {
   const cls = x.vs_median > 0 ? "peer-up" : x.vs_median < 0 ? "peer-down" : "";
   return `<tr class="${x.is_subject ? "best-row" : ""}">
     <td class="num">${fmtInt(x.rank)}</td>
-    <td><b>${esc(x.name)}</b>${x.is_subject ? ' <span class="sub">(this practice)</span>' : ""}${where ? `<div class="sub">${esc(where)}</div>` : ""}</td>
+    <td><b title="named by ${esc(NAME_SOURCE_TEXT[x.name_source] || x.name_source || "")}">${esc(x.name)}</b>${
+      x.is_subject ? ' <span class="sub">(this practice)</span>' : ""}${
+      NAME_SOURCE_TAG[x.name_source] ? ` <span class="sub" title="${esc(NAME_SOURCE_TEXT[x.name_source])}">· ${esc(NAME_SOURCE_TAG[x.name_source])}</span>` : ""}${
+      where ? `<div class="sub">${esc(where)}</div>` : ""}</td>
     <td>${esc(x.tin || "")}</td>
     <td>${npis || '<span class="sub">–</span>'}</td>
     <td class="num">${x.therapy_npi_count == null ? "–" : fmtInt(x.therapy_npi_count)} <span class="sub">of ${x.npi_count == null ? "–" : fmtInt(x.npi_count)}</span></td>

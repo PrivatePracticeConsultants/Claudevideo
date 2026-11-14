@@ -1055,6 +1055,37 @@ Downloads and files:
 - **"fee for service" / "fee_schedule"** spelled differently by a payer no
   longer drop rates.
 
+## What changed in version 0.8.5
+
+- **Practice names are right.** A practice (tax ID) with no organization
+  NPI used to be named after the alphabetically first clinician on its
+  roster — "ALEC YATES" for Bone and Joint Institute of Tennessee, "ABBEY
+  MCCRORY" for MSK Group — so about a quarter of the names in a state's list
+  began with "A". Now, everywhere (every screen and every export):
+  1. a practice with organization NPIs is named by their legal business name
+     (the name most of them share; "Acme PT, LLC" and "ACME PT LLC" count
+     as one name);
+  2. otherwise by the group most of its clinicians are enrolled with in
+     CMS's **Doctors and Clinicians** file — the app downloads it (about
+     900 MB) a couple of minutes after it starts and checks for a new release
+     each month (`mrfx dac` loads it by hand; `cms_dac: off` in
+     config/mrfx.yaml turns the download off);
+  3. a practice with exactly one provider is named after that provider;
+  4. anything else reads "Unnamed group — 12 clinicians (MEMPHIS)" — never
+     one clinician's name for a group.
+- **Cities are where the practice actually is**: ranked by how many of its
+  providers practise there, the export's state first (they were the first
+  three alphabetically, any state).
+- **name_source** in the visit-value list and its CSV says which rule named
+  each practice (nppes_org, cms_dac, solo_npi, unnamed_group). Hover a name
+  in the list for the same.
+- On a real BCBS Tennessee PT export (5,302 practices): names starting with
+  "A" fell from 27.7% to 7.1%; 45% are named from the CMS file, 39% are solo
+  providers, 6% by their organization NPIs, 10% "Unnamed group".
+- One thing to know: "solo" means exactly one NPI is published under that tax
+  ID by the payers you loaded — a larger group that a payer lists with one
+  NPI reads as solo until another file lists more of its providers.
+
 ## What changed in version 0.8.4
 
 - **Visit value in this market now shows the practices behind each row.**

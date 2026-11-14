@@ -2549,6 +2549,15 @@ class Store:
                                                        file_month VARCHAR, n BIGINT);
             CREATE TABLE IF NOT EXISTS part_tin_set (part VARCHAR, tin_value VARCHAR);
             CREATE TABLE IF NOT EXISTS part_set_parts (part VARCHAR PRIMARY KEY, sig VARCHAR);
+            -- the CMS Doctors and Clinicians National Downloadable File: each
+            -- clinician's enrolled group (0.8.5, mrfx/naming.py rule 2) — one
+            -- row per clinician x group x location, loaded by `mrfx dac`
+            CREATE TABLE IF NOT EXISTS dac_orgs (npi VARCHAR, org_nm VARCHAR,
+                                                 org_pac_id VARCHAR, state VARCHAR,
+                                                 city VARCHAR);
+            -- how many organization NPIs in the whole directory carry each
+            -- normalized business name (naming.py rule 1's last tie-break)
+            CREATE TABLE IF NOT EXISTS org_name_freq (k VARCHAR, g BIGINT);
             -- Which health PLANS a rate file serves, harvested from the payer's
             -- table-of-contents (the rate file itself never names a plan).
             -- Keyed by the URL's dedup_key so it joins to url_queue, which
@@ -2705,6 +2714,8 @@ class Store:
                 [tbl]).fetchall()}
             if not cols:
                 con.execute(f"CREATE OR REPLACE VIEW {view} AS {q}")
+            elif tbl == "tin_directory_tbl":
+                con.execute(f"CREATE OR REPLACE VIEW {view} AS {self._directory_view_sql(con)}")
             elif tbl == "rates_by_tin_tbl" and "is_latest" not in cols:
                 # a spine not yet given its stored flag (_migrate_latest_flag
                 # failed or has not run): supply it per query — the old cost,
@@ -2715,6 +2726,171 @@ class Store:
                     f"AS is_latest FROM {tbl}")
             else:
                 con.execute(f"CREATE OR REPLACE VIEW {view} AS SELECT * FROM {tbl}")
+
+    def _directory_view_sql(self, con: duckdb.DuckDBPyConnection) -> str:
+        """`tin_directory`: the materialized directory with each practice's
+        NAME, CITIES (ranked) and name_source from practice_names_tbl
+        (mrfx/naming.py) — every screen and export reads this view, so one
+        table fixes them all without rebuilding the directory. A TIN the
+        names table does not hold yet keeps the directory's own values
+        ('pending'; 'no_npi' when it has no NPI)."""
+        has = bool(con.execute(
+            "SELECT count(*) FROM information_schema.tables "
+            "WHERE table_name = 'practice_names_tbl'").fetchone()[0])
+        if not has:
+            return ("SELECT *, CASE WHEN coalesce(npi_count, 0) = 0 THEN 'no_npi' "
+                    "ELSE 'pending' END AS name_source FROM tin_directory_tbl")
+        return ("SELECT t.* REPLACE (coalesce(n.practice_name, t.display_name) AS display_name, "
+                "CASE WHEN len(n.cities) > 0 THEN n.cities ELSE t.cities END AS cities), "
+                "coalesce(n.name_source, CASE WHEN coalesce(t.npi_count, 0) = 0 THEN 'no_npi' "
+                "ELSE 'pending' END) AS name_source "
+                "FROM tin_directory_tbl t LEFT JOIN practice_names_tbl n USING (tin_value)")
+
+    NAMES_SCHEMA = 1
+
+    def _names_stamp(self) -> str:
+        """What the practice names are computed from: the (TIN, NPI) pairs
+        (named by the parts on disk), the NPI directory, the CMS file, the
+        rules' version."""
+        pairs = self.pairs_relation()
+        with self.connect() as con:
+            npi = con.execute("SELECT count(*), max(enriched_at)::VARCHAR FROM npi_directory").fetchone()
+            dac = con.execute("SELECT count(*) FROM dac_orgs").fetchone()[0]
+            rel = self._meta_get(con, "dac_release")
+        return hashlib.sha1(json.dumps(
+            [pairs, list(npi), dac, rel, self.NAMES_SCHEMA]).encode()).hexdigest()[:16]
+
+    def refresh_practice_names(self, force: bool = False) -> bool:
+        """Re-resolve every practice's name and cities (mrfx/naming.py) when
+        anything they are computed from changed. Built into a parquet with no
+        lock held, swapped in under the writer lock in one transaction.
+        True when it rebuilt. `serve` runs it in the background
+        (warm_part_sets); never raises."""
+        from .naming import ORG_NAME_FREQ_SQL, names_sql
+        try:
+            stamp = self._names_stamp()
+            with self.connect() as con:
+                if not force and self._meta_get(con, "practice_names_stamp") == stamp \
+                        and con.execute("SELECT count(*) FROM information_schema.tables "
+                                        "WHERE table_name = 'practice_names_tbl'").fetchone()[0]:
+                    return False
+            pairs = self.pairs_relation()
+            tmp_f = self.dir / f"org_name_freq.{os.getpid()}.tmp.parquet"
+            tmp_n = self.dir / f"practice_names.{os.getpid()}.tmp.parquet"
+            try:
+                with self.connect() as con:
+                    con.execute(f"COPY ({ORG_NAME_FREQ_SQL}) TO '{sql_path(tmp_f)}' (FORMAT PARQUET)")
+                    tin_npis = (f"SELECT tin_value, npi FROM {pairs} "
+                                "WHERE NOT coalesce(tin_is_really_npi, FALSE)")
+                    sql = names_sql(tin_npis).replace(
+                        "LEFT JOIN org_name_freq f",
+                        f"LEFT JOIN read_parquet('{sql_path(tmp_f)}') f")
+                    con.execute(f"COPY ({sql} ORDER BY t.tin_value) TO '{sql_path(tmp_n)}' "
+                                "(FORMAT PARQUET)")
+                with self.write_lock, self.connect() as con:
+                    con.execute("BEGIN TRANSACTION")
+                    try:
+                        con.execute("CREATE OR REPLACE TABLE org_name_freq AS "
+                                    f"SELECT * FROM read_parquet('{sql_path(tmp_f)}')")
+                        con.execute("CREATE OR REPLACE TABLE practice_names_tbl AS "
+                                    f"SELECT * FROM read_parquet('{sql_path(tmp_n)}')")
+                        con.execute("INSERT OR REPLACE INTO meta VALUES "
+                                    "('practice_names_stamp', ?)", [stamp])
+                        con.execute("COMMIT")
+                    except Exception:
+                        try:
+                            con.execute("ROLLBACK")
+                        except duckdb.Error:
+                            pass
+                        raise
+                    self._register_views(con)
+            finally:
+                tmp_f.unlink(missing_ok=True)
+                tmp_n.unlink(missing_ok=True)
+            self._bump_generation(spine=False)
+            return True
+        except Exception:  # noqa: BLE001 — the directory's own names keep serving
+            import logging as _logging
+            _logging.getLogger(__name__).warning("practice names not refreshed", exc_info=True)
+            return False
+
+    def practice_names_for(self, tins: list[str], state: str | None) -> dict[str, dict]:
+        """{tin: {practice_name, name_source, n_npi, cities, top_cities}} for
+        `tins`, resolved for an export confined to `state` (its in-state
+        tie-breaks and cities — mrfx/naming.py), from the same pairs, NPI
+        directory and CMS file as the stored names."""
+        from .naming import names_sql
+        tins = sorted({str(t) for t in tins if t})
+        if not tins:
+            return {}
+        st = (state or "").strip().upper() or None
+        if st is not None and not (len(st) == 2 and st.isalpha()):
+            st = None
+        tin_npis = (f"SELECT tin_value, npi FROM {self.pairs_relation()} "
+                    "WHERE NOT coalesce(tin_is_really_npi, FALSE) "
+                    "AND tin_value IN (SELECT unnest(?::VARCHAR[]))")
+        with self.connect() as con:
+            cur = con.execute(names_sql(tin_npis, st), [tins])
+            cols = [d[0] for d in cur.description]
+            return {r[0]: dict(zip(cols, r)) for r in cur.fetchall()}
+
+    def load_dac(self, csv_path, release: str | None = None, source: str | None = None) -> int:
+        """Load the CMS Doctors and Clinicians National Downloadable File
+        (DAC_NationalDownloadableFile.csv) into dac_orgs: NPI, group name
+        ("Facility Name"; org_nm in older releases), group PAC ID, city and
+        state. Read outside the lock into a parquet, swapped in briefly.
+        Returns the rows loaded; the release date is kept (meta dac_release)."""
+        import csv as _csv
+        path = Path(csv_path)
+        with open(path, newline="", encoding="utf-8-sig", errors="replace") as fh:
+            header = next(_csv.reader(fh))
+        low = {h.strip().lower(): h for h in header}
+
+        def col(*names):
+            for n in names:
+                if n in low:
+                    return low[n]
+            raise ValueError(f"{path.name} is not the CMS Doctors and Clinicians file "
+                             f"(no {names[0]!r} column)")
+        c_npi = col("npi")
+        c_org = col("facility name", "org_nm", "organization legal name")
+        c_pac = low.get("org_pac_id")
+        c_city = col("city/town", "cty", "city")
+        c_st = col("state", "st")
+        q = lambda c: '"' + c.replace('"', '""') + '"'  # noqa: E731
+        tmp = self.dir / f"dac_orgs.{os.getpid()}.tmp.parquet"
+        try:
+            with self.connect() as con:
+                con.execute(f"""
+                    COPY (SELECT DISTINCT trim({q(c_npi)}) AS npi,
+                                 nullif(upper(trim({q(c_org)})), '') AS org_nm,
+                                 {('nullif(trim(' + q(c_pac) + "), '')") if c_pac else 'NULL'}::VARCHAR AS org_pac_id,
+                                 nullif(upper(trim({q(c_st)})), '') AS state,
+                                 nullif(upper(trim({q(c_city)})), '') AS city
+                          FROM read_csv('{sql_path(path)}', header = true, all_varchar = true,
+                                        quote = '"', escape = '"', ignore_errors = true)
+                          WHERE regexp_full_match(trim({q(c_npi)}), '[0-9]+')
+                          ORDER BY npi)
+                    TO '{sql_path(tmp)}' (FORMAT PARQUET)""")
+            with self.write_lock, self.connect() as con:
+                con.execute("BEGIN TRANSACTION")
+                try:
+                    con.execute("CREATE OR REPLACE TABLE dac_orgs AS "
+                                f"SELECT * FROM read_parquet('{sql_path(tmp)}')")
+                    n = con.execute("SELECT count(*) FROM dac_orgs").fetchone()[0]
+                    for k, v in (("dac_release", release or ""), ("dac_source", source or str(path)),
+                                 ("dac_loaded_at", dt.datetime.now().isoformat(timespec="seconds"))):
+                        con.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)", [k, v])
+                    con.execute("COMMIT")
+                except Exception:
+                    try:
+                        con.execute("ROLLBACK")
+                    except duckdb.Error:
+                        pass
+                    raise
+        finally:
+            tmp.unlink(missing_ok=True)
+        return int(n)
 
     # -- rates parts ---------------------------------------------------------
     # (the old write_rates_part, which wrote DIRECTLY to the live part path with
@@ -6988,7 +7164,8 @@ class Store:
             # and the merged files those sets feed, so the practice drawer,
             # outreach, territory, leverage and the dossier find them built
             # (a no-op when no part changed)
-            for build in (self.pairs_relation, self.placement_relation):
+            for build in (self.pairs_relation, self.placement_relation,
+                          self.refresh_practice_names):
                 try:
                     build()
                 except Exception:  # noqa: BLE001 — the request builds it then
@@ -7966,6 +8143,10 @@ class Store:
                     "DELETE FROM rate_npi_parts; DELETE FROM rate_npi_set; "
                     "DELETE FROM part_payer_set; DELETE FROM part_tin_set; "
                     "DELETE FROM part_set_parts; "
+                    # resolved practice names (0.8.5): derived, rebuilt from
+                    # the new store's pairs (the CMS file in dac_orgs stays,
+                    # like the NPPES name cache)
+                    "DROP TABLE IF EXISTS practice_names_tbl; DELETE FROM org_name_freq; "
                     # part-operation and rollup bookkeeping of the wiped store
                     "DELETE FROM meta WHERE key IN ('parked_parts', "
                     "'rollup_pending_payers', 'rollup_needs_full', 'rollup_plan', "

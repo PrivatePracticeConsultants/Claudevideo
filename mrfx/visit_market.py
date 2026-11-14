@@ -324,8 +324,12 @@ PRACTICES_NOTE = (
     "rank, listed by tax ID). Percentile: its mid-rank among the others — those "
     "paid less plus half of those paid the same, as a share of the others. "
     "'All payers': each practice's value is the median of its own per-payer "
-    "visit values. Names, cities and NPIs are the NPPES records of the NPIs "
-    "each tax ID bills under.")
+    "visit values. A practice's name: its organization NPIs' legal business "
+    "name (NPPES); else the group most of its clinicians are enrolled with "
+    "(CMS Doctors and Clinicians file); else, for one provider, that "
+    "provider; else 'Unnamed group' — never one clinician's name for a group "
+    "(name_source says which). Cities: where most of its NPIs practise in "
+    "the state.")
 
 
 @generation_cached("visit_market.ranked")
@@ -428,17 +432,23 @@ def market_visit_practices(store: Store, market: dict | None, raw_lines=None,
                 npis.setdefault(tin, []).append(
                     {"npi": npi, "name": name, "type": etype, "city": city, "state": st_,
                      "zip": (str(zip_)[:5] if zip_ else None)})
+    # the practice's name and cities resolved for THIS export's state
+    # (mrfx/naming.py: org NPIs, then the CMS file, then a solo provider,
+    # else "Unnamed group"; in-state tie-breaks and cities)
+    names = store.practice_names_for(tins, r["state"]) if tins else {}
     out = []
     for x in page:
         d = info.get(x["tin"], {})
+        nm = names.get(x["tin"], {})
         all_npis = npis.get(x["tin"], [])
         out.append({
             **{k: v for k, v in x.items() if k != "tin"},
             "tin": mask_tin(x["tin"]),
-            "name": d.get("display_name") or f"TIN {mask_tin(x['tin'])}",
+            "name": nm.get("practice_name") or d.get("display_name") or f"TIN {mask_tin(x['tin'])}",
+            "name_source": nm.get("name_source") or ("no_npi" if not all_npis else "pending"),
             "kind": d.get("entity_kind"),
             "state": d.get("primary_state"),
-            "cities": list(d.get("cities") or [])[:3],
+            "cities": list(nm.get("top_cities") or (d.get("cities") or [])[:3]),
             "npi_count": d.get("npi_count") if d.get("npi_count") is not None else len(all_npis),
             "therapy_npi_count": d.get("therapy_npi_count"),
             "discipline": d.get("primary_discipline"),
@@ -471,14 +481,15 @@ def practices_csv(store: Store, market: dict | None, raw_lines=None,
                  f"Visit: {first['label']} — {first['basket']}", first["note"]):
         buf.write("# " + " ".join(str(line).split()) + "\n")     # a comment line, as-is
     per_code = first["payer"] != ALL_PAYERS
-    head = ["rank", "practice", "tax_id", "state", "cities", "npi_count",
+    head = ["rank", "practice", "name_source", "tax_id", "state", "cities", "npi_count",
             "therapy_npi_count", "npis", "visit_value", "vs_median", "vs_median_pct",
             "percentile", "this_practice"]
     head += [f"rate_{c}" for c in first["codes"]] if per_code else ["payers", "lowest_payer_value",
                                                                     "highest_payer_value"]
     w.writerow(head)
     for x in rows:
-        line = [x["rank"], x["name"], x["tin"], x["state"] or "", "; ".join(x["cities"]),
+        line = [x["rank"], x["name"], x["name_source"], x["tin"], x["state"] or "",
+                "; ".join(x["cities"]),
                 x["npi_count"] if x["npi_count"] is not None else "",
                 x["therapy_npi_count"] if x["therapy_npi_count"] is not None else "",
                 "; ".join(n["npi"] for n in x["npis"]) + (f" (+{x['npis_more']} more)"

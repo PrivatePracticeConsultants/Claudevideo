@@ -242,6 +242,14 @@ enrichment:
   # backslashes read correctly:
   # bulk_csv_path: 'E:\NPPES_Data_Dissemination_July_2026_V2.zip'
 
+# Practice names for tax IDs with no organization NPI: the CMS Doctors and
+# Clinicians National Downloadable File names the group each clinician is
+# enrolled with. auto = the app downloads it (~900 MB, kept in cms_dac_dir)
+# a couple of minutes after it starts and checks for a newer release monthly.
+# "off" = load it yourself with `mrfx dac --file <path>`.
+cms_dac: auto
+# cms_dac_dir: data/cms_dac
+
 # Keep ONLY therapist rows (PT/OT/SLP + therapy clinics, by NPPES taxonomy) at
 # ingest, dropping the MDs/DOs/NPs who merely bill a 97xxx code. Shrinks the
 # store several-fold and speeds every rebuild/query. Off by default. It

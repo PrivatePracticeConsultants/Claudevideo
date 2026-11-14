@@ -27,6 +27,8 @@ def cfg(tmp_path) -> MrfxConfig:
         entity_map_path=tmp_path / "entity_map.yaml",
         payer_name_map={"Testco Health": "Testco"},
         confirm_over_gb=5.0,
+        # never a ~900 MB CMS download from a test that runs serve (0.8.5)
+        cms_dac="off",
     )
     c.ensure_dirs()
     return c

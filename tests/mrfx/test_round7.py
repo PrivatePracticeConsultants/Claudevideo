@@ -1221,6 +1221,6 @@ def test_paused_rows_block_forget_and_the_caches_and_version(cfg, store, capsys)
     assert hasattr(compute_rate_changes, "uncached") and hasattr(payer_months, "uncached")
     with pytest.raises(SystemExit):
         main(["--version"])
-    # bumped with every release (0.8.4: Visit value in this market lists the
-    # practices behind each row, ranked by visit value)
-    assert capsys.readouterr().out.strip() == f"mrfx {__version__}" == "mrfx 0.8.4"
+    # bumped with every release (0.8.5: practice names and cities ranked —
+    # org NPIs, the CMS Doctors and Clinicians file, solo, "Unnamed group")
+    assert capsys.readouterr().out.strip() == f"mrfx {__version__}" == "mrfx 0.8.5"

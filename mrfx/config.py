@@ -147,6 +147,14 @@ class MrfxConfig(BaseModel):
     backup_every_days: int = Field(default=7, ge=1)
     backup_keep: int = Field(default=4, ge=1)
 
+    # Practice names for tax IDs with no organization NPI (0.8.5,
+    # mrfx/naming.py): the CMS Doctors and Clinicians National Downloadable
+    # File names the group each clinician is enrolled with. "auto": `serve`
+    # downloads it (~900 MB) into cms_dac_dir, loads it, and checks CMS for a
+    # newer release once a month. "off": only `mrfx dac --file …` loads it.
+    cms_dac: Literal["auto", "off"] = "auto"
+    cms_dac_dir: Path = Path("data/cms_dac")
+
     @field_validator("backup_dir", mode="before")
     @classmethod
     def _empty_backup_dir_is_none(cls, v):
@@ -336,7 +344,7 @@ class MrfxConfig(BaseModel):
 _ANCHORED_FIELDS = ("inbox_dir", "processed_dir", "failed_dir", "store_dir",
                     "downloads_dir", "entity_map_path", "mpfs_path",
                     "duckdb_temp_dir", "tracker_dir", "packets_dir", "backup_dir", "registry_path",
-                    "registry_overrides_path", "known_sources_path")
+                    "registry_overrides_path", "known_sources_path", "cms_dac_dir")
 
 
 def _project_root_of(config_path: Path) -> Path:

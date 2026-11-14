@@ -270,6 +270,39 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
             if stop.wait(60):
                 return
     threading.Thread(target=_part_sets_loop, name="mrfx-part-sets", daemon=True).start()
+    if getattr(cfg, "cms_dac", "auto") == "auto":
+        # the CMS Doctors and Clinicians file (practice names, 0.8.5): fetched
+        # two minutes after start when the store has none or CMS published a
+        # newer release, then checked once a month; a failure is logged and
+        # retried the next day — names then come from the other rules
+        def _dac_loop():
+            import datetime as dt
+
+            from .dac import ensure_dac
+            if stop.wait(120):
+                return
+            while True:
+                due = True
+                try:
+                    with store.connect() as con:
+                        last = store._meta_get(con, "dac_checked_at")
+                    due = (not last or (dt.datetime.now() - dt.datetime.fromisoformat(last))
+                           > dt.timedelta(days=30))
+                except Exception:  # noqa: BLE001
+                    pass
+                if due:
+                    try:
+                        ensure_dac(store, cfg.cms_dac_dir)
+                        with store.write_lock, store.connect() as con:
+                            con.execute("INSERT OR REPLACE INTO meta VALUES ('dac_checked_at', ?)",
+                                        [dt.datetime.now().isoformat(timespec="seconds")])
+                        store.refresh_practice_names()
+                    except Exception as e:  # noqa: BLE001
+                        log.warning("CMS Doctors and Clinicians file not refreshed (%s) — "
+                                    "trying again tomorrow", e)
+                if stop.wait(24 * 3600):
+                    return
+        threading.Thread(target=_dac_loop, name="mrfx-cms-dac", daemon=True).start()
     threading.Thread(
         target=_watcher_loop, args=(cfg, store, stop), name="mrfx-watcher", daemon=True
     ).start()
@@ -1473,6 +1506,34 @@ def cmd_hospital(cfg: MrfxConfig, args) -> int:
     return 0
 
 
+def cmd_dac(cfg: MrfxConfig, args) -> int:
+    """Load the CMS Doctors and Clinicians file (practice names for tax IDs
+    with no organization NPI — mrfx/naming.py) and re-resolve the names."""
+    from .dac import ensure_dac, kept
+
+    if _something_owns_the_port(cfg, "writing to the store locally"):
+        return 1
+    store = Store(cfg.store_dir, cfg.duckdb_memory_gb, temp_dir=cfg.duckdb_temp_dir)
+    try:
+        got = ensure_dac(store, cfg.cms_dac_dir, force=args.refresh,
+                         path=args.file, release=args.release)
+    except Exception as e:  # noqa: BLE001 — one plain sentence, never a traceback
+        k = kept(cfg.cms_dac_dir)
+        print(f"Could not load the CMS Doctors and Clinicians file: {e}"
+              + (f" (a kept copy of the {k.get('release')} release is in {cfg.cms_dac_dir})"
+                 if k else ""), file=sys.stderr)
+        return 1
+    print(f"CMS Doctors and Clinicians file, {got['release'] or 'release unknown'}: "
+          f"{got['rows']:,} clinician-group rows "
+          + ("loaded." if got["loaded"] else "already loaded."))
+    if store.refresh_practice_names(force=got["loaded"]):
+        with store.connect() as con:
+            rows = con.execute("SELECT name_source, count(*) FROM practice_names_tbl "
+                               "GROUP BY 1 ORDER BY 2 DESC, 1").fetchall()
+        print("Practice names re-resolved: " + ", ".join(f"{s} {n:,}" for s, n in rows))
+    return 0
+
+
 def cmd_inflation(cfg: MrfxConfig, args) -> int:
     """Show or extend the price index that real-terms figures use."""
     from .inflation import InflationError, index_status, save_index_values
@@ -2131,6 +2192,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--month", default="latest", help="as-of month for the parity table")
 
     p = sub.add_parser(
+        "dac",
+        help="load the CMS Doctors and Clinicians file (names practices with no organization NPI)")
+    p.add_argument("--file", default=None,
+                   help="a DAC_NationalDownloadableFile.csv you downloaded; omit to download "
+                        "the current release from data.cms.gov (kept in cms_dac_dir)")
+    p.add_argument("--release", default=None, help="the release date of --file, e.g. 2026-10-30")
+    p.add_argument("--refresh", action="store_true",
+                   help="download and load again even when the release is unchanged")
+
+    p = sub.add_parser(
         "inflation",
         help="show or extend the price index behind real-terms (constant-dollar) figures")
     p.add_argument("--year", type=int, default=None, help="calendar year, e.g. 2025")
@@ -2240,6 +2311,7 @@ def main(argv: list[str] | None = None) -> int:
         "newclinics": cmd_newclinics,
         "closures": cmd_closures,
         "inflation": cmd_inflation,
+        "dac": cmd_dac,
         "hospital": cmd_hospital,
         "floors": cmd_floors,
         "backup": cmd_backup,

@@ -972,6 +972,52 @@ Pinned by `tests/mrfx/test_review14.py` (every Group 1-3 case fails on
   paste is durable (`meta('pending_paste')`, `resume_pending_paste`). A
   hospital of an already-loaded name from another file is refused.
 
+### 0.8.5 additions (Nov 14, 2026) — practice names and cities, one ranked rule
+
+Field report: a BCBS Tennessee visit-value export named TINs with no org
+NPI after their alphabetically FIRST clinician (TIN_DIRECTORY_QUERY's
+`any_mode` = first(org_name ORDER BY c_any DESC, org_name) — every
+individual's name is unique, so all tie) and listed cities
+`list_sort(list_distinct(...))` — alphabetical, all states. 27.7% of 5,302
+names began with "A". Pinned by `tests/mrfx/test_naming.py` (7 tests, all
+fail on b00957e).
+
+- **`mrfx/naming.py`** `names_sql(tin_npis, state)` — the ONE resolver:
+  1 `nppes_org` (normalized legal name of the most org NPIs; ties: most in
+  the state, then `org_name_freq` — the name's count over all org NPIs —
+  then the key), 2 `cms_dac` (`dac_orgs`: the group of the most matched
+  clinicians, accepted at >= DAC_MIN_SHARE = 30% of the TIN's NPIs found in
+  the file), 3 `solo_npi` (exactly one NPI), else `unnamed_group`
+  ("Unnamed group — {n} clinicians ({top city})"). Cities ranked by NPIs
+  there, in-state first; `top_cities` = in-state (else all), max 3.
+- **Applied to every surface without a directory rebuild**: `Store.
+  refresh_practice_names` builds `practice_names_tbl` (+ `org_name_freq`)
+  from the merged (TIN, NPI) pairs, npi_directory and dac_orgs (stamp: the
+  pairs file, npi_directory count/max enriched_at, dac rows/release,
+  NAMES_SCHEMA); `_directory_view_sql` makes the `tin_directory` VIEW
+  replace display_name and cities from it and add `name_source` ('pending'
+  for a TIN not resolved yet, 'no_npi' without NPIs). Every reader goes
+  through the view (no code reads tin_directory_tbl's names directly).
+  DIRECTORY_SCHEMA_VERSION is unchanged on purpose: bumping it would discard
+  a running rollup plan (`_plan_versions`). The entity grain is unaffected
+  for non-org TINs (their key is the TIN, so equal "Unnamed group" labels
+  never merge).
+- `serve`'s mrfx-part-sets thread refreshes the names (a no-op when the
+  stamp is unchanged); `mrfx-cms-dac` downloads / loads the CMS file
+  (`mrfx/dac.py`: data.cms.gov metastore dataset mj5m-pzi6, kept in
+  cms_dac_dir with a release sidecar; offline uses the kept copy) two
+  minutes after start, then monthly (`cms_dac: auto|off`). `mrfx dac
+  [--file --release --refresh]` does it by hand. `Store.load_dac` reads the
+  file by header NAME (2026: "Facility Name", "City/Town", "State"; older:
+  org_nm, cty, st).
+- State-scoped exports re-resolve for their state: `Store.practice_names_for
+  (tins, state)` (the visit-value list / CSV, with a `name_source` column).
+- **Measured** on BCBS Tennessee Network P (34 files, 6,203,043 rates,
+  5,660 TINs, 49,663 NPIs named from the Nov 2026 NPPES file; the CMS file's
+  2026-10-30 release, 2,839,152 rows loaded in 4 s; names resolved in 0.7 s):
+  the TN PT export's 5,302 practices — cms_dac 44.8%, solo_npi 38.8%,
+  unnamed_group 10.2%, nppes_org 6.2%; "A" names 27.7% -> 7.1%.
+
 ### 0.8.4 additions (Nov 13, 2026) — the practices behind a Visit-value row
 
 - `visit_market._compute_values` holds the per-(payer, TIN) visit values

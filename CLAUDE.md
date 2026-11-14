@@ -28,8 +28,8 @@ for correctness of the numbers.
 
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/pip install -e .
 .venv/bin/mrfx serve                       # dashboard http://localhost:8377 + inbox watcher + URL worker
-.venv/bin/python -m pytest tests/ -q       # the suite: real end-to-end drains against local HTTP servers (~48 min, 1364 tests)
-.venv/bin/python -m pytest tests/ -q -m quick   # inner loop, ~4 min (479 tests): skips tests/slow_tests.txt
+.venv/bin/python -m pytest tests/ -q       # the suite: real end-to-end drains against local HTTP servers (~48 min, 1371 tests)
+.venv/bin/python -m pytest tests/ -q -m quick   # inner loop, ~4 min (480 tests): skips tests/slow_tests.txt
 .venv/bin/ruff check mrfx/ tests/          # lint gate: narrow by design (see pyproject), stays at ZERO
 .venv/bin/pip-audit -r requirements.txt    # dependency CVEs: was 25 across 5 packages, now clean
 ```
@@ -59,6 +59,7 @@ reactivated — a closed referral source or a closed competitor),
 commercial rate), `mrfx enrich --weekly <NPPES weekly>` (fold a week's NPPES
 changes into the cache), `mrfx hospital <file> [--state … --parity <practice>]` (a hospital's CMS
 standard-charges file + what the same payer pays the hospital vs the practice),
+`mrfx dac [--file … --release … --refresh]` (the CMS Doctors and Clinicians file: names practices with no organization NPI — mrfx/naming.py; `serve` fetches it monthly),
 `mrfx inflation [--year YYYY --value N]` (the price index behind real-terms
 erosion; a year with no value is refused, never estimated),
 `mrfx packets [--pdf]` (monthly client packets; `--pdf` prints each beside it), `mrfx renewals [--clients]`,
