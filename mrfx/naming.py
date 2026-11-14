@@ -167,3 +167,124 @@ NAME_SOURCES = {
     "no_npi": "no NPI is published under this tax ID",
     "pending": "loaded since the names were last resolved — refreshed within minutes",
 }
+
+
+# ---------------------------------------------------------------- practice type
+#
+# Which practices are OUTPATIENT REHAB CLINICS (0.8.6) — the default peer group
+# of every comparison. Evidence per tax ID, each recorded (type_reason):
+#   * organization NPI taxonomies (NPPES): a therapy clinic (261QP2000X …) or a
+#     GROUP registered as a therapist (2251…, 225X…, 235Z…) -> clinic;
+#     hospital (282…) -> hospital; SNF / home health / residential -> facility
+#   * practice ADDRESSES (NPPES) at CMS-listed hospitals / nursing homes
+#     (cms_facilities): most of them -> hospital / facility
+#   * the directory's clinician mix (is_therapy: PT/OT/SLP share, facility veto)
+#   * Medicare professional billing of therapy codes (utilization): clinicians
+#     billing as "Therapist in Private Practice" -> outpatient private practice
+# Ordered rules: hospital, then facility, then clinic, then physician/other,
+# else unknown — so a therapy group at a hospital address is hospital-based.
+
+PRACTICE_TYPES = {
+    "outpatient_clinic": "Outpatient rehab clinic",
+    "hospital": "Hospital / hospital outpatient",
+    "facility": "Nursing home or other facility (SNF, home health …)",
+    "physician_other": "Physician / multispecialty / other",
+    "unknown": "Not enough information to tell",
+}
+
+
+def profile_sql(tin_npis: str, *, has_util: bool, has_provider_type: bool) -> str:
+    """SQL per TIN of `tin_npis`: org_taxonomies, address counts at CMS
+    hospitals / nursing homes, Medicare therapy-billing evidence."""
+    from .catalog import (HOSPITAL_TAXONOMY_PREFIXES, NON_OUTPATIENT_TAXONOMY_PREFIXES,
+                          THERAPY_CLINIC_STRONG_CODES, THERAPY_TAXONOMY_PREFIXES)
+    from .cmsref import addr_key_sql
+
+    def any_prefix(var: str, prefixes) -> str:
+        return " OR ".join(f"starts_with({var}, '{p}')" for p in prefixes)
+    clinic_codes = ", ".join(f"'{c}'" for c in THERAPY_CLINIC_STRONG_CODES)
+    if has_util:
+        is_pp = ("(u.provider_type ILIKE '%therapist in private practice%' "
+                 "OR u.provider_type ILIKE '%speech language patholog%')")
+        ptpp = (f"count(DISTINCT u.npi) FILTER ({is_pp})" if has_provider_type else "NULL::BIGINT")
+        # by SERVICES, not people: a physician who bills a handful of 97110s
+        # under their own NPI must not outvote the therapists who bill
+        # thousands (a 52%-therapist ortho group read 47 of 95 "people")
+        pp_share = (f"sum(u.services) FILTER ({is_pp}) / nullif(sum(u.services), 0)"
+                    if has_provider_type else "NULL::DOUBLE")
+        mc = f"""mc AS (SELECT j2.tin_value, count(DISTINCT u.npi) AS mc_npis, {ptpp} AS mc_ptpp,
+                        {pp_share} AS mc_ptpp_share,
+                        sum(u.services) FILTER (upper(u.place_of_service) = 'O')
+                          / nullif(sum(u.services), 0) AS mc_office_share
+                 FROM (SELECT DISTINCT tin_value, npi FROM j) j2
+                 JOIN utilization u ON u.npi = j2.npi
+                 WHERE u.data_year = (SELECT max(data_year) FROM utilization)
+                 GROUP BY j2.tin_value)"""
+    else:
+        mc = ("mc AS (SELECT NULL::VARCHAR AS tin_value, NULL::BIGINT AS mc_npis, "
+              "NULL::BIGINT AS mc_ptpp, NULL::DOUBLE AS mc_ptpp_share, "
+              "NULL::DOUBLE AS mc_office_share WHERE FALSE)")
+    return f"""
+    WITH tn AS (SELECT DISTINCT tin_value, npi FROM ({tin_npis}) x
+                WHERE tin_value IS NOT NULL AND npi IS NOT NULL),
+    j AS (SELECT tn.tin_value, tn.npi, d.entity_type,
+                 coalesce(nullif(d.taxonomy_codes, ''), d.taxonomy_code) AS taxes,
+                 {addr_key_sql('d.address', 'd.zip')} AS ak
+          FROM tn LEFT JOIN npi_directory d ON d.npi = tn.npi),
+    fac AS (SELECT addr_key, bool_or(kind = 'hospital') AS hosp,
+                   bool_or(kind = 'nursing_home') AS snf
+            FROM cms_facilities WHERE addr_key IS NOT NULL GROUP BY addr_key),
+    addr AS (SELECT j.tin_value, count(DISTINCT j.ak) AS n_addr,
+                    count(DISTINCT j.ak) FILTER (f.hosp) AS n_hosp_addr,
+                    count(DISTINCT j.ak) FILTER (f.snf) AS n_snf_addr
+             FROM j LEFT JOIN fac f ON f.addr_key = j.ak GROUP BY j.tin_value),
+    orgs AS (SELECT tin_value,
+                    list_sort(list_distinct(flatten(list(string_split(taxes, '|'))))) AS org_taxonomies
+             FROM j WHERE entity_type = 'NPI-2' AND nullif(taxes, '') IS NOT NULL
+             GROUP BY tin_value),
+    {mc}
+    SELECT a.tin_value, coalesce(o.org_taxonomies, []::VARCHAR[]) AS org_taxonomies,
+           len(list_filter(coalesce(o.org_taxonomies, []::VARCHAR[]),
+               x -> x IN ({clinic_codes}) OR {any_prefix('x', THERAPY_TAXONOMY_PREFIXES)})) > 0 AS org_clinic,
+           len(list_filter(coalesce(o.org_taxonomies, []::VARCHAR[]),
+               x -> {any_prefix('x', HOSPITAL_TAXONOMY_PREFIXES)})) > 0 AS org_hospital,
+           len(list_filter(coalesce(o.org_taxonomies, []::VARCHAR[]),
+               x -> {any_prefix('x', NON_OUTPATIENT_TAXONOMY_PREFIXES)})) > 0 AS org_facility,
+           a.n_addr, a.n_hosp_addr, a.n_snf_addr,
+           m.mc_npis, m.mc_ptpp, m.mc_ptpp_share, m.mc_office_share
+    FROM addr a LEFT JOIN orgs o ON o.tin_value = a.tin_value
+    LEFT JOIN mc m ON m.tin_value = a.tin_value
+    """
+
+
+# the ordered rules over a profile row p and its directory row td
+PRACTICE_TYPE_SQL = """CASE
+    WHEN p.org_hospital OR coalesce(td.has_hospital, FALSE)
+         OR (p.n_addr > 0 AND p.n_hosp_addr * 2 > p.n_addr) THEN 'hospital'
+    WHEN p.org_facility OR coalesce(td.has_facility, FALSE)
+         OR (p.n_addr > 0 AND p.n_snf_addr * 2 > p.n_addr) THEN 'facility'
+    WHEN p.org_clinic OR coalesce(td.is_therapy, FALSE)
+         -- Medicare: most of its therapy SERVICES billed by therapists in
+         -- private practice, and therapists are a real part of it (a
+         -- 4,511-clinician health system with 124 therapists is not a clinic)
+         OR (coalesce(p.mc_ptpp_share, 0) >= 0.5
+             AND (coalesce(td.classified_npi_count, 0) = 0
+                  OR td.therapy_npi_count >= 0.25 * td.classified_npi_count)) THEN 'outpatient_clinic'
+    WHEN coalesce(td.classified_npi_count, 0) > 0 THEN 'physician_other'
+    ELSE 'unknown' END"""
+
+TYPE_REASON_SQL = """array_to_string(list_filter([
+    CASE WHEN p.org_hospital THEN 'a hospital organization NPI' END,
+    CASE WHEN p.n_hosp_addr > 0 THEN p.n_hosp_addr || ' of ' || p.n_addr
+         || ' practice addresses are CMS-listed hospitals' END,
+    CASE WHEN p.org_facility THEN 'a facility organization NPI (SNF, home health …)' END,
+    CASE WHEN p.n_snf_addr > 0 THEN p.n_snf_addr || ' of ' || p.n_addr
+         || ' practice addresses are CMS-listed nursing homes' END,
+    CASE WHEN p.org_clinic THEN 'an organization NPI registered as a therapy clinic or therapist group' END,
+    CASE WHEN coalesce(td.classified_npi_count, 0) > 0 THEN td.therapy_npi_count || ' of '
+         || td.classified_npi_count || ' identified clinicians are PT/OT/SLP' END,
+    CASE WHEN coalesce(p.mc_npis, 0) > 0 THEN coalesce(p.mc_ptpp, 0) || ' of ' || p.mc_npis
+         || ' clinicians billing therapy to Medicare bill as therapists in private practice'
+         || coalesce(', ' || round(100 * p.mc_ptpp_share)::INT || '% of the services', '')
+         || coalesce(' (' || round(100 * p.mc_office_share)::INT || '% in the office)', '') END
+  ], x -> x IS NOT NULL), '; ')"""

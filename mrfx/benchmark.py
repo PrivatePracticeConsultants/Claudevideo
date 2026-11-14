@@ -124,7 +124,11 @@ def is_latest(market: dict) -> bool:
 # DuckDB and come back as a 500 quoting the SQL ("can't be cast to VARCHAR[]
 # … LINE 3: …").
 _MARKET_TEXT = ("month", "prev_month", "billing_class", "discipline", "pos", "city",
-                "plan", "peer_set", "primary_discipline", "entity_kind")
+                "plan", "peer_set", "primary_discipline", "entity_kind", "peer_group")
+# who the comparison practices are (0.8.6, mrfx/naming.py practice_type)
+PEER_GROUPS = {"clinics": "outpatient rehab clinics",
+               "therapy": "therapy practices (PT/OT/SLP clinician mix)",
+               "all": "every practice the payer prices"}
 _MARKET_FLAGS = ("base_only", "include_assistant", "include_non_dollar", "therapy_only",
                  "allow_national")
 _MARKET_DERIVED = ("curated_tins",)
@@ -166,6 +170,14 @@ def _typed_market(market: dict) -> dict:
             m[k] = _market_text(k, v)
         elif k in _MARKET_FLAGS:
             m[k] = _market_flag(k, v)
+        elif k == "org_taxonomy":
+            if v in (None, "", []):
+                continue
+            taxes = [v] if isinstance(v, str) else v
+            if not isinstance(taxes, (list, tuple)):
+                raise BenchmarkError("market.org_taxonomy must be a list of NPPES taxonomy codes")
+            m[k] = sorted({_market_text("org_taxonomy", t).upper() for t in taxes
+                           if t is not None and str(t).strip()})[:50]
         elif k == "codes":
             if v in (None, "", []):
                 continue
@@ -219,6 +231,14 @@ def normalize_market(market: dict | None) -> dict:
             "percentage and per-diem rates cannot be pooled with dollar rates — "
             "these views compare dollars. See them in the Explorer (untick "
             "'dollar rates only').")
+    if m.get("peer_group") is not None:
+        g = str(m["peer_group"]).strip().lower()
+        if g in ("", "all"):
+            m.pop("peer_group")
+        elif g not in PEER_GROUPS:
+            raise BenchmarkError("market.peer_group must be one of: " + ", ".join(PEER_GROUPS))
+        else:
+            m["peer_group"] = g
     if not str(m.get("month") or "").strip():
         m["month"] = LATEST_MONTH
     else:
@@ -314,6 +334,10 @@ def market_in_words(market: dict) -> str:
         parts.append("codes " + ", ".join(codes[:12]) + (" and more" if len(codes) > 12 else ""))
     if m.get("therapy_only"):
         parts.append("therapy practices only")
+    if m.get("peer_group") in PEER_GROUPS:
+        parts.append(f"compared with {PEER_GROUPS[m['peer_group']]}")
+    if m.get("org_taxonomy"):
+        parts.append("organization NPI taxonomy " + ", ".join(m["org_taxonomy"]))
     if m.get("peer_set"):
         parts.append(f"peer set {m['peer_set']}")
     cls = m.get("billing_class", "professional")
@@ -515,7 +539,7 @@ def _market_where(market: dict, include_assistant: bool, include_non_dollar: boo
 # state / city / therapists-only scope the peers are drawn from (audit 8
 # P1-2: a MO+KS practice read "your rate $40" on Benchmark, $50 on the
 # rate card; by hand, median(40, 60) = $50).
-PEER_ONLY_KEYS = ("therapy_only", "state", "city")
+PEER_ONLY_KEYS = ("therapy_only", "state", "city", "peer_group", "org_taxonomy")
 
 
 def subject_market(market: dict) -> dict:
@@ -535,6 +559,16 @@ def _practice_attr_where(market: dict) -> tuple[list, list]:
         # market and the subject both restrict to real therapists, so the
         # benchmark isn't diluted by the MDs/DOs/NPs who billed a 97xxx code.
         clauses.append("coalesce(td.is_therapy, FALSE)")
+    group = market.get("peer_group")
+    if group == "clinics":
+        # outpatient rehab clinics: org taxonomy, clinician mix, Medicare
+        # private-practice billing, not at a hospital / SNF address
+        clauses.append("td.practice_type = 'outpatient_clinic'")
+    elif group == "therapy":
+        clauses.append("coalesce(td.is_therapy, FALSE)")
+    if market.get("org_taxonomy"):
+        clauses.append("list_has_any(coalesce(td.org_taxonomies, []::VARCHAR[]), ?::VARCHAR[])")
+        params.append(list(market["org_taxonomy"]))
     if market.get("state"):
         clauses.append("list_contains(td.states, ?)")
         params.append(market["state"].upper())

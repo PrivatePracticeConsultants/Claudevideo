@@ -11,8 +11,10 @@ THE RULES (AI_HANDOFF "Round 12 additions"; each is pinned by
 tests/mrfx/test_review12.py's hand-worked case):
 
 - Confined to ONE state and ONE discipline, both required — a visit value
-  pooled across states or disciplines is not a market. Nothing else narrows
-  the population (no city, no therapists-only switch); payers may be limited.
+  pooled across states or disciplines is not a market. The practices may be
+  narrowed to a peer group (0.8.6: outpatient rehab clinics — the dashboard's
+  default — or therapy practices) and by organization NPI taxonomy; payers
+  may be limited. No city.
 - Population = the Benchmark's market on the house basis: dollar rates,
   professional claims, base modifiers, each contract at its newest month (or
   the pinned month), NPI-in-the-TIN-slot rows excluded, the discipline's own
@@ -161,7 +163,11 @@ def _compute_values(store: Store, market: dict | None, raw_lines=None,
         raise VisitError("pick a discipline — PT, OT or SLP: a visit is priced on one "
                          "discipline's rates")
     m = normalize_market({"month": m0.get("month") or "latest", "state": m0["state"],
-                          "discipline": disc, "payers": m0.get("payers") or []})
+                          "discipline": disc, "payers": m0.get("payers") or [],
+                          # who the practices are (0.8.6): outpatient rehab
+                          # clinics by default on the dashboard, or everyone
+                          "peer_group": m0.get("peer_group"),
+                          "org_taxonomy": m0.get("org_taxonomy")})
     key, lines, label, basis = _basket(raw_lines, preset)
     visit = define_visit(lines)
     # in the visit's own line order (the calculator's), each code once

@@ -2558,6 +2558,12 @@ class Store:
             -- how many organization NPIs in the whole directory carry each
             -- normalized business name (naming.py rule 1's last tie-break)
             CREATE TABLE IF NOT EXISTS org_name_freq (k VARCHAR, g BIGINT);
+            -- CMS-listed hospitals and nursing homes with a normalized
+            -- address key (0.8.6, mrfx/cmsref.py) — practice addresses there
+            -- mark a tax ID hospital- or SNF-based, not an outpatient clinic
+            CREATE TABLE IF NOT EXISTS cms_facilities (kind VARCHAR, ccn VARCHAR,
+                name VARCHAR, address VARCHAR, city VARCHAR, state VARCHAR,
+                zip VARCHAR, addr_key VARCHAR, release VARCHAR);
             -- Which health PLANS a rate file serves, harvested from the payer's
             -- table-of-contents (the rate file itself never names a plan).
             -- Keyed by the URL's dedup_key so it joins to url_queue, which
@@ -2737,16 +2743,34 @@ class Store:
         has = bool(con.execute(
             "SELECT count(*) FROM information_schema.tables "
             "WHERE table_name = 'practice_names_tbl'").fetchone()[0])
+        # before the classification has run for a TIN: the directory's own
+        # flags decide (today's therapy-practice test), never an empty market
+        fallback = ("CASE WHEN coalesce(t.has_hospital, FALSE) THEN 'hospital' "
+                    "WHEN coalesce(t.has_facility, FALSE) THEN 'facility' "
+                    "WHEN coalesce(t.is_therapy, FALSE) THEN 'outpatient_clinic' "
+                    "WHEN coalesce(t.classified_npi_count, 0) > 0 THEN 'physician_other' "
+                    "ELSE 'unknown' END")
         if not has:
-            return ("SELECT *, CASE WHEN coalesce(npi_count, 0) = 0 THEN 'no_npi' "
-                    "ELSE 'pending' END AS name_source FROM tin_directory_tbl")
+            return ("SELECT t.*, CASE WHEN coalesce(t.npi_count, 0) = 0 THEN 'no_npi' "
+                    "ELSE 'pending' END AS name_source, "
+                    f"{fallback} AS practice_type, NULL::VARCHAR AS type_reason, "
+                    "[]::VARCHAR[] AS org_taxonomies FROM tin_directory_tbl t")
+        cols = {r[0] for r in con.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'practice_names_tbl'").fetchall()}
+        typed = "practice_type" in cols
         return ("SELECT t.* REPLACE (coalesce(n.practice_name, t.display_name) AS display_name, "
                 "CASE WHEN len(n.cities) > 0 THEN n.cities ELSE t.cities END AS cities), "
                 "coalesce(n.name_source, CASE WHEN coalesce(t.npi_count, 0) = 0 THEN 'no_npi' "
-                "ELSE 'pending' END) AS name_source "
-                "FROM tin_directory_tbl t LEFT JOIN practice_names_tbl n USING (tin_value)")
+                "ELSE 'pending' END) AS name_source, "
+                + (f"coalesce(n.practice_type, {fallback}) AS practice_type, n.type_reason, "
+                   "coalesce(n.org_taxonomies, []::VARCHAR[]) AS org_taxonomies "
+                   if typed else
+                   f"{fallback} AS practice_type, NULL::VARCHAR AS type_reason, "
+                   "[]::VARCHAR[] AS org_taxonomies ")
+                + "FROM tin_directory_tbl t LEFT JOIN practice_names_tbl n USING (tin_value)")
 
-    NAMES_SCHEMA = 1
+    NAMES_SCHEMA = 2
 
     def _names_stamp(self) -> str:
         """What the practice names are computed from: the (TIN, NPI) pairs
@@ -2757,8 +2781,14 @@ class Store:
             npi = con.execute("SELECT count(*), max(enriched_at)::VARCHAR FROM npi_directory").fetchone()
             dac = con.execute("SELECT count(*) FROM dac_orgs").fetchone()[0]
             rel = self._meta_get(con, "dac_release")
+            fac = self._meta_get(con, "cms_facilities_release")
+            dver = self._meta_get(con, "directory_names_through")
+        util = sorted((p.name, p.stat().st_size, p.stat().st_mtime_ns)
+                      for p in (self.dir / "utilization").glob("*.parquet")) \
+            if (self.dir / "utilization").exists() else []
         return hashlib.sha1(json.dumps(
-            [pairs, list(npi), dac, rel, self.NAMES_SCHEMA]).encode()).hexdigest()[:16]
+            [pairs, list(npi), dac, rel, fac, util, dver, self.NAMES_SCHEMA],
+            default=str).encode()).hexdigest()[:16]
 
     def refresh_practice_names(self, force: bool = False) -> bool:
         """Re-resolve every practice's name and cities (mrfx/naming.py) when
@@ -2766,7 +2796,8 @@ class Store:
         lock held, swapped in under the writer lock in one transaction.
         True when it rebuilt. `serve` runs it in the background
         (warm_part_sets); never raises."""
-        from .naming import ORG_NAME_FREQ_SQL, names_sql
+        from .naming import (ORG_NAME_FREQ_SQL, PRACTICE_TYPE_SQL, TYPE_REASON_SQL,
+                             names_sql, profile_sql)
         try:
             stamp = self._names_stamp()
             with self.connect() as con:
@@ -2782,10 +2813,26 @@ class Store:
                     con.execute(f"COPY ({ORG_NAME_FREQ_SQL}) TO '{sql_path(tmp_f)}' (FORMAT PARQUET)")
                     tin_npis = (f"SELECT tin_value, npi FROM {pairs} "
                                 "WHERE NOT coalesce(tin_is_really_npi, FALSE)")
-                    sql = names_sql(tin_npis).replace(
+                    names = names_sql(tin_npis).replace(
                         "LEFT JOIN org_name_freq f",
                         f"LEFT JOIN read_parquet('{sql_path(tmp_f)}') f")
-                    con.execute(f"COPY ({sql} ORDER BY t.tin_value) TO '{sql_path(tmp_n)}' "
+                    util_cols = self._utilization_columns(con)
+                    prof = profile_sql(tin_npis, has_util=bool(util_cols),
+                                       has_provider_type="provider_type" in util_cols)
+                    has_dir = bool(con.execute(
+                        "SELECT count(*) FROM information_schema.tables "
+                        "WHERE table_name = 'tin_directory_tbl'").fetchone()[0])
+                    tdr = ("tin_directory_tbl" if has_dir else
+                           "(SELECT NULL::VARCHAR AS tin_value, NULL::BOOLEAN AS has_hospital, "
+                           "NULL::BOOLEAN AS has_facility, NULL::BOOLEAN AS is_therapy, "
+                           "NULL::BIGINT AS therapy_npi_count, NULL::BIGINT AS classified_npi_count "
+                           "WHERE FALSE)")
+                    sql = (f"SELECT n.*, p.org_taxonomies, p.n_addr, p.n_hosp_addr, p.n_snf_addr, "
+                           f"p.mc_npis, p.mc_ptpp, p.mc_ptpp_share, p.mc_office_share, "
+                           f"{PRACTICE_TYPE_SQL} AS practice_type, {TYPE_REASON_SQL} AS type_reason "
+                           f"FROM ({names}) n LEFT JOIN ({prof}) p ON p.tin_value = n.tin_value "
+                           f"LEFT JOIN {tdr} td ON td.tin_value = n.tin_value")
+                    con.execute(f"COPY ({sql} ORDER BY n.tin_value) TO '{sql_path(tmp_n)}' "
                                 "(FORMAT PARQUET)")
                 with self.write_lock, self.connect() as con:
                     con.execute("BEGIN TRANSACTION")
@@ -2813,6 +2860,17 @@ class Store:
             import logging as _logging
             _logging.getLogger(__name__).warning("practice names not refreshed", exc_info=True)
             return False
+
+    def _utilization_columns(self, con: duckdb.DuckDBPyConnection) -> set:
+        """The Medicare utilization view's columns when it holds rows, else
+        an empty set (no evidence from it)."""
+        try:
+            cols = {r[0] for r in con.execute("DESCRIBE SELECT * FROM utilization").fetchall()}
+            if not con.execute("SELECT count(*) FROM utilization").fetchone()[0]:
+                return set()
+            return cols
+        except duckdb.Error:
+            return set()
 
     def practice_names_for(self, tins: list[str], state: str | None) -> dict[str, dict]:
         """{tin: {practice_name, name_source, n_npi, cities, top_cities}} for
