@@ -2731,7 +2731,18 @@ class Store:
             elif not cols:
                 con.execute(f"CREATE OR REPLACE VIEW {view} AS {q}")
             elif tbl == "tin_directory_tbl":
-                con.execute(f"CREATE OR REPLACE VIEW {view} AS {self._directory_view_sql(con)}")
+                # a directory materialised by an older version may lack a
+                # column the view reads: NULL it here so the store opens and
+                # the schema migration (_migrate_stale_rollups) can rebuild it
+                need = {"display_name": "VARCHAR", "npi_count": "BIGINT", "cities": "VARCHAR[]",
+                        "states": "VARCHAR[]", "therapy_npi_count": "BIGINT",
+                        "classified_npi_count": "BIGINT", "has_hospital": "BOOLEAN",
+                        "has_facility": "BOOLEAN", "is_therapy": "BOOLEAN"}
+                miss = [f"NULL::{t} AS {c}" for c, t in need.items() if c not in cols]
+                src = (f"(SELECT *, {', '.join(miss)} FROM tin_directory_tbl)" if miss
+                       else "tin_directory_tbl")
+                con.execute(f"CREATE OR REPLACE VIEW {view} AS "
+                            f"{self._directory_view_sql(con, src)}")
             elif tbl == "rates_by_tin_tbl" and "is_latest" not in cols:
                 # a spine not yet given its stored flag (_migrate_latest_flag
                 # failed or has not run): supply it per query — the old cost,
@@ -2802,10 +2813,13 @@ class Store:
             dsig = None
             if con.execute("SELECT count(*) FROM information_schema.tables "
                            "WHERE table_name = 'tin_directory_tbl'").fetchone()[0]:
-                dsig = con.execute(
-                    "SELECT count(*), sum(hash(tin_value, is_therapy, therapy_npi_count, "
-                    "classified_npi_count, has_hospital, has_facility, states)) "
-                    "FROM tin_directory_tbl").fetchone()
+                try:
+                    dsig = con.execute(
+                        "SELECT count(*), sum(hash(tin_value, is_therapy, therapy_npi_count, "
+                        "classified_npi_count, has_hospital, has_facility, states)) "
+                        "FROM tin_directory_tbl").fetchone()
+                except duckdb.Error:     # an older directory, awaiting its migration
+                    dsig = None
         util = sorted((p.name, p.stat().st_size, p.stat().st_mtime_ns)
                       for p in (self.dir / "utilization").glob("*.parquet")) \
             if (self.dir / "utilization").exists() else []
