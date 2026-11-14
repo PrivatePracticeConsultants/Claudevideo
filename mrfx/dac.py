@@ -24,7 +24,10 @@ DATASET = "mj5m-pzi6"
 METASTORE = ("https://data.cms.gov/provider-data/api/1/metastore/schemas/dataset/"
              f"items/{DATASET}")
 FILENAME = "DAC_NationalDownloadableFile.csv"
-UA = "MRF-Explorer (CMS DAC download)"
+# data.cms.gov answers 403 to a User-Agent containing "Explorer" (and to a
+# bare "Mozilla/5.0") — measured 2026-11-14; "mrfx/<version>" is accepted
+from . import __version__ as _v
+UA = f"mrfx/{_v}"
 
 
 def _client():
