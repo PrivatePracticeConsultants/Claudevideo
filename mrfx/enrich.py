@@ -166,7 +166,10 @@ def _maybe_refresh_directory(store: Store, force: bool = False) -> bool:
     global _last_dir_refresh, _names_dirty, _dir_refresh_interval
     with _refresh_lock:
         now = time.monotonic()
-        if not force and now - _last_dir_refresh < _dir_refresh_interval:
+        # 0.0 = never refreshed in this process: run. (time.monotonic()
+        # counts from boot, so "now - 0.0 < 240 s" skipped the first refresh
+        # on a computer started less than four minutes before the app)
+        if not force and _last_dir_refresh and now - _last_dir_refresh < _dir_refresh_interval:
             return False
         dirty = _names_dirty
     ready = getattr(store, "directory_ready", None)
