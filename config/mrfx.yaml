@@ -258,6 +258,12 @@ cms_dac: auto
 cms_reference: auto
 # cms_ref_dir: data/cms_ref
 
+# Prepare the slow screens as soon as the app starts (Market overview, the
+# Explorer's summary, …) and again after every analytics update — plus every
+# screen you waited on before, with the same filters — so they are ready
+# when you open them. false = compute each one the first time you open it.
+warm_on_start: true
+
 # Keep ONLY therapist rows (PT/OT/SLP + therapy clinics, by NPPES taxonomy) at
 # ingest, dropping the MDs/DOs/NPs who merely bill a 97xxx code. Shrinks the
 # store several-fold and speeds every rebuild/query. Off by default. It

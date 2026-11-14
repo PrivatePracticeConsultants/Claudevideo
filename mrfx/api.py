@@ -1646,6 +1646,10 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     app.state.progress_registry = progress_registry
     app.add_middleware(ProgressMiddleware, registry=progress_registry)
     app.add_middleware(SwapRetryMiddleware)
+    # a dashboard GET the user waited on is remembered and pre-loaded at the
+    # next launch (mrfx/warmup.py)
+    from .warmup import SlowRequestMiddleware
+    app.add_middleware(SlowRequestMiddleware, store_dir=store.dir)
     app.add_middleware(LocalOnlyMiddleware)
 
     def _progress_route(plan: str):
@@ -2031,11 +2035,14 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     # this collapses repeated identical loads and stops stacking.
     _summary_cache: dict[tuple, tuple[float, dict]] = {}
     _summary_lock = threading.Lock()
+    _summary_inflight: dict = {"key": None}     # the key the lock holder computes
+    app.state.summary_inflight = _summary_inflight
     app.state.summary_lock = _summary_lock      # (tests hold it: the waiting state)
     # the market overview does several whole-spine GROUP BYs — heavy at book
     # scale — so cache per (state, data_generation); it changes only on a rebuild.
     _overview_cache: dict[tuple, dict] = {}
     _overview_lock = threading.Lock()
+    app.state.overview_lock = _overview_lock    # (tests hold it: the waiting state)
 
     # A per-generation strip (off the bare spine, a pure function of it) is
     # kept on disk too, named by the spine's content (Store.spine_key, like
@@ -2125,8 +2132,12 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             return _summary_locked(fs, grain, key, hit, fresh, vcon, alive, True)
 
     def _summary_locked(fs, grain, key, hit, fresh, vcon, alive, wait):
+        # the SAME summary already being computed (the launch pre-load) is
+        # waited for in full and then read from the cache — not "busy" after
+        # 8 s while the one scan that answers it runs (0.8.8)
+        same = _summary_inflight.get("key") == key
         with _progress.current().waiting("Waiting for an earlier summary to finish"):
-            got = (_summary_lock.acquire(timeout=8.0) if wait
+            got = (_summary_lock.acquire(timeout=1800.0 if same else 8.0) if wait or same
                    else _summary_lock.acquire(blocking=False))
         if not got:
             # a heavy scan is already running — serve the last value for THIS
@@ -2136,6 +2147,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             if hit is not None:
                 return _with_anchor(hit[1], fs)
             raise HTTPException(503, "summary is busy — it will load on the next refresh")
+        _summary_inflight["key"] = key
         try:
             hit = _summary_cache.get(key)  # re-check under the lock
             if fresh(hit):
@@ -2205,6 +2217,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 _strip_disk_put(grain, fs, scanned)
             return _with_anchor(scanned, fs)
         finally:
+            _summary_inflight["key"] = None
             _summary_lock.release()
 
     def _with_anchor(scanned: dict, fs: FilterSet) -> dict:
@@ -4987,7 +5000,12 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         # single-flight: the overview does several whole-spine GROUP BYs, so a
         # cold cache (esp. right after a rebuild bumps data_generation for all
         # polling tabs at once) would otherwise fan out N concurrent scans.
-        if not _overview_lock.acquire(blocking=False):
+        # an overview already being computed (the launch pre-load, another
+        # tab) is WAITED for, then served from the cache — not answered
+        # "building" while the one computation runs (0.8.8)
+        with _progress.current().waiting("Waiting for the overview being prepared"):
+            got = _overview_lock.acquire(timeout=1800)
+        if not got:
             raise HTTPException(503, "overview is building — it will load on the next refresh")
         try:
             hit = _overview_cache.get(key)  # re-check under the lock

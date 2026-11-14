@@ -972,6 +972,30 @@ Pinned by `tests/mrfx/test_review14.py` (every Group 1-3 case fails on
   paste is durable (`meta('pending_paste')`, `resume_pending_paste`). A
   hospital of an already-loaded name from another file is refused.
 
+### 0.8.8 additions (Nov 14, 2026) — the slow screens are prepared at launch
+
+Field report: "Loading market overview — the first screen after a start reads
+the whole store" on a 1.5B-rate store, every start. Cause: every whole-store
+answer is cached in memory per `data_generation`, which starts at 0 each run.
+
+- `mrfx/warmup.py`: `serve`'s `mrfx-warm` thread (config `warm_on_start`,
+  default on) GETs `plan(store.dir)` through the app's own routes, one at a
+  time, with header `x-mrfx-warm: 1` — right after the server answers
+  `/api/boot`, then after each `(data_generation, spine_generation)` change
+  once it has been still for 20 s, no rollup is active and ≥ 10 min passed
+  (the name refresh bumps the generation every few minutes). The plan =
+  `DEFAULT_URLS` (the dashboard's boot GETs, captured from a real session)
+  + `store/warm_urls.json`: every non-download GET a user waited ≥ 3 s on
+  (`SlowRequestMiddleware`; progress / cache-buster params stripped; newest
+  first, max 30). Downloads, reports and polls are never learned (uncached).
+- Waiting instead of refusing: `/api/overview` blocks on its single-flight
+  lock (was 503 "building"); `/api/summary` waits in full when the lock
+  holder computes the SAME key (`_summary_inflight`); `Store.cached` is
+  single-flight per (generation, key) — a second caller waits on the first
+  computation's Event; a failure is not remembered.
+- Measured on BCBS TN (6.2M rates): 8 of 8 screens prepared 2.5 s after
+  launch; first opens 4–12 ms. Pinned by `tests/mrfx/test_warmup.py`.
+
 ### 0.8.7 additions (Nov 14, 2026) — the dashboard redesign, on the real app
 
 The user's design-tool handoff (`mrf-explorer-redesign.zip`: tokens.json /

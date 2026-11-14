@@ -160,6 +160,11 @@ class MrfxConfig(BaseModel):
     # practice, and where). "auto": `serve` fetches both (~20 MB + a few
     # minutes of API paging) and checks monthly. "off": `mrfx cmsref` only.
     cms_reference: Literal["auto", "off"] = "auto"
+    # Pre-load the slow screens (0.8.8, mrfx/warmup.py): `serve` asks the
+    # dashboard's whole-store questions itself as soon as it is up and after
+    # every analytics update — plus every screen you waited on before — so
+    # they are ready when you open them. false = compute on first open.
+    warm_on_start: bool = True
     cms_ref_dir: Path = Path("data/cms_ref")
 
     @field_validator("backup_dir", mode="before")

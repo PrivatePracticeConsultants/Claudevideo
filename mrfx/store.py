@@ -6447,7 +6447,30 @@ class Store:
             # copied OUTSIDE the process-wide lock: a big answer's deep copy
             # held every other cached reader waiting (round 7 P2)
             return copy.deepcopy(held)
-        value = compute()
+        # single-flight (0.8.8): the same answer already being computed (the
+        # launch pre-load, a second tab) is WAITED for, not computed twice
+        import threading as _threading
+        with self._gen_cache_lock:
+            inflight = self.__dict__.setdefault("_gen_inflight", {})
+            ev = inflight.get((gen, k))
+            mine = ev is None
+            if mine:
+                ev = inflight[(gen, k)] = _threading.Event()
+        if not mine:
+            ev.wait(1800)
+            with self._gen_cache_lock:
+                held = (self._gen_cache.get(k, _MISSING)
+                        if self._gen_cache.get("_gen") == gen else _MISSING)
+            if held is not _MISSING:
+                return copy.deepcopy(held)
+            # the first computation failed or the data moved on: our own
+            return compute()
+        try:
+            value = compute()
+        finally:
+            with self._gen_cache_lock:
+                inflight.pop((gen, k), None)
+            ev.set()
         if _run_cancelled():
             # computed under a Stop: a fault-isolated section may have caught
             # the stop and degraded ("stopped" per client, a missing

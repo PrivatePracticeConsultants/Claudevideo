@@ -337,6 +337,47 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
                 if stop.wait(24 * 3600):
                     return
         threading.Thread(target=_cmsref_loop, name="mrfx-cms-ref", daemon=True).start()
+    if getattr(cfg, "warm_on_start", True):
+        # pre-load the slow screens (0.8.8, mrfx/warmup.py): once the server
+        # answers, then after every analytics update (once the data has been
+        # still for 20 s and no build is running), one request at a time
+        def _warm_loop():
+            import httpx as _httpx
+
+            from .warmup import plan, warm
+            base = f"http://127.0.0.1:{cfg.port}"
+            for _ in range(900):
+                if stop.wait(1):
+                    return
+                try:
+                    _httpx.get(base + "/api/boot", timeout=5, trust_env=False)
+                    break
+                except Exception:  # noqa: BLE001 — not listening yet
+                    continue
+            last, last_t = None, 0.0
+            while not stop.is_set():
+                try:
+                    sig = (store.data_generation, store.spine_generation)
+                    # at most every 10 min after the first: the name lookups
+                    # bump the generation every few minutes without a rate
+                    # changing, and each re-warm is a whole-store pass
+                    if sig != last and (last is None or (not store._rollup_active
+                                                         and time.monotonic() - last_t >= 600)):
+                        if last is not None and (stop.wait(20)
+                                                 or sig != (store.data_generation, store.spine_generation)):
+                            continue           # still moving: wait for it to settle
+                        t0 = time.monotonic()
+                        urls = plan(store.dir)
+                        got = warm(base, urls, stop)
+                        ok = sum(1 for v in got.values() if not isinstance(v, str))
+                        log.info("pre-loaded %d of %d screens in %.0f s", ok, len(urls),
+                                 time.monotonic() - t0)
+                        last, last_t = sig, time.monotonic()
+                except Exception as e:  # noqa: BLE001 — never in the app's way
+                    log.warning("pre-loading screens skipped (%s)", e)
+                if stop.wait(30):
+                    return
+        threading.Thread(target=_warm_loop, name="mrfx-warm", daemon=True).start()
     threading.Thread(
         target=_watcher_loop, args=(cfg, store, stop), name="mrfx-watcher", daemon=True
     ).start()

@@ -1055,6 +1055,20 @@ Downloads and files:
 - **"fee for service" / "fee_schedule"** spelled differently by a payer no
   longer drop rates.
 
+## What changed in version 0.8.8
+
+- **Slow screens are ready when you open them.** As soon as MRF Explorer
+  starts, it prepares the screens that read the whole store — the Market
+  overview, the Explorer's summary and first page, the payer / month / state
+  lists — and it prepares them again after every analytics update. Any screen
+  you waited on for more than 3 seconds (with your filters, e.g. Tennessee)
+  is remembered and prepared at the next start too. On a very large store
+  the first preparation still takes the time those screens take — it now
+  happens in the background from launch instead of while you wait.
+- If you open a screen while it is still being prepared, it waits for that
+  one computation instead of saying "building — try again".
+- `warm_on_start: false` in config/mrfx.yaml turns it off.
+
 ## What changed in version 0.8.7
 
 - **A new look.** The dashboard was redesigned: dark navy surfaces, one

@@ -877,7 +877,7 @@ async function loadOverview(stateCode = "") {
   // (review 9 item 2.5)
   const slow = setTimeout(() => {
     if (out.querySelector(".loading"))
-      out.innerHTML = `<div class="loading">Loading market overview — the first screen after a start reads the whole store and can take up to a minute on a large one; later screens are fast</div>`;
+      out.innerHTML = `<div class="loading">Preparing the market overview — MRF Explorer starts computing it the moment it launches, so it is usually ready; on a very large store the first one after a start or an analytics update can still take a minute or two</div>`;
   }, 4000);
   let d;
   const isFresh = ticket("overview");
