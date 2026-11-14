@@ -4517,6 +4517,56 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         except (BenchmarkError, ValueError, TypeError) as e:
             raise HTTPException(422, str(e))
 
+    @app.post("/api/negotiate/paid-more")
+    @_progress_route("compare")
+    def negotiate_paid_more(body: dict = Body(...)):
+        """The named clinics this payer pays more than the practice for the
+        same codes — its city when 5+ comparable clinics are there, else its
+        state (benchmark.clinics_paid_more)."""
+        from .benchmark import clinics_paid_more
+        try:
+            return clinics_paid_more(store, str(body.get("subject", "")),
+                                     str(body.get("payer", "")), body.get("market") or {},
+                                     limit=int(body.get("limit") or 100))
+        except (BenchmarkError, ValueError, TypeError) as e:
+            raise HTTPException(422, str(e))
+
+    @app.post("/api/negotiate/paid-more.csv", response_class=PlainTextResponse)
+    @_progress_route("compare")
+    def negotiate_paid_more_csv(body: dict = Body(...)):
+        import csv as _csv
+        import io as _io
+
+        from .benchmark import clinics_paid_more
+        from .store import defuse_csv
+        try:
+            d = clinics_paid_more(store, str(body.get("subject", "")), str(body.get("payer", "")),
+                                  body.get("market") or {}, limit=1000)
+        except (BenchmarkError, ValueError, TypeError) as e:
+            raise HTTPException(422, str(e))
+        buf = _io.StringIO()
+        for line in (d["headline"], f"Compared with: {d['compared_with']} in {d['where']}.",
+                     d["note"], *store.analytics_note()):
+            buf.write("# " + " ".join(str(line).split()) + "\n")
+        w = _csv.writer(buf)
+        codes = [c["code"] for c in d["codes"]]
+        w.writerow(["rank", "practice", "name_source", "practice_type", "tax_id", "cities",
+                    "npi_count", "codes_compared", "codes_paid_more", "median_gap_pct",
+                    *[f"rate_{c}" for c in codes], "why_this_type"])
+        w.writerow(["", "YOUR RATE", "", "", "", "", "", "", "", "",
+                    *[f"{c['your_rate']:.2f}" for c in d["codes"]], ""])
+        for x in d["clinics"]:
+            r = {q["code"]: q["rate"] for q in x["rates"]}
+            w.writerow([defuse_csv(str(v)) for v in (
+                x["rank"], x["name"], x["name_source"] or "", x["practice_type"] or "", x["tin"],
+                "; ".join(x["cities"]), x["npi_count"] if x["npi_count"] is not None else "",
+                x["codes_compared"], x["codes_paid_more"],
+                "" if x["median_gap_pct"] is None else f"{x['median_gap_pct']:.1f}",
+                *[(f"{r[c]:.2f}" if c in r else "") for c in codes], x["type_reason"] or "")])
+        safe = re.sub(r"[^A-Za-z0-9]+", "_", d["payer"]).strip("_") or "payer"
+        return PlainTextResponse("\ufeff" + buf.getvalue(), headers={
+            "Content-Disposition": f'attachment; filename="paid_more_{safe}.csv"'})
+
     @app.post("/api/report/proposal", response_class=HTMLResponse)
     @_progress_route("proposal")
     def report_proposal(body: dict = Body(...), fmt: str = Query("", alias="format")):

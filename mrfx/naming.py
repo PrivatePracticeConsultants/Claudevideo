@@ -188,6 +188,7 @@ PRACTICE_TYPES = {
     "outpatient_clinic": "Outpatient rehab clinic",
     "hospital": "Hospital / hospital outpatient",
     "facility": "Nursing home or other facility (SNF, home health …)",
+    "physician_therapy": "Physician-owned therapy (e.g. an orthopedic group with PT)",
     "physician_other": "Physician / multispecialty / other",
     "unknown": "Not enough information to tell",
 }
@@ -265,11 +266,17 @@ PRACTICE_TYPE_SQL = """CASE
          OR (p.n_addr > 0 AND p.n_snf_addr * 2 > p.n_addr) THEN 'facility'
     WHEN p.org_clinic OR coalesce(td.is_therapy, FALSE)
          -- Medicare: most of its therapy SERVICES billed by therapists in
-         -- private practice, and therapists are a real part of it (a
-         -- 4,511-clinician health system with 124 therapists is not a clinic)
+         -- private practice, and therapists are at least half of its
+         -- identified clinicians (a 4,511-clinician health system with 124
+         -- therapists is not a clinic)
          OR (coalesce(p.mc_ptpp_share, 0) >= 0.5
              AND (coalesce(td.classified_npi_count, 0) = 0
-                  OR td.therapy_npi_count >= 0.25 * td.classified_npi_count)) THEN 'outpatient_clinic'
+                  OR td.therapy_npi_count >= 0.5 * td.classified_npi_count)) THEN 'outpatient_clinic'
+    -- an orthopedic / physician group whose therapists bill most of its
+    -- therapy (25-50% therapists): BCBS TN paid one $88.04 for 97110 against
+    -- $24.23 at clinics — physician contracts, not a clinic's peer
+    WHEN coalesce(p.mc_ptpp_share, 0) >= 0.5
+         AND td.therapy_npi_count >= 0.25 * td.classified_npi_count THEN 'physician_therapy'
     WHEN coalesce(td.classified_npi_count, 0) > 0 THEN 'physician_other'
     ELSE 'unknown' END"""
 

@@ -173,3 +173,36 @@ def test_before_the_classification_runs_the_directory_flags_decide(store, tmp_pa
     with store.connect() as con:
         got = con.execute("SELECT practice_type, name_source FROM tin_directory").fetchall()
     assert got == [("outpatient_clinic", "pending")]
+
+
+def test_negotiate_lists_the_clinics_the_payer_pays_more(typed):
+    """(Negotiate) RIVER PT is paid $40.00 for 97110. Among outpatient rehab
+    clinics only HILL THERAPY ($42.00, +5.0%) is paid more (JON/KIM's $38 is
+    not); fewer than 5 clinics in NASHVILLE -> the state. Among all
+    practices: CITY HOSPITAL $60 (+50%), the hospital-address group $55
+    (+37.5%), HILL THERAPY $42 (+5%) — ranked by codes paid more, then gap.
+    was: no such list (404)."""
+    from fastapi.testclient import TestClient
+
+    from mrfx.api import create_app
+    from mrfx.benchmark import clinics_paid_more
+    d = clinics_paid_more(typed, "500000001", "BCBS TN", {"month": "latest", "state": "TN"})
+    assert (d["geography"], d["where"], d["practices_compared"], d["clinics_paid_more"]) == (
+        "state", "TN", 2, 1)
+    (x,) = d["clinics"]
+    assert (x["name"], x["codes_paid_more"], x["median_gap_pct"], x["practice_type"]) == (
+        "HILL THERAPY PC", 1, 5.0, "outpatient_clinic")
+    assert d["codes"] == [{"code": "97110", "description": d["codes"][0]["description"],
+                           "your_rate": 40.0, "practices": 2, "median": 40.0, "highest": 42.0,
+                           "paid_more": 1, "gap_to_median": 0.0}]
+    every = clinics_paid_more(typed, "500000001", "BCBS TN",
+                              {"month": "latest", "state": "TN", "peer_group": "all"})
+    assert [(c["rank"], c["median_gap_pct"]) for c in every["clinics"]] == [
+        (1, 50.0), (2, 37.5), (3, 5.0)]
+    from mrfx.config import MrfxConfig
+    cfg = MrfxConfig(store_dir=typed.dir, cms_dac="off")
+    client = TestClient(create_app(cfg, typed), base_url="http://localhost")
+    body = {"subject": "500000001", "payer": "BCBS TN", "market": {"month": "latest", "state": "TN"}}
+    assert client.post("/api/negotiate/paid-more", json=body).json()["clinics_paid_more"] == 1
+    csv = client.post("/api/negotiate/paid-more.csv", json=body).text
+    assert "HILL THERAPY PC" in csv and "YOUR RATE" in csv and "rate_97110" in csv

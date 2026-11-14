@@ -2687,6 +2687,58 @@ function negotiatePayload() {
   return { subject, payer, market, comparables: state.ngComps.slice() };
 }
 
+// The named clinics this payer pays more for the same codes (0.8.6) — the
+// evidence a rate request cites. City first (5+ comparable clinics), else state.
+async function loadPaidMore(payload) {
+  const box = $("#ng-paidmore");
+  box.innerHTML = `<div class="loading">Finding the clinics ${esc(payload.payer)} pays more</div>`;
+  let d;
+  try { d = await postJson("/api/negotiate/paid-more", payload); }
+  catch (e) { box.innerHTML = `<div class="muted">Clinics paid more: ${esc(e.message)}</div>`; return; }
+  const codes = d.codes.map((c) => `<tr><td><b>${esc(c.code)}</b> <span class="sub">${esc(c.description || "")}</span></td>
+      <td class="num">${money(c.your_rate)}</td><td class="num">${c.median == null ? "–" : money(c.median)}</td>
+      <td class="num">${c.highest == null ? "–" : money(c.highest)}</td>
+      <td class="num">${fmtInt(c.paid_more)} <span class="sub">of ${fmtInt(c.practices)}</span></td></tr>`).join("");
+  const rows = d.clinics.map((x) => {
+    const where = (x.cities || []).join(", ");
+    const tag = NAME_SOURCE_TAG[x.name_source] ? ` <span class="sub">· ${esc(NAME_SOURCE_TAG[x.name_source])}</span>` : "";
+    const rates = x.rates.filter((r) => r.gap > 0).slice(0, 6)
+      .map((r) => `${esc(r.code)} ${money(r.rate)} <span class="peer-up">+${money(r.gap)}</span>`).join(" · ");
+    return `<tr><td class="num">${x.rank}</td>
+      <td><b title="${esc(x.type_reason || "")}">${esc(x.name)}</b>${tag}<div class="sub">${esc(where)}</div></td>
+      <td>${esc(x.tin || "")}</td>
+      <td class="num">${fmtInt(x.codes_paid_more)} <span class="sub">of ${fmtInt(x.codes_compared)}</span></td>
+      <td class="num">${x.median_gap_pct == null ? "–" : "+" + x.median_gap_pct + "%"}</td>
+      <td class="sub">${rates}</td></tr>`;
+  }).join("");
+  box.innerHTML = `<div class="validate-card">
+    <h3>Clinics ${esc(d.payer)} pays more — ${esc(d.where)}</h3>
+    <div class="rc-summary">${esc(d.headline)}</div>
+    <div class="muted" style="margin:6px 0">Compared with ${esc(d.compared_with)} in ${esc(d.where)}${
+      d.geography === "state" && d.city ? ` (fewer than 5 in ${esc(d.city)}, so the whole state)` : ""}.
+      <button class="btn" id="ng-paidmore-csv" style="margin-left:8px">Download CSV</button></div>
+    <div class="tablewrap" style="max-height:40vh"><table class="rc-table"><thead><tr><th>Your code</th>
+      <th class="num">Your rate</th><th class="num">Their median</th><th class="num">Highest</th>
+      <th class="num">Clinics paid more</th></tr></thead><tbody>${codes}</tbody></table></div>
+    ${d.clinics.length ? `<div class="tablewrap" style="max-height:60vh;margin-top:10px"><table class="rc-table">
+      <thead><tr><th class="num">#</th><th>Clinic</th><th>Tax ID</th><th class="num">Codes paid more</th>
+      <th class="num">Median gap</th><th>Where they are paid more (rate, gap)</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>` : ""}
+    <div class="muted" style="font-size:11.5px;margin-top:6px">${esc(d.note)}</div></div>`;
+  $("#ng-paidmore-csv").addEventListener("click", async () => {
+    try {
+      const r = await fetch("/api/negotiate/paid-more.csv", { method: "POST",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+      if (!r.ok) { alert("CSV export failed.\n\n" + await refusalText(r)); return; }
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(await r.blob());
+      a.download = `paid_more_${String(d.payer).replace(/[^A-Za-z0-9]+/g, "_")}.csv`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+    } catch (e) { alert("CSV export failed: " + e.message); }
+  });
+}
+
 async function runNegotiate() {
   const out = $("#ng-out");
   let payload;
@@ -2705,6 +2757,7 @@ async function runNegotiate() {
   if (!isFresh()) return;
   state.lastNegotiatePayload = payload;
   $("#ng-report").disabled = false;
+  loadPaidMore(payload);
   const mny = (v) => (v == null ? "–" : v < 0 ? `-$${fmtMoney(-v)}` : `$${fmtMoney(v)}`);
   const s = d.summary;
   const cards = [

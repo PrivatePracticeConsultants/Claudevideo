@@ -2439,3 +2439,152 @@ def _m(v) -> str:
 
 def _pctnum(v) -> str:
     return f"{half_up(v)}%" if v is not None else "–"
+
+
+# ---------------------------------------------------------------------------
+# Negotiate (0.8.6): the named clinics THIS payer pays more for the same codes
+# ---------------------------------------------------------------------------
+
+PAID_MORE_MIN_CITY = 5
+PAID_MORE_NOTE = (
+    "Clinics this payer pays more: every comparable practice (the 'Compare "
+    "against' group — outpatient rehab clinics unless you chose otherwise) the "
+    "same payer prices for at least one of your codes, in your city when at least "
+    f"{PAID_MORE_MIN_CITY} such practices are there, otherwise in your state. A "
+    "practice's rate for a code is the median of its published rates for it on "
+    "the same basis as your own (newest month per contract, dollar rates, "
+    "professional claims, base modifiers). 'Paid more' compares rates rounded to "
+    "the cent. Ranked by how many of your codes it is paid more for, then by its "
+    "median gap, then by tax ID.")
+
+
+def clinics_paid_more(store: Store, subject: str, payer: str, market: dict, *,
+                      limit: int = 100) -> dict:
+    """The named practices `payer` pays more than `subject` for the same
+    codes, in the subject's city (when PAID_MORE_MIN_CITY comparable practices
+    are there) else its state — the evidence a renegotiation letter cites."""
+    import statistics as _st
+
+    from .store import mask_tin
+    payer = str(payer or "").strip()
+    if not payer:
+        raise BenchmarkError("pick the payer you're negotiating with")
+    # outpatient rehab clinics unless the caller CHOSE otherwise ("all" is a
+    # choice: normalize_market drops it, so read what was sent)
+    asked = (market or {}).get("peer_group") if isinstance(market, dict) else None
+    market = resolve_plan_scope(store, normalize_market(market))
+    if asked in (None, ""):
+        market["peer_group"] = "clinics"
+    m = {**market, "payers": [payer]}
+    tins = subject_tins_for_market(store, subject, m)
+    if not tins:
+        raise BenchmarkError(f"no practice matches {subject!r}")
+    state = (m.get("state") or anchor_state(store, m, tins) or "").upper() or None
+    if not state:
+        raise BenchmarkError("pick a state — the comparison is local")
+    # the subject's own rate per code with this payer (median across its
+    # TINs — the rate card's rule), on the shared basis
+    sq, sp = practice_base_sql(store, subject_market(m), per_payer=True,
+                               extra=" AND t.payer = ? AND t.tin_value IN (SELECT unnest(?::VARCHAR[]))",
+                               extra_params=[payer, tins],
+                               prefilter="payer = ? AND tin_value IN (SELECT unnest(?::VARCHAR[]))",
+                               prefilter_params=[payer, tins], scoped_if_cold=True)
+    with store.connect() as con:
+        srows = con.execute(f"SELECT billing_code, tin_value, rate FROM ({sq})", sp).fetchall()
+    by_code: dict[str, list[float]] = {}
+    for code, _t, rate in srows:
+        if rate is not None:
+            by_code.setdefault(code, []).append(float(rate))
+    mine = {c: half_up(_st.median(v), 2) for c, v in by_code.items()}
+    if not mine:
+        raise BenchmarkError(f"{subject} has no published rate with {payer} on this basis")
+    codes = sorted(mine)
+    # the subject's main city in that state (its NPIs' practice locations)
+    named = store.practice_names_for(tins, state)
+    city_votes: dict[str, int] = {}
+    for t in tins:
+        for i, c in enumerate((named.get(t) or {}).get("top_cities") or []):
+            city_votes[c] = city_votes.get(c, 0) + (3 - i)
+    city = sorted(city_votes.items(), key=lambda kv: (-kv[1], kv[0]))[0][0] if city_votes else None
+
+    def peer_rows(geo: dict) -> list:
+        in_c = ", ".join("?" for _ in codes)
+        q, p = practice_base_sql(
+            store, {**m, **geo, "codes": codes}, per_payer=True,
+            extra=(f" AND t.payer = ? AND t.billing_code IN ({in_c})"
+                   " AND t.tin_value NOT IN (SELECT unnest(?::VARCHAR[]))"),
+            extra_params=[payer, *codes, tins],
+            prefilter=f"payer = ? AND billing_code IN ({in_c})",
+            prefilter_params=[payer, *codes], scoped_if_cold=True)
+        with store.connect() as con:
+            return con.execute(f"SELECT billing_code, tin_value, rate FROM ({q}) "
+                               "ORDER BY tin_value, billing_code", p).fetchall()
+    level, rows = "state", None
+    if city:
+        rows = peer_rows({"state": state, "city": city})
+        if len({t for _c, t, _r in rows}) >= PAID_MORE_MIN_CITY:
+            level = "city"
+        else:
+            rows = None
+    if rows is None:
+        rows = peer_rows({"state": state})
+    peers: dict[str, dict[str, float]] = {}
+    for code, tin, rate in rows:
+        if rate is not None:
+            peers.setdefault(tin, {})[code] = half_up(float(rate), 2)
+    code_rows = []
+    for c in codes:
+        vals = sorted(v[c] for v in peers.values() if c in v)
+        desc, _, _t = _code_info(c)
+        code_rows.append({
+            "code": c, "description": desc, "your_rate": mine[c], "practices": len(vals),
+            "median": half_up(_st.median(vals), 2) if vals else None,
+            "highest": vals[-1] if vals else None,
+            "paid_more": sum(1 for v in vals if v > mine[c]),
+            "gap_to_median": half_up(_st.median(vals) - mine[c], 2) if vals else None})
+    clinics = []
+    for tin, rates in peers.items():
+        shared = [c for c in codes if c in rates]
+        higher = [c for c in shared if rates[c] > mine[c]]
+        if not higher:
+            continue
+        gaps = [100.0 * (rates[c] - mine[c]) / mine[c] for c in higher if mine[c]]
+        clinics.append({"_tin": tin, "codes_compared": len(shared), "codes_paid_more": len(higher),
+                        "median_gap_pct": half_up(_st.median(gaps), 1) if gaps else None,
+                        "rates": [{"code": c, "rate": rates[c], "yours": mine[c],
+                                   "gap": half_up(rates[c] - mine[c], 2)} for c in shared]})
+    clinics.sort(key=lambda x: (-x["codes_paid_more"], -(x["median_gap_pct"] or 0), x["_tin"]))
+    total = len(clinics)
+    clinics = clinics[:max(1, min(int(limit or 100), 1000))]
+    info = store.practice_names_for([x["_tin"] for x in clinics], state)
+    with store.connect() as con:
+        meta = {r[0]: r[1:] for r in con.execute(
+            "SELECT tin_value, practice_type, type_reason, npi_count FROM tin_directory "
+            "WHERE tin_value IN (SELECT unnest(?::VARCHAR[]))",
+            [[x["_tin"] for x in clinics]]).fetchall()}
+    for rank, x in enumerate(clinics, 1):
+        tin = x.pop("_tin")
+        nm = info.get(tin, {})
+        pt, why, n_npi = meta.get(tin, (None, None, None))
+        x.update(rank=rank, tin=mask_tin(tin), name=nm.get("practice_name") or f"TIN {mask_tin(tin)}",
+                 name_source=nm.get("name_source"), cities=nm.get("top_cities") or [],
+                 practice_type=pt, type_reason=why, npi_count=n_npi)
+    group = PEER_GROUPS.get(m.get("peer_group"), "every practice the payer prices")
+    where = f"{city}, {state}" if level == "city" else state
+    return {
+        "subject": subject, "payer": payer, "state": state, "city": city,
+        "geography": level, "where": where, "peer_group": m.get("peer_group") or "all",
+        "compared_with": group, "practices_compared": len(peers),
+        "clinics_paid_more": total, "codes": code_rows, "clinics": clinics,
+        "headline": (f"{payer} pays {total} of {len(peers)} comparable {group} in {where} "
+                     f"more than you for at least one of your {len(codes)} codes."
+                     if peers else f"{payer} prices no comparable {group} in {where} "
+                     "for your codes."),
+        "note": PAID_MORE_NOTE,
+        "market": public_market(m, drop=("payers",)),
+    }
+
+
+def _code_info(code: str):
+    from .catalog import code_info
+    return code_info(code)
