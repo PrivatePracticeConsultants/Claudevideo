@@ -328,7 +328,7 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
                         got = ensure_cmsref(store, cfg.cms_ref_dir)
                         for k, v in got.items():
                             if isinstance(v, str) and v.startswith("not loaded"):
-                                log.warning("CMS %s list %s — trying again in a month "
+                                log.warning("CMS %s list %s — trying again tomorrow "
                                             "(or run `mrfx cmsref`)", k, v)
                         store.refresh_practice_names()
                     except Exception as e:  # noqa: BLE001

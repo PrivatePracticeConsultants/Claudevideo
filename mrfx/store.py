@@ -517,6 +517,9 @@ DEDUP_QUERY = """
 # DIRECTORY_SCHEMA_VERSION below.
 ROLLUP_SCHEMA_VERSION = 2
 
+# one practice-names refresh at a time per store directory (Store.refresh_practice_names)
+_NAMES_LOCKS: dict = {}
+
 # bump when only the DIRECTORY's column semantics change (is_therapy rules,
 # name/geo derivation). Rebuilding tin_directory alone is minutes, not hours, so
 # this must NOT ride on ROLLUP_SCHEMA_VERSION: doing that made a therapy-filter
@@ -2718,7 +2721,14 @@ class Store:
             cols = {r[0] for r in con.execute(
                 "SELECT column_name FROM information_schema.columns WHERE table_name = ?",
                 [tbl]).fetchall()}
-            if not cols:
+            if not cols and tbl == "tin_directory_tbl":
+                # before the first build: the live directory, with the same
+                # name / type columns every reader expects (0.8.6 — the
+                # default "outpatient rehab clinics" group read a missing
+                # practice_type and failed with a 500)
+                con.execute(f"CREATE OR REPLACE VIEW {view} AS "
+                            f"{self._directory_view_sql(con, f'({q})')}")
+            elif not cols:
                 con.execute(f"CREATE OR REPLACE VIEW {view} AS {q}")
             elif tbl == "tin_directory_tbl":
                 con.execute(f"CREATE OR REPLACE VIEW {view} AS {self._directory_view_sql(con)}")
@@ -2733,7 +2743,8 @@ class Store:
             else:
                 con.execute(f"CREATE OR REPLACE VIEW {view} AS SELECT * FROM {tbl}")
 
-    def _directory_view_sql(self, con: duckdb.DuckDBPyConnection) -> str:
+    def _directory_view_sql(self, con: duckdb.DuckDBPyConnection,
+                            src: str = "tin_directory_tbl") -> str:
         """`tin_directory`: the materialized directory with each practice's
         NAME, CITIES (ranked) and name_source from practice_names_tbl
         (mrfx/naming.py) — every screen and export reads this view, so one
@@ -2754,7 +2765,7 @@ class Store:
             return ("SELECT t.*, CASE WHEN coalesce(t.npi_count, 0) = 0 THEN 'no_npi' "
                     "ELSE 'pending' END AS name_source, "
                     f"{fallback} AS practice_type, NULL::VARCHAR AS type_reason, "
-                    "[]::VARCHAR[] AS org_taxonomies, FALSE AS org_clinic FROM tin_directory_tbl t")
+                    f"[]::VARCHAR[] AS org_taxonomies, FALSE AS org_clinic FROM {src} t")
         cols = {r[0] for r in con.execute(
             "SELECT column_name FROM information_schema.columns "
             "WHERE table_name = 'practice_names_tbl'").fetchall()}
@@ -2769,7 +2780,7 @@ class Store:
                    if typed else
                    f"{fallback} AS practice_type, NULL::VARCHAR AS type_reason, "
                    "[]::VARCHAR[] AS org_taxonomies, " + oc)
-                + "FROM tin_directory_tbl t LEFT JOIN practice_names_tbl n USING (tin_value)")
+                + f"FROM {src} t LEFT JOIN practice_names_tbl n USING (tin_value)")
 
     NAMES_SCHEMA = 3
 
@@ -2784,21 +2795,50 @@ class Store:
             rel = self._meta_get(con, "dac_release")
             fac = self._meta_get(con, "cms_facilities_release")
             dver = self._meta_get(con, "directory_names_through")
+            # the directory columns the practice TYPE reads (incremental
+            # rollups change them without touching anything else here — a
+            # clinic folded in after its pairs were classified stayed
+            # 'unknown'); one cheap aggregate over the materialised table
+            dsig = None
+            if con.execute("SELECT count(*) FROM information_schema.tables "
+                           "WHERE table_name = 'tin_directory_tbl'").fetchone()[0]:
+                dsig = con.execute(
+                    "SELECT count(*), sum(hash(tin_value, is_therapy, therapy_npi_count, "
+                    "classified_npi_count, has_hospital, has_facility, states)) "
+                    "FROM tin_directory_tbl").fetchone()
         util = sorted((p.name, p.stat().st_size, p.stat().st_mtime_ns)
                       for p in (self.dir / "utilization").glob("*.parquet")) \
             if (self.dir / "utilization").exists() else []
         nppes = self.dir / "nppes_cache.parquet"
         npf = [nppes.stat().st_size, nppes.stat().st_mtime_ns] if nppes.exists() else []
         return hashlib.sha1(json.dumps(
-            [pairs, list(npi), dac, rel, fac, util, dver, npf, self.NAMES_SCHEMA],
+            [pairs, list(npi), dac, rel, fac, util, dver, npf,
+             list(dsig) if dsig else None, self.NAMES_SCHEMA],
             default=str).encode()).hexdigest()[:16]
 
+    # (TIN, NPI) pairs per slice of the names / types refresh: a national
+    # store (15M pairs, 2M TINs, the 7.6M-NPI directory) needed 6.5 GB of
+    # temp disk in one pass and failed at a 6 GB budget; by hash(tin) slices
+    # every aggregate is per TIN, so the slices concatenate to the same rows
+    NAMES_SLICE_PAIRS = 1_500_000
+
     def refresh_practice_names(self, force: bool = False) -> bool:
-        """Re-resolve every practice's name and cities (mrfx/naming.py) when
-        anything they are computed from changed. Built into a parquet with no
-        lock held, swapped in under the writer lock in one transaction.
-        True when it rebuilt. `serve` runs it in the background
-        (warm_part_sets); never raises."""
+        """Re-resolve every practice's name, cities and type (mrfx/naming.py)
+        when anything they are computed from changed. Built into parquet
+        slices with no lock held, swapped in under the writer lock in one
+        transaction. One run at a time per store (serve's part-sets, CMS DAC
+        and CMS reference threads all call it). True when it rebuilt. Never
+        raises."""
+        import threading as _threading
+        lock = _NAMES_LOCKS.setdefault(str(self.dir), _threading.Lock())
+        with lock:
+            return self._refresh_practice_names(force)
+
+    def _refresh_practice_names(self, force: bool) -> bool:
+        import math
+        import shutil
+        import threading as _threading
+
         from .naming import (NO_NAMED_ORGS, ORG_NAME_FREQ_SQL, PRACTICE_TYPE_SQL,
                              TYPE_REASON_SQL, named_orgs_sql, names_sql, norm_sql,
                              org_clinic_only_sql, profile_sql)
@@ -2810,19 +2850,25 @@ class Store:
                                         "WHERE table_name = 'practice_names_tbl'").fetchone()[0]:
                     return False
             pairs = self.pairs_relation()
-            tmp_f = self.dir / f"org_name_freq.{os.getpid()}.tmp.parquet"
-            tmp_n = self.dir / f"practice_names.{os.getpid()}.tmp.parquet"
+            tag = f"{os.getpid()}.{_threading.get_ident()}"
+            work = self.dir / f"practice_names.{tag}.tmp"
+            shutil.rmtree(work, ignore_errors=True)
+            work.mkdir(parents=True)
+            tmp_f, tmp_o = work / "org_name_freq.parquet", work / "named_orgs.parquet"
             try:
                 with self.connect() as con:
                     con.execute(f"COPY ({ORG_NAME_FREQ_SQL}) TO '{sql_path(tmp_f)}' (FORMAT PARQUET)")
-                    tin_npis = (f"SELECT tin_value, npi FROM {pairs} "
-                                "WHERE NOT coalesce(tin_is_really_npi, FALSE)")
-                    names = names_sql(tin_npis).replace(
-                        "LEFT JOIN org_name_freq f",
-                        f"LEFT JOIN read_parquet('{sql_path(tmp_f)}') f")
+                    # the practice's own organization NPIs, found by its legal
+                    # name in the NPPES file (payers list the clinicians) —
+                    # one pass over the file, read by every slice
+                    nppes = self.dir / "nppes_cache.parquet"
+                    if nppes.exists():
+                        con.execute(f"COPY (SELECT * FROM {named_orgs_sql(sql_path(nppes))}) "
+                                    f"TO '{sql_path(tmp_o)}' (FORMAT PARQUET)")
+                        orgs = f"read_parquet('{sql_path(tmp_o)}')"
+                    else:
+                        orgs = NO_NAMED_ORGS
                     util_cols = self._utilization_columns(con)
-                    prof = profile_sql(tin_npis, has_util=bool(util_cols),
-                                       has_provider_type="provider_type" in util_cols)
                     has_dir = bool(con.execute(
                         "SELECT count(*) FROM information_schema.tables "
                         "WHERE table_name = 'tin_directory_tbl'").fetchone()[0])
@@ -2831,36 +2877,44 @@ class Store:
                            "NULL::BOOLEAN AS has_facility, NULL::BOOLEAN AS is_therapy, "
                            "NULL::BIGINT AS therapy_npi_count, NULL::BIGINT AS classified_npi_count, "
                            "NULL::VARCHAR[] AS states WHERE FALSE)")
-                    # the practice's own organization NPIs, found by its legal
-                    # name in the NPPES file (payers list the clinicians)
-                    nppes = self.dir / "nppes_cache.parquet"
-                    orgs = named_orgs_sql(sql_path(nppes)) if nppes.exists() else NO_NAMED_ORGS
-                    sql = (f"WITH n AS ({names}), "
-                           f"nmo AS (SELECT x.tin_value, x.prim, {org_clinic_only_sql('x.prim')} AS named_clinic "
-                           f"       FROM (SELECT n.tin_value, list_sort(list_distinct(flatten(list(o.prim)))) AS prim "
-                           f"             FROM n JOIN {tdr} td2 ON td2.tin_value = n.tin_value "
-                           f"             JOIN {orgs} o ON o.k = {norm_sql('n.practice_name')} "
-                           f"                  AND list_contains(td2.states, o.st) "
-                           f"             WHERE n.name_source IN ('nppes_org', 'cms_dac') GROUP BY 1) x) "
-                           f"SELECT n.*, list_sort(list_distinct(list_concat("
-                           f"coalesce(p.org_taxonomies, []::VARCHAR[]), coalesce(nmo.prim, []::VARCHAR[])))) "
-                           f"AS org_taxonomies, "
-                           f"(coalesce(p.org_clinic, FALSE) OR coalesce(nmo.named_clinic, FALSE)) AS org_clinic, "
-                           f"p.n_addr, p.n_hosp_addr, p.n_snf_addr, "
-                           f"p.mc_npis, p.mc_ptpp, p.mc_ptpp_share, p.mc_office_share, "
-                           f"{PRACTICE_TYPE_SQL} AS practice_type, {TYPE_REASON_SQL} AS type_reason "
-                           f"FROM n LEFT JOIN ({prof}) p ON p.tin_value = n.tin_value "
-                           f"LEFT JOIN nmo ON nmo.tin_value = n.tin_value "
-                           f"LEFT JOIN {tdr} td ON td.tin_value = n.tin_value")
-                    con.execute(f"COPY ({sql} ORDER BY n.tin_value) TO '{sql_path(tmp_n)}' "
-                                "(FORMAT PARQUET)")
+                    n_pairs = con.execute(f"SELECT count(*) FROM {pairs}").fetchone()[0]
+                    k = max(1, math.ceil(n_pairs / self.NAMES_SLICE_PAIRS))
+                    for i in range(k):
+                        tin_npis = (f"SELECT tin_value, npi FROM {pairs} "
+                                    "WHERE NOT coalesce(tin_is_really_npi, FALSE)"
+                                    + (f" AND hash(tin_value) % {k} = {i}" if k > 1 else ""))
+                        names = names_sql(tin_npis).replace(
+                            "LEFT JOIN org_name_freq f",
+                            f"LEFT JOIN read_parquet('{sql_path(tmp_f)}') f")
+                        prof = profile_sql(tin_npis, has_util=bool(util_cols),
+                                           has_provider_type="provider_type" in util_cols)
+                        sql = (f"WITH n AS ({names}), "
+                               f"nmo AS (SELECT x.tin_value, x.prim, {org_clinic_only_sql('x.prim')} AS named_clinic "
+                               f"       FROM (SELECT n.tin_value, list_sort(list_distinct(flatten(list(o.prim)))) AS prim "
+                               f"             FROM n JOIN {tdr} td2 ON td2.tin_value = n.tin_value "
+                               f"             JOIN {orgs} o ON o.k = {norm_sql('n.practice_name')} "
+                               f"                  AND list_contains(td2.states, o.st) "
+                               f"             WHERE n.name_source IN ('nppes_org', 'cms_dac') GROUP BY 1) x) "
+                               f"SELECT n.*, list_sort(list_distinct(list_concat("
+                               f"coalesce(p.org_taxonomies, []::VARCHAR[]), coalesce(nmo.prim, []::VARCHAR[])))) "
+                               f"AS org_taxonomies, "
+                               f"(coalesce(p.org_clinic, FALSE) OR coalesce(nmo.named_clinic, FALSE)) AS org_clinic, "
+                               f"p.n_addr, p.n_hosp_addr, p.n_snf_addr, "
+                               f"p.mc_npis, p.mc_ptpp, p.mc_ptpp_share, p.mc_office_share, "
+                               f"{PRACTICE_TYPE_SQL} AS practice_type, {TYPE_REASON_SQL} AS type_reason "
+                               f"FROM n LEFT JOIN ({prof}) p ON p.tin_value = n.tin_value "
+                               f"LEFT JOIN nmo ON nmo.tin_value = n.tin_value "
+                               f"LEFT JOIN {tdr} td ON td.tin_value = n.tin_value")
+                        con.execute(f"COPY ({sql}) TO '{sql_path(work / f'slice_{i:04d}.parquet')}' "
+                                    "(FORMAT PARQUET)")
+                slices = f"read_parquet('{sql_path(work / 'slice_*.parquet')}')"
                 with self.write_lock, self.connect() as con:
                     con.execute("BEGIN TRANSACTION")
                     try:
                         con.execute("CREATE OR REPLACE TABLE org_name_freq AS "
                                     f"SELECT * FROM read_parquet('{sql_path(tmp_f)}')")
                         con.execute("CREATE OR REPLACE TABLE practice_names_tbl AS "
-                                    f"SELECT * FROM read_parquet('{sql_path(tmp_n)}')")
+                                    f"SELECT * FROM {slices} ORDER BY tin_value")
                         con.execute("INSERT OR REPLACE INTO meta VALUES "
                                     "('practice_names_stamp', ?)", [stamp])
                         con.execute("COMMIT")
@@ -2872,8 +2926,7 @@ class Store:
                         raise
                     self._register_views(con)
             finally:
-                tmp_f.unlink(missing_ok=True)
-                tmp_n.unlink(missing_ok=True)
+                shutil.rmtree(work, ignore_errors=True)
             self._bump_generation(spine=False)
             return True
         except Exception:  # noqa: BLE001 — the directory's own names keep serving

@@ -194,17 +194,6 @@ PRACTICE_TYPES = {
 }
 
 
-def org_clinic_sql(col: str) -> str:
-    """True when the taxonomy list `col` holds a therapy-clinic code
-    (261QP2000X …) or a PT/OT/SLP code — an organization NPI registered as a
-    therapy clinic or a therapist group (225100000X …)."""
-    from .catalog import THERAPY_CLINIC_STRONG_CODES, THERAPY_TAXONOMY_PREFIXES
-    codes = ", ".join(f"'{c}'" for c in THERAPY_CLINIC_STRONG_CODES)
-    pre = " OR ".join(f"starts_with(x, '{p}')" for p in THERAPY_TAXONOMY_PREFIXES)
-    return (f"len(list_filter(coalesce({col}, []::VARCHAR[]), "
-            f"x -> x IN ({codes}) OR {pre})) > 0")
-
-
 def org_clinic_only_sql(col: str) -> str:
     """True when the taxonomy list `col` is non-empty and EVERY code in it is
     a therapy-clinic or PT/OT/SLP code — an organization registered only as
@@ -219,12 +208,14 @@ def org_clinic_only_sql(col: str) -> str:
 
 def named_orgs_sql(nppes_parquet: str) -> str:
     """(k, st, prim): every ACTIVE organization NPI in the NPPES file by its
-    normalized legal name and state, with the primary taxonomies registered
-    under that name there. A practice named from its org NPIs or the CMS
+    normalized legal name and state, with EVERY taxonomy registered under
+    that name there (all slots — the cache's first slot is not necessarily
+    the NPPES primary, so "registered only as therapy" checks them all). A practice named from its org NPIs or the CMS
     file carries the same legal name, so this finds its organization NPIs
     even when no payer file lists them (payers list the clinicians)."""
     return (f"(SELECT {norm_sql('org_name')} AS k, upper(state) AS st, "
-            "list_sort(list_distinct(list(taxonomy_code))) AS prim "
+            "list_sort(list_distinct(list_filter(flatten(list(string_split("
+            "coalesce(nullif(taxonomy_codes, ''), taxonomy_code), '|'))), x -> trim(x) <> ''))) AS prim "
             f"FROM read_parquet('{nppes_parquet}') "
             "WHERE entity_type = 'NPI-2' AND nullif(taxonomy_code, '') IS NOT NULL "
             "AND nullif(trim(org_name), '') IS NOT NULL "
@@ -246,19 +237,28 @@ def profile_sql(tin_npis: str, *, has_util: bool, has_provider_type: bool) -> st
     if has_util:
         is_pp = ("(u.provider_type ILIKE '%therapist in private practice%' "
                  "OR u.provider_type ILIKE '%speech language patholog%')")
-        ptpp = (f"count(DISTINCT u.npi) FILTER ({is_pp})" if has_provider_type else "NULL::BIGINT")
+        # unknown (NULL), never 0, when the year's rows carry no provider
+        # type — "0 of 12 bill as therapists in private practice" would be
+        # a claim the data does not make
+        ptpp = (f"CASE WHEN count(u.provider_type) > 0 THEN count(DISTINCT u.npi) FILTER ({is_pp}) END"
+                if has_provider_type else "NULL::BIGINT")
         # by SERVICES, not people: a physician who bills a handful of 97110s
         # under their own NPI must not outvote the therapists who bill
         # thousands (a 52%-therapist ortho group read 47 of 95 "people")
-        pp_share = (f"sum(u.services) FILTER ({is_pp}) / nullif(sum(u.services), 0)"
+        pp_share = (f"CASE WHEN count(u.provider_type) > 0 THEN sum(u.services) FILTER ({is_pp}) "
+                    "/ nullif(sum(u.services), 0) END"
                     if has_provider_type else "NULL::DOUBLE")
+        # the newest year that HAS provider types (an import without them
+        # sits beside CMS's own years in the union_by_name view)
+        year = ("(SELECT max(data_year) FROM utilization WHERE provider_type IS NOT NULL)"
+                if has_provider_type else "(SELECT max(data_year) FROM utilization)")
         mc = f"""mc AS (SELECT j2.tin_value, count(DISTINCT u.npi) AS mc_npis, {ptpp} AS mc_ptpp,
                         {pp_share} AS mc_ptpp_share,
                         sum(u.services) FILTER (upper(u.place_of_service) = 'O')
                           / nullif(sum(u.services), 0) AS mc_office_share
                  FROM (SELECT DISTINCT tin_value, npi FROM j) j2
                  JOIN utilization u ON u.npi = j2.npi
-                 WHERE u.data_year = (SELECT max(data_year) FROM utilization)
+                 WHERE u.data_year = {year}
                  GROUP BY j2.tin_value)"""
     else:
         mc = ("mc AS (SELECT NULL::VARCHAR AS tin_value, NULL::BIGINT AS mc_npis, "
@@ -279,12 +279,16 @@ def profile_sql(tin_npis: str, *, has_util: bool, has_provider_type: bool) -> st
                     count(DISTINCT j.ak) FILTER (f.snf) AS n_snf_addr
              FROM j LEFT JOIN fac f ON f.addr_key = j.ak GROUP BY j.tin_value),
     orgs AS (SELECT tin_value,
-                    list_sort(list_distinct(flatten(list(string_split(taxes, '|'))))) AS org_taxonomies
+                    list_sort(list_distinct(flatten(list(string_split(taxes, '|'))))) AS org_taxonomies,
+                    -- per organization NPI: registered ONLY as therapy (an
+                    -- orthopedic group's NPI listing 225100000X among its
+                    -- physician codes is not a therapy clinic's)
+                    bool_or({org_clinic_only_sql("list_filter(string_split(taxes, '|'), x -> trim(x) <> '')")}) AS org_clinic
              FROM j WHERE entity_type = 'NPI-2' AND nullif(taxes, '') IS NOT NULL
              GROUP BY tin_value),
     {mc}
     SELECT a.tin_value, coalesce(o.org_taxonomies, []::VARCHAR[]) AS org_taxonomies,
-           {org_clinic_sql('o.org_taxonomies')} AS org_clinic,
+           coalesce(o.org_clinic, FALSE) AS org_clinic,
            len(list_filter(coalesce(o.org_taxonomies, []::VARCHAR[]),
                x -> {any_prefix('x', HOSPITAL_TAXONOMY_PREFIXES)})) > 0 AS org_hospital,
            len(list_filter(coalesce(o.org_taxonomies, []::VARCHAR[]),
@@ -326,13 +330,13 @@ TYPE_REASON_SQL = """array_to_string(list_filter([
     CASE WHEN p.org_facility THEN 'a facility organization NPI (SNF, home health …)' END,
     CASE WHEN p.n_snf_addr > 0 THEN p.n_snf_addr || ' of ' || p.n_addr
          || ' practice addresses are CMS-listed nursing homes' END,
-    CASE WHEN p.org_clinic THEN 'an organization NPI registered as a therapy clinic or therapist group' END,
+    CASE WHEN p.org_clinic THEN 'an organization NPI registered only as a therapy clinic or therapist group' END,
     CASE WHEN coalesce(nmo.named_clinic, FALSE) AND NOT coalesce(p.org_clinic, FALSE)
          THEN 'its legal name is registered in NPPES only as a therapy clinic or therapist group ('
               || array_to_string(nmo.prim, ', ') || ')' END,
     CASE WHEN coalesce(td.classified_npi_count, 0) > 0 THEN td.therapy_npi_count || ' of '
          || td.classified_npi_count || ' identified clinicians are PT/OT/SLP' END,
-    CASE WHEN coalesce(p.mc_npis, 0) > 0 THEN coalesce(p.mc_ptpp, 0) || ' of ' || p.mc_npis
+    CASE WHEN coalesce(p.mc_npis, 0) > 0 AND p.mc_ptpp IS NOT NULL THEN p.mc_ptpp || ' of ' || p.mc_npis
          || ' clinicians billing therapy to Medicare bill as therapists in private practice'
          || coalesce(', ' || round(100 * p.mc_ptpp_share)::INT || '% of the services', '')
          || coalesce(' (' || round(100 * p.mc_office_share)::INT || '% in the office)', '') END

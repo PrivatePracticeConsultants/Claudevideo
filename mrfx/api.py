@@ -4371,8 +4371,10 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             # expands the name to all its TINs — but without this it had no
             # single picker option, so a multi-location org got benchmarked as a
             # lone fragment TIN. Exclude the 'TIN …' no-name fallback labels.
+            # "Unnamed group — 2 clinicians (NASHVILLE)" is a description, not
+            # a name: two unrelated practices can share it, so it never pools
             auto_sql = ("SELECT display_name FROM tin_directory "
-                        "WHERE display_name NOT LIKE 'TIN %' "
+                        "WHERE display_name NOT LIKE 'TIN %' AND name_source <> 'unnamed_group' "
                         + ("AND lower(display_name) LIKE ? ESCAPE '\\' " if ql else "")
                         # the biggest multi-TIN practices first; a UNIQUE
                         # order (invariant 7) — without it LIMIT kept a
@@ -4545,8 +4547,10 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         except (BenchmarkError, ValueError, TypeError) as e:
             raise HTTPException(422, str(e))
         buf = _io.StringIO()
+        cut = ([f"Listing the first {len(d['clinics']):,} of {d['clinics_paid_more']:,} clinics."]
+               if len(d["clinics"]) < d["clinics_paid_more"] else [])
         for line in (d["headline"], f"Compared with: {d['compared_with']} in {d['where']}.",
-                     d["note"], *store.analytics_note()):
+                     *cut, d["note"], *store.analytics_note()):
             buf.write("# " + " ".join(str(line).split()) + "\n")
         w = _csv.writer(buf)
         codes = [c["code"] for c in d["codes"]]

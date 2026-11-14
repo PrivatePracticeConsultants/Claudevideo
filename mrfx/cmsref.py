@@ -57,8 +57,12 @@ def addr_key_sql(addr: str, zip_: str) -> str:
     #…) and street-word spelling normalized. NULL without a ZIP or a line."""
     x = f"upper(coalesce({addr}, ''))"
     x = f"regexp_replace({x}, '[^A-Z0-9# ]', ' ', 'g')"
+    # whole words only: "1500 FLORIDA AVE" keeps FLORIDA (it matched FL and
+    # was cut to "1500", colliding with "1500 FLOYD ST" and any CMS hospital
+    # at house number 1500 in the ZIP)
     x = (f"regexp_replace({x}, '( |^)(STE|SUITE|UNIT|BLDG|BUILDING|FL|FLOOR|ROOM|RM|APT|"
-         f"DEPT|#).*$', '')")
+         f"DEPT)( .*)?$', '')")
+    x = f"regexp_replace({x}, ' *#.*$', '')"
     for long, short in _STREET_WORDS:
         x = f"regexp_replace({x}, '\\b{long}\\b', '{short}', 'g')"
     x = f"trim(regexp_replace({x}, ' +', ' ', 'g'))"
@@ -261,7 +265,9 @@ def fetch_medicare_therapy(store, codes: list[str] | None = None, *, force: bool
 
 def ensure_cmsref(store, cache_dir: Path) -> dict:
     """Both sources current in `store` (each fetched only when CMS has a newer
-    release). Each failure is reported, never fatal to the other."""
+    release). Each failure is reported, never fatal to the other; the check
+    is recorded (meta cmsref_checked_at — serve's monthly clock) only when
+    both succeeded."""
     out = {}
     try:
         files = fetch_facilities(cache_dir)
@@ -275,7 +281,10 @@ def ensure_cmsref(store, cache_dir: Path) -> dict:
         out["medicare"] = fetch_medicare_therapy(store)
     except Exception as e:  # noqa: BLE001
         out["medicare"] = f"not loaded: {e}"
-    with store.write_lock, store.connect() as con:
-        con.execute("INSERT OR REPLACE INTO meta VALUES ('cmsref_checked_at', ?)",
-                    [dt.datetime.now().isoformat(timespec="seconds")])
+    # the monthly clock starts only when both are in: a failure (CMS down, a
+    # refused request) is tried again the next day, not in 30 days
+    if not any(isinstance(v, str) and v.startswith("not loaded") for v in out.values()):
+        with store.write_lock, store.connect() as con:
+            con.execute("INSERT OR REPLACE INTO meta VALUES ('cmsref_checked_at', ?)",
+                        [dt.datetime.now().isoformat(timespec="seconds")])
     return out

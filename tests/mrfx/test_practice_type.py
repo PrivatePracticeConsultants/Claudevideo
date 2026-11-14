@@ -119,7 +119,7 @@ def test_each_rule_classifies_its_practice(typed):
     assert "CMS-listed nursing homes" in got["500000004"][1]
     assert "bill as therapists in private practice, 100% of the services (100% in the office)" \
         in got["500000007"][1]
-    assert "registered as a therapy clinic" in got["500000001"][1]
+    assert "registered only as a therapy clinic" in got["500000001"][1]
 
 
 def test_comparisons_default_to_outpatient_clinics_when_asked(typed):

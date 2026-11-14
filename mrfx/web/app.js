@@ -2729,10 +2729,17 @@ function negotiatePayload() {
 // evidence a rate request cites. City first (5+ comparable clinics), else state.
 async function loadPaidMore(payload) {
   const box = $("#ng-paidmore");
+  // a newer Compare (another payer) wins: a slow answer for the previous
+  // one must not land under the new results
+  const seq = (state.paidMoreSeq = (state.paidMoreSeq || 0) + 1);
   box.innerHTML = `<div class="loading">Finding the clinics ${esc(payload.payer)} pays more</div>`;
   let d;
   try { d = await postJson("/api/negotiate/paid-more", payload); }
-  catch (e) { box.innerHTML = `<div class="muted">Clinics paid more: ${esc(e.message)}</div>`; return; }
+  catch (e) {
+    if (seq === state.paidMoreSeq) box.innerHTML = `<div class="muted">Clinics paid more: ${esc(e.message)}</div>`;
+    return;
+  }
+  if (seq !== state.paidMoreSeq) return;
   const codes = d.codes.map((c) => `<tr><td><b>${esc(c.code)}</b> <span class="sub">${esc(c.description || "")}</span></td>
       <td class="num">${money(c.your_rate)}</td><td class="num">${c.median == null ? "–" : money(c.median)}</td>
       <td class="num">${c.highest == null ? "–" : money(c.highest)}</td>
@@ -2765,6 +2772,8 @@ async function loadPaidMore(payload) {
       <thead><tr><th class="num">#</th><th>Clinic</th><th>Tax ID</th><th class="num">Codes paid more</th>
       <th class="num">Median gap</th></tr></thead>
       <tbody>${rows}</tbody></table></div>` : ""}
+    ${d.clinics.length < d.clinics_paid_more ? `<div class="muted" style="margin-top:4px">Showing the first
+      ${fmtInt(d.clinics.length)} of ${fmtInt(d.clinics_paid_more)} — Download CSV for every one.</div>` : ""}
     <div class="muted" style="font-size:11.5px;margin-top:6px">${esc(d.note)}</div></div>`;
   $("#ng-paidmore-csv").addEventListener("click", async () => {
     try {

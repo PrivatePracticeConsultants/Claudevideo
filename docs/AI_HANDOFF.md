@@ -1039,6 +1039,40 @@ Tests: `tests/mrfx/test_practice_type.py` (9, all fail on 0.8.5).
   [--refresh]` by hand. data.cms.gov refuses a User-Agent containing
   "Explorer" (403) — every CMS fetch sends `mrfx/<version>`.
 
+- **0.8.6 audit** (an independent review + a national-scale run; all
+  pinned by `tests/mrfx/test_v086_audit.py`, 9 of 10 fail before):
+  - "Unnamed group — n clinicians (CITY)" is a description, not a name:
+    the subject picker never pools it, and `resolve_subject_tins` refuses a
+    label two practices share (asks for the tax ID) — it had benchmarked
+    unrelated practices together.
+  - `_names_stamp` includes a hash aggregate of the directory columns the
+    type reads; a clinic folded in after its pairs were classified stayed
+    'unknown' (out of the default group).
+  - Before the first build `tin_directory` is the live query routed through
+    `_directory_view_sql(con, src)` — the default peer group 500'd on a fresh
+    or reset store.
+  - `addr_key_sql`: unit words are whole words ("1500 FLORIDA AVE" was cut
+    to "1500" by FL and matched any CMS hospital at 1500 in the ZIP).
+  - `refresh_practice_names` is serialized per store (`_NAMES_LOCKS`), its
+    temp dir is per thread, and it runs in hash(tin) slices of
+    NAMES_SLICE_PAIRS (1.5M) pairs — one pass needed 6.5 GB of temp at 15M
+    pairs / 2M TINs; `test_slices_give_the_same_rows_as_one_pass`.
+  - An org NPI counts as a therapy clinic only when ITS OWN taxonomies are
+    all therapy (`org_clinic_only_sql` per NPI); a named NPPES org is judged
+    on every slot (the cache's first slot is not the NPPES primary).
+  - `ensure_cmsref` starts the monthly clock only when both sources loaded.
+  - Medicare evidence from a year without provider types is unknown (NULL),
+    never "0 of N"; the newest year WITH provider types is used.
+  - Negotiate: a superseded answer never lands; a screen list shorter than
+    the total says so; the CSV says when its 1,000 cap applies.
+  - Measured and NOT changed (a methodology decision for the owner): the
+    TIN-grain spine's rate is the median of DISTINCT rates in the tuple, so
+    one clinician of 113 at another rate moves a group's rate ($85.62 x112 +
+    $98.66 x1 -> $92.14). On BCBS TN 6% of (TIN, code) rates and 442 of
+    5,660 TINs differ by > 2% from a clinician-weighted median; market
+    medians barely move (97140 $20.73 vs $21.04). Changing it is a
+    ROLLUP_SCHEMA_VERSION bump (the whole-store pass).
+
 ### 0.8.5 additions (Nov 14, 2026) — practice names and cities, one ranked rule
 
 Field report: a BCBS Tennessee visit-value export named TINs with no org

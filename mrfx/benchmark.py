@@ -818,9 +818,23 @@ def _resolve_subject_tins(store: Store, subject: str) -> list[str]:
         return tins
     ident = subject.replace("-", "").strip()
     with store.connect() as con:
+        # "Unnamed group — 2 clinicians (NASHVILLE)" describes a practice; it
+        # is not a name, and unrelated practices can share it — never pool
+        unnamed = [r[0] for r in con.execute(
+            "SELECT tin_value FROM tin_directory WHERE name_source = 'unnamed_group' "
+            "AND lower(display_name) = lower(?) ORDER BY tin_value", [subject]).fetchall()]
+        if len(unnamed) == 1:
+            return unnamed
+        if unnamed:
+            raise BenchmarkError(
+                f"{len(unnamed)} different practices are labelled \"{subject}\" (none has an "
+                "organization name on file) — pick one by its tax ID: "
+                + ", ".join(mask_tin(t) for t in unnamed[:10])
+                + (" …" if len(unnamed) > 10 else "") + ".")
         # auto-grouped org: the same NPPES display_name the entity grain groups on
         named = [r[0] for r in con.execute(
-            "SELECT tin_value FROM tin_directory WHERE display_name = ?", [subject],
+            "SELECT tin_value FROM tin_directory WHERE display_name = ? "
+            "AND name_source <> 'unnamed_group'", [subject],
         ).fetchall()]
         if named:
             return named
@@ -829,7 +843,8 @@ def _resolve_subject_tins(store: Store, subject: str) -> list[str]:
         # hand-typed name silently return NOTHING — which reads as "this
         # practice has no rates" rather than "that isn't how it's spelled here".
         named = [r[0] for r in con.execute(
-            "SELECT tin_value FROM tin_directory WHERE lower(display_name) = lower(?)",
+            "SELECT tin_value FROM tin_directory WHERE lower(display_name) = lower(?) "
+            "AND name_source <> 'unnamed_group'",
             [subject],
         ).fetchall()]
         if named:
