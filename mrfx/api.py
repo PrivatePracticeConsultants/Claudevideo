@@ -1518,6 +1518,16 @@ def _part_swap_race(exc: BaseException) -> bool:
         "parquet file is", "could not open file", "no such file or directory"))
 
 
+# rows above which the Explorer summary's per-code breakdown runs per batch
+# of codes (bounded memory; identical rows — 0.8.9). Module level so a test
+# can force the batched path on a small store.
+SUMMARY_SLICE_ROWS = 40_000_000
+
+
+def _summary_slice_rows() -> int:
+    return SUMMARY_SLICE_ROWS
+
+
 class SwapRetryMiddleware:
     """Ask a dashboard question again, once, when it lost a race with a part
     swap (`_part_swap_race`). Only before any byte of the answer was sent,
@@ -2157,29 +2167,31 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
             srel = stat_rel(grain, fs)
             alive()
             with (contextlib.nullcontext(vcon) if vcon is not None else store.connect()) as con:
-                row = con.execute(
+                head = con.execute(
                     f"""
-                    -- ONE list-form quantile, not median + two quantile_cont:
-                    -- each exact quantile aggregate holds its own copy of every
-                    -- value in memory (not spillable). At 306M rows the three
-                    -- copies peaked the server at 11.2 GB RSS; one state gives
-                    -- the identical exact values (median == quantile_cont .5).
                     -- rounded HERE, half-up to the cent (DuckDB round = half_up):
                     -- the browser rounded raw doubles its own way, $70.70 on
                     -- the Explorer vs $70.69 on Markets (review 10 item 3.2)
-                    SELECT n, entities, codes, round(mn, 2), round(q[1], 2), round(q[2], 2),
-                           round(q[3], 2), round(mx, 2) FROM (
                     SELECT count(*) AS n,
                            count(DISTINCT unit_id) AS entities,
                            count(DISTINCT billing_code) AS codes,
-                           min(negotiated_rate) FILTER (is_dollar_rate AND negotiated_rate > 0.01) AS mn,
-                           quantile_cont(negotiated_rate, [0.25, 0.5, 0.75])
-                               FILTER (is_dollar_rate AND negotiated_rate > 0.01) AS q,
-                           max(negotiated_rate) FILTER (is_dollar_rate AND negotiated_rate > 0.01) AS mx
-                    FROM ({srel}))
+                           round(min(negotiated_rate) FILTER (is_dollar_rate AND negotiated_rate > 0.01), 2),
+                           round(max(negotiated_rate) FILTER (is_dollar_rate AND negotiated_rate > 0.01), 2)
+                    FROM ({srel})
                     """,
                     fs.params,
                 ).fetchone()
+                # the quartiles from counts per distinct rate (mrfx/quantiles.py):
+                # bit for bit quantile_cont's values, but a GROUP BY that can
+                # spill — quantile_cont held every value in memory (3.7 GB per
+                # copy at 306 M rows; past the budget near a billion, 0.8.9)
+                alive()
+                from .quantiles import exact_quantiles_sql
+                q = con.execute(exact_quantiles_sql(
+                    f"SELECT negotiated_rate AS x FROM ({srel}) "
+                    "WHERE is_dollar_rate AND negotiated_rate > 0.01",
+                    [0.25, 0.5, 0.75], round_to=2), fs.params).fetchone()[0] or [None, None, None]
+                row = (head[0], head[1], head[2], head[3], q[0], q[1], q[2], head[4])
                 # PER-CODE breakdown: one blended median across 97110+97530+…
                 # is analytically meaningless (different services), so give a row
                 # per code — median, spread (IQR), practice count, and % of
@@ -2191,11 +2203,36 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                 # institutional and NPI-slot rows the Benchmark excludes.
                 basis, basis_text = practice_basis(fs)
                 alive()
-                by_code = _dicts(con.execute(
+                # one statement holds every rate of the view in memory (each
+                # practice's median, then each code's quantiles): on a big view
+                # the same statement runs per batch of codes — groups never
+                # span codes, so the rows are identical (0.8.9)
+                code_batches = [None]
+                if (row[0] or 0) > _summary_slice_rows():
+                    per_code = con.execute(
+                        f"SELECT billing_code, count(*) FROM ({srel}) WHERE {basis} "
+                        "GROUP BY billing_code ORDER BY billing_code NULLS LAST", fs.params).fetchall()
+                    code_batches, cur, rows_in = [], [], 0
+                    for code, cnt in per_code:
+                        if cur and rows_in + cnt > _summary_slice_rows():
+                            code_batches.append(cur)
+                            cur, rows_in = [], 0
+                        cur.append(code)
+                        rows_in += cnt
+                    if cur:
+                        code_batches.append(cur)
+                by_code = []
+                for batch in code_batches:
+                    alive()
+                    named = [c for c in (batch or []) if c is not None]
+                    cpred = ("TRUE" if batch is None else "(" + " OR ".join(
+                        ([f"billing_code IN ({', '.join('?' for _ in named)})"] if named else [])
+                        + (["billing_code IS NULL"] if len(named) < len(batch) else [])) + ")")
+                    by_code += _dicts(con.execute(
                     f"""
                     WITH r AS (SELECT billing_code, unit_id, median(negotiated_rate) AS negotiated_rate
                                FROM ({srel})
-                               WHERE {basis}
+                               WHERE {basis} AND {cpred}
                                GROUP BY billing_code, unit_id)
                     SELECT billing_code, round(q[2], 2) AS median, round(q[1], 2) AS p25,
                            round(q[3], 2) AS p75, entities FROM (
@@ -2205,8 +2242,9 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                     FROM r GROUP BY r.billing_code)
                     ORDER BY billing_code
                     """,
-                    fs.params,
-                ))
+                    list(fs.params) + named,
+                    ))
+                by_code.sort(key=lambda c: (c["billing_code"] is None, c["billing_code"] or ""))
             keys = ["n", "entities", "codes", "min", "p25", "median", "p75", "max"]
             scanned = {**dict(zip(keys, row)), "grain": grain, "by_code": by_code,
                        "by_code_basis": basis_text}
@@ -4262,7 +4300,8 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
         tins = resolve_subject_tins(store, subject)
         with store.connect() as con:
             npis = [r[0] for r in con.execute(
-                "SELECT DISTINCT npi FROM rates WHERE tin_value IN "
+                # the kept (TIN, NPI) pairs, not a scan of every rate (scale)
+                f"SELECT DISTINCT npi FROM {store.pairs_relation()} WHERE tin_value IN "
                 "(SELECT unnest(?::VARCHAR[])) AND npi IS NOT NULL ORDER BY npi",
                 [tins]).fetchall()]
             # one name, the same on every call (review 9 4.10: any_value

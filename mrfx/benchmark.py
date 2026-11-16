@@ -640,7 +640,8 @@ def _house_disc_table_sql() -> tuple[str, list]:
     return (f"SELECT d.discipline, t.payer, t.billing_code, t.tin_value, "
             f"median(t.negotiated_rate) AS rate "
             f"FROM {_rates_relation(house)} t, (VALUES {disc_values}) d(discipline) "
-            f"WHERE {where} AND (t.discipline = d.discipline OR t.discipline = 'unspecified') "
+            f"WHERE {where} AND {{code_pred}} "
+            f"AND (t.discipline = d.discipline OR t.discipline = 'unspecified') "
             f"GROUP BY d.discipline, t.payer, t.billing_code, t.tin_value "
             f"ORDER BY t.billing_code, t.tin_value, d.discipline, t.payer"), params
 
@@ -651,7 +652,7 @@ def _house_table_sql(per_payer: bool) -> tuple[str, list]:
     keys = "t.payer, t.billing_code, t.tin_value" if per_payer else "t.billing_code, t.tin_value"
     # ordered by code so a code-filtered read prunes row groups
     return (f"SELECT {keys}, median(t.negotiated_rate) AS rate "
-            f"FROM {_rates_relation(house)} t WHERE {where} "
+            f"FROM {_rates_relation(house)} t WHERE {where} AND {{code_pred}} "
             f"GROUP BY {keys} ORDER BY t.billing_code, t.tin_value"
             + (", t.payer" if per_payer else "")), params
 

@@ -57,7 +57,7 @@ def fold_in(store, why: str = "") -> float:
     fails (logged with the precondition). Returns the store method's result
     (ROLLUP_SKIPPED when another update holds the lock). Raises on failure;
     the caller decides about back-off."""
-    from .store import ROLLUP_SKIPPED, RollupNeedsFull, RollupPlanPending
+    from .store import ROLLUP_SKIPPED, RollupNeedsFull, RollupPlanPending, RollupScoped
     plan = store.rollup_plan()
     if plan is not None and plan.get("kind") == "names":
         # a killed names-only build resumes AS a names build (review 14
@@ -78,6 +78,9 @@ def fold_in(store, why: str = "") -> float:
         return store.update_rollups_incremental(skip_if_busy=True)
     except RollupPlanPending as e:
         return store.rebuild_rollups(names_only=(e.kind == "names"), skip_if_busy=True)
+    except RollupScoped as e:
+        log.info("the analytics update is large: %s — building those payers part by part", e)
+        return store.rebuild_rollups(skip_if_busy=True, scope=e.scope)
     except RollupNeedsFull as e:
         log.info("the analytics need a full build: %s — running it", e)
         return store.rebuild_rollups(skip_if_busy=True)

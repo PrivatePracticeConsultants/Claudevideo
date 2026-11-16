@@ -749,6 +749,9 @@ def referral_leaders(store: Store, zip_code: str | None = None,
     use_radius = bool(zip_code and radius_miles)
 
     therapy = therapy_taxonomy_sql("n.taxonomy_code") if therapy_only else "TRUE"
+    # the kept (TIN, NPI) pairs with row counts — "in the store" and each
+    # NPI's TIN without a scan of every rate (2-5 B-rate scale, 0.8.9)
+    pairs = store.pairs_relation()
     with store.connect() as con:
         _ensure_referral_view(con, store)
         if use_radius:
@@ -809,7 +812,7 @@ def referral_leaders(store: Store, zip_code: str | None = None,
                        bool_and(p.dir_npi IS NULL)           AS unidentified,
                        max(CASE WHEN r.npi IS NOT NULL THEN 1 ELSE 0 END) = 1 AS in_store
                 FROM keyed p
-                LEFT JOIN (SELECT DISTINCT npi FROM rates) r ON r.npi = p.target_npi
+                LEFT JOIN (SELECT DISTINCT npi FROM {pairs}) r ON r.npi = p.target_npi
                 WHERE {keep}
                 GROUP BY p.pkey
             ),
@@ -840,9 +843,13 @@ def referral_leaders(store: Store, zip_code: str | None = None,
                                          for r in rows}
         wanted = sorted({n for r in rows if r["in_store"]
                          for n in members[r["pkey"]]})
+        # each NPI's most common TIN over its rate rows (ties: the smallest —
+        # mode's rule), from the kept pairs' row counts, not every rate
         tin_of = dict(con.execute(
-            "SELECT npi, mode(tin_value ORDER BY tin_value) FROM rates WHERE npi IN "
-            "(SELECT unnest(?::VARCHAR[])) GROUP BY npi",
+            f"SELECT npi, tin_value FROM (SELECT npi, tin_value, sum(c) AS k FROM {pairs} "
+            "WHERE npi IN (SELECT unnest(?::VARCHAR[])) AND tin_value IS NOT NULL "
+            "GROUP BY npi, tin_value) "
+            "QUALIFY row_number() OVER (PARTITION BY npi ORDER BY k DESC, tin_value) = 1",
             [wanted]).fetchall()) if wanted else {}
         for r in rows:
             tins = [tin_of[n] for n in members[r.pop("pkey")] if n in tin_of]

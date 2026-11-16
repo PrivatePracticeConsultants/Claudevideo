@@ -248,7 +248,7 @@ def closures(store: Store, zip_code: str | None = None,
         capped = total > len(out)
         if out:
             known = {n for (n,) in con.execute(
-                "SELECT DISTINCT npi FROM rates WHERE npi IN "
+                f"SELECT DISTINCT npi FROM {store.pairs_relation()} WHERE npi IN "
                 "(SELECT unnest(?::VARCHAR[]))",
                 [[r["npi"] for r in out]]).fetchall()}
             for r in out:
@@ -331,7 +331,7 @@ def new_enumerations(store: Store, zip_code: str | None = None,
         # already contracted? one lookup for the whole page, not per row
         if out:
             known = {n for (n,) in con.execute(
-                "SELECT DISTINCT npi FROM rates WHERE npi IN "
+                f"SELECT DISTINCT npi FROM {store.pairs_relation()} WHERE npi IN "
                 "(SELECT unnest(?::VARCHAR[]))",
                 [[r["npi"] for r in out]]).fetchall()}
             for r in out:

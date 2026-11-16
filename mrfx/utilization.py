@@ -284,7 +284,7 @@ def practice_utilization(store: Store, tins: list[str], year: str | None = None,
             return {"codes": [], "summary": {"npis": 0, "matched_npis": 0},
                     "year": None, "note": VOLUME_NOTE}
         npis = [n for (n,) in con.execute(
-            "SELECT DISTINCT npi FROM rates WHERE tin_value IN "
+            f"SELECT DISTINCT npi FROM {store.pairs_relation()} WHERE tin_value IN "
             "(SELECT unnest(?::VARCHAR[])) AND npi IS NOT NULL", [tins]).fetchall()]
         if not npis:
             return {"codes": [], "summary": {"npis": 0, "matched_npis": 0},
@@ -546,11 +546,16 @@ def service_line_gaps(store: Store, subject: str, *, zip_code: str | None = None
         load_centroids(con, centroids_path)
         home = zip_code and str(zip_code).strip()[:5]
         if not home:
-            r = con.execute("""
-                SELECT mode(lpad(substr(trim(n.zip), 1, 5), 5, '0') ORDER BY lpad(substr(trim(n.zip), 1, 5), 5, '0'))
-                FROM rates r JOIN npi_directory n ON n.npi = r.npi
-                WHERE r.tin_value IN (SELECT unnest(?::VARCHAR[]))
-                  AND n.zip IS NOT NULL AND trim(n.zip) <> ''
+            # the most common ZIP over the practice's rate rows (ties: the
+            # smallest — mode's rule), from the kept pairs' row counts
+            r = con.execute(f"""
+                SELECT z FROM (
+                    SELECT lpad(substr(trim(n.zip), 1, 5), 5, '0') AS z, sum(r.c) AS k
+                    FROM {store.pairs_relation()} r JOIN npi_directory n ON n.npi = r.npi
+                    WHERE r.tin_value IN (SELECT unnest(?::VARCHAR[]))
+                      AND n.zip IS NOT NULL AND trim(n.zip) <> ''
+                    GROUP BY z)
+                ORDER BY k DESC, z LIMIT 1
             """, [tins]).fetchone()
             home = r[0] if r else None
         if not home:
@@ -567,7 +572,7 @@ def service_line_gaps(store: Store, subject: str, *, zip_code: str | None = None
             f"SELECT z.zip FROM _zcta z WHERE {miles} <= ?", [radius]).fetchall()]
 
         mine = [n for (n,) in con.execute(
-            "SELECT DISTINCT npi FROM rates WHERE tin_value IN "
+            f"SELECT DISTINCT npi FROM {store.pairs_relation()} WHERE tin_value IN "
             "(SELECT unnest(?::VARCHAR[])) AND npi IS NOT NULL", [tins]).fetchall()]
         therapy = therapy_taxonomy_sql("n.taxonomy_code", all_col="n.taxonomy_codes")
         cur = con.execute(f"""

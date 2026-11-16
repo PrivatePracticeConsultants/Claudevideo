@@ -249,7 +249,7 @@ def build_client_packet(cfg: MrfxConfig, store: Store, subject: str,
         tins = resolve_subject_tins(store, subject)
         with store.connect() as con:
             npis = [r[0] for r in con.execute(
-                "SELECT DISTINCT npi FROM rates WHERE tin_value IN "
+                f"SELECT DISTINCT npi FROM {store.pairs_relation()} WHERE tin_value IN "
                 "(SELECT unnest(?::VARCHAR[])) AND npi IS NOT NULL",
                 [tins]).fetchall()]
         if not npis:

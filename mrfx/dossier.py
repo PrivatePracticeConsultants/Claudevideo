@@ -129,8 +129,8 @@ def build_prospect_dossier(cfg: MrfxConfig, store: Store, subject: str,
     # send it. Confirm the practice is really in the store first.
     with store.connect() as con:
         known = con.execute(
-            "SELECT 1 FROM rates WHERE tin_value IN (SELECT unnest(?::VARCHAR[])) "
-            "LIMIT 1", [tins]).fetchone()
+            f"SELECT 1 FROM {store.pairs_relation()} WHERE tin_value IN "
+            "(SELECT unnest(?::VARCHAR[])) LIMIT 1", [tins]).fetchone()
     if not known:
         raise BenchmarkError(
             f"no practice matches {subject!r} in this store — check the "

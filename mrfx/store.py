@@ -605,6 +605,22 @@ class RollupNeedsFull(RuntimeError):
     to retry, never a reason to rebuild the whole store."""
 
 
+class RollupScoped(RollupNeedsFull):
+    """The update is too big for one transaction, but it touches only some
+    payers: build THOSE payers as a durable plan (each slice committed,
+    resumed after a restart) and rebuild the directory with the plan's
+    one-pass source — never every payer of the store (scale, 0.8.9: one new
+    file of a payer bigger than ~sqrt(4 M x store) rows rebuilt the whole
+    store — ~1.5 h at 1.5 B rates, 5+ h at 5 B). Carries what the update
+    itself would have stamped: the coverage markers of ITS delta files and
+    the pending removal notes it read, so a file landing meanwhile stays
+    uncovered for the next update."""
+
+    def __init__(self, msg: str, scope: dict):
+        super().__init__(msg)
+        self.scope = scope
+
+
 class RollupPlanPending(RollupNeedsFull):
     """A durable build plan is part-way: it must finish first (a `names` plan
     resumes as a names plan — review 14 Group 3 — a `full` one as full)."""
@@ -629,6 +645,12 @@ def _run_cancelled() -> bool:
         return bool(getattr(progress.current(), "cancelled", False))
     except Exception:  # noqa: BLE001
         return False
+
+
+def _too_big(msg: str) -> RollupNeedsFull:
+    e = RollupNeedsFull(msg)
+    e.too_big = True
+    return e
 
 
 def _needs_full_set(token: str | None) -> bool:
@@ -1846,6 +1868,8 @@ class Store:
                     try:
                         if self.update_rollups_incremental(skip_if_busy=True) == ROLLUP_SKIPPED:
                             return
+                    except RollupScoped as e:   # a big update: only its payers
+                        self.rebuild_rollups(skip_if_busy=True, scope=e.scope)
                     except Exception:  # noqa: BLE001 — the full build is always correct
                         self.rebuild_rollups(skip_if_busy=True)
             except Exception as e:  # noqa: BLE001
@@ -4957,7 +4981,7 @@ class Store:
         return max(1, base // max(1, split))
 
     def rebuild_rollups(self, names_only: bool = False,
-                        skip_if_busy: bool = False) -> float:
+                        skip_if_busy: bool = False, scope: dict | None = None) -> float:
         """Materialize the dedup/by-TIN/tin-directory rollups after ingest or
         enrichment so page queries stay fast. The DISTINCT/median/list aggregates
         can't spill to disk, so if a build still hits the memory limit we retry
@@ -4991,7 +5015,7 @@ class Store:
             # review 13 item 1.3: a durable plan of slices, each committed on
             # its own — resumed after a kill / restart / failure, queryable
             # while it runs, an out-of-memory slice halved and retried
-            took = self._run_plan("names" if names_only else "full", log)
+            took = self._run_plan("names" if names_only else "full", log, scope=scope)
             self._clear_rollup_failure()
             return took
         except RollupPaused:
@@ -5175,12 +5199,27 @@ class Store:
                     log.info("analytics update: %d new file(s), %d queued slice(s) — "
                              "recomputing %d payer slice(s) instead of the whole store",
                              len(delta), len(pending), len(payers))
-                    self._apply_rollup_delta(con, payer_pred, files_pred, log,
-                                             directory_scoped=dir_scoped,
-                                             with_pending_tins=removal,
-                                             narrow_payers=sorted(set(delta_payers)
-                                                                  - set(pending)),
-                                             wide_payers=sorted(set(pending)))
+                    try:
+                        self._apply_rollup_delta(con, payer_pred, files_pred, log,
+                                                 directory_scoped=dir_scoped,
+                                                 with_pending_tins=removal,
+                                                 narrow_payers=sorted(set(delta_payers)
+                                                                      - set(pending)),
+                                                 wide_payers=sorted(set(pending)))
+                    except RollupNeedsFull as e:
+                        if not getattr(e, "too_big", False):
+                            raise
+                        cover_ts, cover_names = covered, sorted(covered_names)
+                        if delta:
+                            cover_ts = max(t for _f, t, _ft in delta)
+                            names = {f for f, t, _ft in delta if t == cover_ts}
+                            if cover_ts == covered:
+                                names |= covered_names
+                            cover_names = sorted(names)
+                        raise RollupScoped(str(e), {
+                            "payers": list(payers), "cover_ts": cover_ts,
+                            "cover_names": cover_names, "pend_gen": pend_gen,
+                            "pending": list(pending)}) from None
                 else:
                     log.info("analytics update: %d new reference file(s) — "
                              "no rate slices to recompute", len(delta))
@@ -5472,7 +5511,7 @@ class Store:
         if parts > 1:
             total = con.execute("SELECT count(*) FROM rates").fetchone()[0] or 0
             if parts * int(n_rows or 0) > total:
-                raise RollupNeedsFull(
+                raise _too_big(
                     f"a large update ({int(n_rows):,} rows of the {total:,} loaded would be "
                     f"re-read {parts} times in one go) — building payer by payer instead, "
                     "each payer saved as it finishes")
@@ -5841,7 +5880,8 @@ class Store:
             "SELECT column_name FROM information_schema.columns WHERE table_name = ? "
             "ORDER BY ordinal_position", [tbl]).fetchall()]
 
-    def _new_plan(self, con: duckdb.DuckDBPyConnection, kind: str, log) -> dict:
+    def _new_plan(self, con: duckdb.DuckDBPyConnection, kind: str, log,
+                  scope: dict | None = None) -> dict:
         """Snapshot the coverage markers, size the slices, make sure the
         target tables exist, and store the plan. Nothing is aggregated yet."""
         from . import rollplan
@@ -5873,9 +5913,30 @@ class Store:
         dir_part = list(rollplan.dir_slices(n_rows, rpp))
         slices: list = []
         payers: list = []
+        if scope and kind == "full":
+            # scoped only when the spine is rebuilt IN PLACE: a missing spine
+            # or a schema change (a `__next` table swapped in at the end)
+            # needs every payer — a full build
+            have = self._table_columns(con, "rates_by_tin_tbl")
+            want = [c[0] for c in con.execute(
+                f"DESCRIBE {SPINE_QUERY.format(part='FALSE')}").fetchall()]
+            if (not scope.get("payers") or None in scope["payers"]
+                    or not have or sorted(have) != sorted(want)):
+                log.info("analytics update: the whole store is rebuilt instead "
+                         "(the summary tables' layout changed)")
+                scope = None
+        if kind == "full" and scope:
+            # the update's own markers and notes (RollupScoped), not a new
+            # snapshot: a file landing after the update looked stays newer
+            # than the marker; a removal queued meanwhile stays queued
+            cover_ts, cover_names = scope["cover_ts"], list(scope["cover_names"])
+            pend_gen, pending = int(scope["pend_gen"]), list(scope["pending"])
+            needs_full = None            # a scoped build never answers "needs full"
         if kind == "full":
+            spred = ("TRUE" if not scope else "payer IN ("
+                     + ", ".join(rollplan.q(p) for p in scope["payers"]) + ")")
             counts = con.execute(
-                "SELECT payer, billing_code, count(*) FROM rates "
+                f"SELECT payer, billing_code, count(*) FROM rates WHERE {spred} "
                 "GROUP BY payer, billing_code").fetchall()
             spine = rollplan.spine_slices(counts, rpp)
             payers = sorted({s["payer"] for s in spine if s["payer"] is not None})
@@ -5887,7 +5948,8 @@ class Store:
             # (A plan stored by 0.8.0 keeps its own order when resumed.)
             slices.extend(spine)
             slices.append({"t": "prune", "payers": payers, "null_payer": has_null,
-                           "k": 1, "i": 0, "rows": 0, "work": 1})
+                           "k": 1, "i": 0, "rows": 0, "work": 1,
+                           **({"scope": sorted(scope["payers"])} if scope else {})})
         slices.extend(dir_part)
         # where each table is built: in place (the live table, queryable as it
         # fills) when its columns are what this version writes; a fresh
@@ -5929,6 +5991,7 @@ class Store:
                     "pend_gen": pend_gen, "pending": pending, "needs_full": needs_full,
                     "dir_names_ts": dir_names_ts, "targets": targets,
                     "rows": int(n_rows), "slices": slices, "next": 0, "work_done": 0,
+                    **({"scope": sorted(scope["payers"])} if scope else {}),
                     "created": _utcnow().isoformat(timespec="seconds"),
                 }
                 con.execute("INSERT OR REPLACE INTO meta VALUES ('rollup_plan', ?)",
@@ -5945,7 +6008,7 @@ class Store:
                  len(slices), f"{n_rows:,}", len(payers))
         return plan
 
-    def _run_plan(self, kind: str, log) -> float:
+    def _run_plan(self, kind: str, log, scope: dict | None = None) -> float:
         """Create (or resume) the plan and run its slices to the end. Each
         slice commits with the plan's pointer in ONE transaction, so a kill
         between any two statements loses at most the running slice. An
@@ -5965,11 +6028,15 @@ class Store:
             if plan is not None and kind == "full" and plan.get("kind") == "names":
                 plan = None      # a full build includes the names; it replaces it
             if plan is None:
-                if kind == "full":
+                if kind == "full" and scope:
+                    log.info("analytics update of %d payer(s) as a durable build: "
+                             "those payers part by part, then the practice directory "
+                             "— every other payer is left as it is", len(scope["payers"]))
+                elif kind == "full":
                     log.info("full analytics build: payer by payer, each part saved "
                              "as it finishes — the dashboard shows each payer as it "
                              "lands, and a stop or restart continues where it left off")
-                plan = self._new_plan(con, kind, log)
+                plan = self._new_plan(con, kind, log, scope=scope if kind == "full" else None)
             else:
                 log.info("analytics build: resuming at part %d of %d (%s)",
                          plan["next"] + 1, len(plan["slices"]),
@@ -6053,7 +6120,7 @@ class Store:
             if s.get("t") == "spine":
                 units.setdefault((s["payer"], s.get("lo"), s.get("hi"),
                                   bool(s.get("null_code"))), s)
-        if units:
+        if units and not plan.get("scope"):
             counts = [(s["payer"], c, n) for s in units.values()
                       for c, n in (s.get("cc") or [])]
         else:                       # a names-only plan carries no spine slices
@@ -6228,6 +6295,14 @@ class Store:
                 con.execute(f"DELETE FROM {directory} WHERE {pred}")
                 con.execute(f"INSERT INTO {directory} BY NAME "
                             + dir_query.format(part=pred))
+            elif sl["t"] == "prune" and sl.get("scope") is not None:
+                # a payer-scoped build: only its payers' rows that no slice
+                # rebuilt (a payer whose rows are all gone); others untouched
+                con.execute(f"DELETE FROM {spine} WHERE payer IN (SELECT unnest(?::VARCHAR[])) "
+                            "AND payer NOT IN (SELECT unnest(?::VARCHAR[]))",
+                            [list(sl["scope"]), list(sl.get("payers") or [])])
+                con.execute("INSERT OR REPLACE INTO meta VALUES ('spine_token', ?)",
+                            [os.urandom(8).hex()])
             elif sl["t"] == "prune":
                 keep = list(sl.get("payers") or [])
                 null_clause = "FALSE" if sl.get("null_payer") else "payer IS NULL"
@@ -6669,8 +6744,7 @@ class Store:
                     "Preparing the practice medians (first run since new data)")
                 try:
                     with self.connect() as con:
-                        con.execute(f"COPY ({select_sql}) TO '{sql_path(tmp)}' "
-                                    "(FORMAT PARQUET)", list(params))
+                        self._materialise_sliced(con, select_sql, list(params), tmp)
                     os.replace(tmp, path)
                 except BaseException:
                     tmp.unlink(missing_ok=True)
@@ -6687,6 +6761,65 @@ class Store:
                 except OSError:          # still open on Windows: next time
                     pass
             return f"read_parquet('{sql_path(path)}')"
+
+    # spine rows per slice of a materialised per-practice table (2-5 B-rate
+    # scale, 0.8.9): a median holds every value of its group in memory and
+    # cannot spill, so one statement over the whole latest spine grows with
+    # the store (~1 B spine rows = ~8 GB of values). Every such table groups
+    # by billing_code, so code-range slices give the identical rows.
+    MATERIALISE_SLICE_ROWS = 40_000_000
+
+    def _materialise_sliced(self, con: duckdb.DuckDBPyConnection, select_sql: str,
+                            params: list, out: Path) -> None:
+        """COPY `select_sql` to `out`. A query carrying the `{code_pred}`
+        placeholder (a predicate on t.billing_code) is written in code-range
+        slices once the latest spine is bigger than MATERIALISE_SLICE_ROWS —
+        each slice its own statement (bounded memory), concatenated in code
+        order; below that, ONE statement exactly as before."""
+        if "{code_pred}" not in select_sql:
+            con.execute(f"COPY ({select_sql}) TO '{sql_path(out)}' (FORMAT PARQUET)", params)
+            return
+        counts = []
+        try:
+            counts = con.execute(
+                "SELECT billing_code, count(*) FROM rates_by_tin WHERE is_latest "
+                "GROUP BY billing_code ORDER BY billing_code NULLS LAST").fetchall()
+        except duckdb.Error:
+            counts = []
+        total = sum(n for _c, n in counts)
+        if total <= self.MATERIALISE_SLICE_ROWS:
+            con.execute(f"COPY ({select_sql.replace('{code_pred}', 'TRUE')}) "
+                        f"TO '{sql_path(out)}' (FORMAT PARQUET)", params)
+            return
+        batches, cur, rows = [], [], 0
+        for code, n in counts:
+            if cur and rows + n > self.MATERIALISE_SLICE_ROWS:
+                batches.append(cur)
+                cur, rows = [], 0
+            cur.append(code)
+            rows += n
+        if cur:
+            batches.append(cur)
+        work = out.with_name(out.name + ".slices")
+        import shutil
+        shutil.rmtree(work, ignore_errors=True)
+        work.mkdir()
+        try:
+            files = []
+            for i, codes in enumerate(batches):
+                named = [c for c in codes if c is not None]
+                pred = " OR ".join(
+                    ([f"t.billing_code IN ({', '.join('?' for _ in named)})"] if named else [])
+                    + (["t.billing_code IS NULL"] if len(named) < len(codes) else []))
+                f = work / f"{i:04d}.parquet"
+                con.execute(f"COPY ({select_sql.replace('{code_pred}', f'({pred})')}) "
+                            f"TO '{sql_path(f)}' (FORMAT PARQUET)", params + named)
+                files.append(f)
+            src = ", ".join(f"'{sql_path(f)}'" for f in files)
+            con.execute(f"COPY (SELECT * FROM read_parquet([{src}])) "
+                        f"TO '{sql_path(out)}' (FORMAT PARQUET)")
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
 
     def spine_materialised_current(self, name: str) -> str | None:
         """`read_parquet(...)` of `name` when it is ALREADY built for the
@@ -7141,14 +7274,14 @@ class Store:
         # forever — blank name, unknown taxonomy, invisible to the therapy
         # filter. The view is optional (no referral data imported yet), so the
         # wide query falls back to the rates-only one.
+        # the rates' NPIs (an NPI in the TIN slot included — it names the
+        # entity) come from the per-part set (`_rate_npis_relation`: a new
+        # part scanned once, then kept), not from a DISTINCT over every rate
+        # per batch of 200 — a whole-store scan each batch, minutes per batch
+        # at 2-5 B rates (scale, 0.8.9). Same set: it keeps the same rows.
         base = """
             SELECT DISTINCT npi FROM (
-                SELECT npi FROM rates
-                UNION
-                -- tin.type='npi' rows put an NPI in the TIN slot; it names
-                -- the entity, so it needs enrichment too
-                SELECT tin_value AS npi FROM rates
-                WHERE tin_is_really_npi AND tin_value IS NOT NULL
+                SELECT npi FROM {rate_npis}
                 {referrals}
             )
             WHERE npi > ? AND npi NOT IN (SELECT npi FROM npi_directory)
@@ -7160,12 +7293,16 @@ class Store:
         """
         with self.connect() as con:
             try:
-                rows = con.execute(base.format(referrals=(
+                rate_npis = self._rate_npis_relation(con)
+            except duckdb.Error:   # the set cannot be updated now: the raw read
+                rate_npis = f"({_RATE_NPIS_SQL})"
+            try:
+                rows = con.execute(base.format(rate_npis=rate_npis, referrals=(
                     "UNION SELECT source_npi AS npi FROM referral_pairs "
                     "UNION SELECT target_npi AS npi FROM referral_pairs")),
                     [after, limit]).fetchall()
             except duckdb.Error:   # no referral view in this store
-                rows = con.execute(base.format(referrals=""),
+                rows = con.execute(base.format(rate_npis=rate_npis, referrals=""),
                                    [after, limit]).fetchall()
         return [r[0] for r in rows]
 
