@@ -402,3 +402,58 @@ def test_part_sets_are_saved_in_chunks_and_equal_the_raw_sets(cfg, store, monkey
                         "WHERE tin_value IS NOT NULL").fetchall())
         assert con.execute("SELECT count(*) FROM rate_npi_parts").fetchone()[0] == 5
         assert con.execute("SELECT count(*) FROM part_set_parts").fetchone()[0] == 5
+
+
+# --------------------------------------------------------------------------
+# the (TIN, NPI) pairs merge: incremental for added parts, passes when big
+
+
+def _pairs_file_rows(store):
+    rel = store.pairs_relation()
+    with store.connect() as con:
+        return con.execute(f"SELECT * FROM {rel}").fetchall()      # file order kept
+
+
+def _pairs_from_scratch(store):
+    for f in store.dir.glob("tin_npi_pairs.*"):
+        f.unlink()
+    return _pairs_file_rows(store)
+
+
+def test_pairs_merge_in_passes_equals_one_merge(cfg, store, monkeypatch):
+    """Merged in hash passes (forced tiny), the pairs file has the same rows
+    in the same order as one GROUP BY. was: one GROUP BY over every kept
+    row — 360 M at 2 B rates, ~7 GB of spill, the disk-full failure."""
+    _seed(store)
+    _write(store, "f_P-E.json", "P-E", _recs("P-A", 0))           # repeats P-A's pairs
+    one = _pairs_from_scratch(store)
+    monkeypatch.setattr(type(store), "PAIRS_MERGE_ROWS", 7)
+    assert _pairs_from_scratch(store) == one
+    assert not list(store.dir.glob("*.passes"))
+
+
+def test_pairs_merge_adds_new_parts_to_the_last_merge(cfg, store, monkeypatch):
+    """A new part: the merge reads the last merged file + the new part's kept
+    pairs only, and equals a merge from scratch. A removed or rewritten part
+    is never served from a base that still counts it: full merge."""
+    _seed(store)
+    _pairs_file_rows(store)
+    seen = []
+    real = store._write_pairs
+
+    def spy(sigs, tmp, base=None):
+        seen.append(None if base is None else sorted(base[1]))
+        return real(sigs, tmp, base=base)
+    monkeypatch.setattr(store, "_write_pairs", spy)
+    _write(store, "f_P-E.json", "P-E", _recs("P-B", 1))           # overlaps P-B's pairs
+    got = _pairs_file_rows(store)
+    assert seen[-1] is not None and len(seen[-1]) == 4            # base: the 4 old parts
+    assert got == _pairs_from_scratch(store)
+    store.forget_file("f_P-B.json")                              # a part removed
+    got = _pairs_file_rows(store)
+    assert seen[-1] is None                                       # no exact base: full
+    assert got == _pairs_from_scratch(store)
+    _write(store, "f_P-A.json", "P-A", _recs("P-A", 0)[:10])     # a part rewritten
+    got = _pairs_file_rows(store)
+    assert seen[-1] is None
+    assert got == _pairs_from_scratch(store)

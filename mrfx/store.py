@@ -7648,8 +7648,9 @@ class Store:
                     return f"read_parquet('{sql_path(path)}')"
                 tmp = self.dir / f"tin_npi_pairs.{stamp}.parquet.{os.getpid()}.tmp"
                 try:
-                    self._write_pairs(sigs, tmp)
-                    if self._part_sigs() != sigs and _attempt < 2:
+                    self._write_pairs(sigs, tmp, base=self._pairs_base(sigs))
+                    exact = self._part_sigs() == sigs
+                    if not exact and _attempt < 2:
                         # a part changed while it was read: this file would be
                         # named for parts that are gone — build again
                         tmp.unlink(missing_ok=True)
@@ -7660,6 +7661,13 @@ class Store:
                     # stood here aggregated every rate row: on a 1.19 B store
                     # out of temp disk after 16 s, the failure 0.8.3 removed)
                     os.replace(tmp, path)
+                    if exact:
+                        # the parts (and their bytes) this file is exactly the
+                        # merge of: the base of the next merge (_pairs_base)
+                        man = path.with_name(path.name + ".parts.json")
+                        man_tmp = man.with_name(man.name + f".{os.getpid()}.tmp")
+                        man_tmp.write_text(_json.dumps(sigs))
+                        os.replace(man_tmp, man)
                 except BaseException:
                     tmp.unlink(missing_ok=True)
                     raise
@@ -7670,22 +7678,65 @@ class Store:
                         old.unlink()
                     except OSError:
                         pass
+                for man in self.dir.glob("tin_npi_pairs.*.parquet.parts.json"):
+                    if not man.with_name(man.name.removesuffix(".parts.json")).exists():
+                        man.unlink(missing_ok=True)
                 return f"read_parquet('{sql_path(path)}')"
         raise RuntimeError("pairs_relation: no attempt returned")   # unreachable
 
-    def _write_pairs(self, sigs: dict, tmp: Path) -> None:
+    # input rows (kept per-part pairs) per pass of the pairs merge (0.9.0)
+    PAIRS_MERGE_ROWS = 40_000_000
+
+    def _pairs_base(self, sigs: dict) -> tuple[Path, dict] | None:
+        """The newest merged pairs file whose manifest names only parts that
+        are still on disk with the SAME bytes: the merge then adds the new
+        parts to it instead of re-merging every part (0.9.0 — at 2 B rates a
+        full merge is 360 M kept rows, spilling ~7 GB, after every new file).
+        None when there is none (a part removed or rewritten: full merge)."""
+        import json as _json
+        best = None
+        for man in self.dir.glob("tin_npi_pairs.*.parquet.parts.json"):
+            f = man.with_name(man.name.removesuffix(".parts.json"))
+            try:
+                got = _json.loads(man.read_text())
+                mtime = f.stat().st_mtime
+            except (OSError, ValueError):
+                continue
+            if (isinstance(got, dict) and got
+                    and all(sigs.get(k) == v for k, v in got.items())
+                    and (best is None or mtime > best[2])):
+                best = (f, got, mtime)
+        return (best[0], best[1]) if best else None
+
+    def _write_pairs(self, sigs: dict, tmp: Path,
+                     base: tuple[Path, dict] | None = None) -> None:
         """The pairs file for the parts `sigs` names: the kept pairs of every
         part (`_pair_file`), merged; a part whose pairs could not be written
-        is read from its own rows in the same statement — exact either way."""
+        is read from its own rows in the same statement — exact either way.
+
+        0.9.0: with `base` (a merged file + the parts it covers, all still on
+        disk unchanged — `_pairs_base`) only the parts it lacks are added to
+        it: counts add, so the rows are identical. And the merge runs in hash
+        passes of about PAIRS_MERGE_ROWS input rows each (a pair's every row
+        lands in one pass), the passes then sorted together — one GROUP BY
+        over every kept row materialised close to its whole input: ~7 GB of
+        spill at 2 B rates, ~17 GB at 5 B."""
         with self.connect() as con:
             try:
                 self._pair_sets_current(con, None)
             except Exception:  # noqa: BLE001 — what is kept is used; the rest is read
                 pass
-            kept = [self._pair_file(n, sg) for n, sg in sorted(sigs.items())]
+            todo = sorted(sigs.items())
+            if base is not None and base[0].exists():
+                todo = [(n, sg) for n, sg in todo if n not in base[1]]
+            else:
+                base = None
+            kept = [self._pair_file(n, sg) for n, sg in todo]
             covered = [f for f in kept if f.exists()]
-            rest = [n for (n, sg), f in zip(sorted(sigs.items()), kept) if not f.exists()]
+            rest = [n for (n, sg), f in zip(todo, kept) if not f.exists()]
             srcs = []
+            if base is not None:
+                covered = [base[0]] + covered
             if covered:
                 srcs.append("SELECT tin_value, npi, tin_is_really_npi, c FROM read_parquet(["
                             + ", ".join(f"'{sql_path(f)}'" for f in covered) + "])")
@@ -7698,12 +7749,43 @@ class Store:
             if not srcs:
                 srcs.append("SELECT NULL::VARCHAR AS tin_value, NULL::VARCHAR AS npi, "
                             "NULL::BOOLEAN AS tin_is_really_npi, 0::BIGINT AS c WHERE FALSE")
-            con.execute(
-                "COPY (SELECT tin_value, npi, tin_is_really_npi, sum(c)::BIGINT AS c FROM ("
-                + " UNION ALL ".join(srcs)
-                + ") GROUP BY tin_value, npi, tin_is_really_npi "
-                "ORDER BY tin_value, npi, tin_is_really_npi) "
-                f"TO '{sql_path(tmp)}' (FORMAT PARQUET)")
+            union = " UNION ALL ".join(srcs)
+            n_in = 0
+            if covered:
+                try:
+                    n_in = con.execute(
+                        "SELECT coalesce(sum(num_rows), 0) FROM parquet_file_metadata(["
+                        + ", ".join(f"'{sql_path(f)}'" for f in covered) + "])").fetchone()[0]
+                except duckdb.Error:
+                    n_in = 0
+            k = max(1, -(-int(n_in) // self.PAIRS_MERGE_ROWS))
+            if k == 1:
+                con.execute(
+                    "COPY (SELECT tin_value, npi, tin_is_really_npi, sum(c)::BIGINT AS c FROM ("
+                    + union + ") GROUP BY tin_value, npi, tin_is_really_npi "
+                    "ORDER BY tin_value, npi, tin_is_really_npi) "
+                    f"TO '{sql_path(tmp)}' (FORMAT PARQUET)")
+                return
+            work = tmp.with_name(tmp.name + ".passes")
+            shutil.rmtree(work, ignore_errors=True)
+            work.mkdir()
+            try:
+                outs = []
+                for i in range(k):
+                    o = work / f"{i:04d}.parquet"
+                    con.execute(
+                        "COPY (SELECT tin_value, npi, tin_is_really_npi, sum(c)::BIGINT AS c "
+                        f"FROM ({union}) WHERE hash(tin_value, npi, tin_is_really_npi) % {k} = {i} "
+                        "GROUP BY tin_value, npi, tin_is_really_npi) "
+                        f"TO '{sql_path(o)}' (FORMAT PARQUET)")
+                    outs.append(o)
+                con.execute(
+                    "COPY (SELECT * FROM read_parquet(["
+                    + ", ".join(f"'{sql_path(o)}'" for o in outs)
+                    + "]) ORDER BY tin_value, npi, tin_is_really_npi) "
+                    f"TO '{sql_path(tmp)}' (FORMAT PARQUET)")
+            finally:
+                shutil.rmtree(work, ignore_errors=True)
 
     def _part_sigs(self) -> dict[str, str]:
         """{part file name: size|mtime} for the rate parts on disk: every
