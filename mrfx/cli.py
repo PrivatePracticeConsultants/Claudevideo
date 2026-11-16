@@ -266,7 +266,7 @@ def cmd_serve(cfg: MrfxConfig, args) -> int:
         if stop.wait(20):
             return
         while True:
-            store.warm_part_sets()
+            store.warm_part_sets(throttle=True)
             if stop.wait(60):
                 return
     threading.Thread(target=_part_sets_loop, name="mrfx-part-sets", daemon=True).start()

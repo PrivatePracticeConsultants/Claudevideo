@@ -7430,7 +7430,7 @@ class Store:
                 complete = False             # unreadable right now: next call
         return complete
 
-    def warm_part_sets(self) -> None:
+    def warm_part_sets(self, throttle: bool = False) -> None:
         """Bring every kept per-part set (NPIs, payers/months, TINs, TIN-NPI
         pairs) up to date with the parts on disk — one part at a time, each
         applied under the writer lock briefly. `serve` runs it in the
@@ -7449,7 +7449,21 @@ class Store:
                         pass
             # and the merged files those sets feed, so the practice drawer,
             # outreach, territory, leverage and the dossier find them built
-            # (a no-op when no part changed)
+            # (a no-op when no part changed). While files keep landing, not on
+            # every 60 s round: each merge reads every part's pairs (minutes
+            # at billions of rates) and would be stale again in a minute —
+            # once the parts have been still for 2 min, or every 15 min. A
+            # request still merges exactly what it needs on its own.
+            import hashlib as _hashlib
+            sig = _hashlib.sha1(json.dumps(sorted(self._part_sigs().items())).encode()).hexdigest()
+            now = time.monotonic()
+            seen = self.__dict__.get("_ws_seen")
+            if not seen or seen[0] != sig:
+                self._ws_seen = seen = (sig, now)
+            last = self.__dict__.get("_ws_merged", 0.0)
+            if throttle and now - seen[1] < 120 and now - last < 900:
+                return
+            self._ws_merged = now
             for build in (self.pairs_relation, self.placement_relation,
                           self.refresh_practice_names):
                 try:
@@ -7494,11 +7508,16 @@ class Store:
                 tmp = self.dir / f"tin_npi_pairs.{stamp}.parquet.{os.getpid()}.tmp"
                 try:
                     self._write_pairs(sigs, tmp)
-                    if self._part_sigs() != sigs:
+                    if self._part_sigs() != sigs and _attempt < 2:
                         # a part changed while it was read: this file would be
                         # named for parts that are gone — build again
                         tmp.unlink(missing_ok=True)
                         continue
+                    # (third try, files still landing: this snapshot's merge
+                    # serves THIS request — its stamp no longer matches, so
+                    # the next request merges again. The raw fallback that
+                    # stood here aggregated every rate row: on a 1.19 B store
+                    # out of temp disk after 16 s, the failure 0.8.3 removed)
                     os.replace(tmp, path)
                 except BaseException:
                     tmp.unlink(missing_ok=True)
@@ -7511,9 +7530,7 @@ class Store:
                     except OSError:
                         pass
                 return f"read_parquet('{sql_path(path)}')"
-        # the parts kept changing: the pairs straight from the raw rows
-        return ("(SELECT tin_value, npi, tin_is_really_npi, count(*) AS c FROM rates "
-                "GROUP BY tin_value, npi, tin_is_really_npi)")
+        raise RuntimeError("pairs_relation: no attempt returned")   # unreachable
 
     def _write_pairs(self, sigs: dict, tmp: Path) -> None:
         """The pairs file for the parts `sigs` names: the kept pairs of every
