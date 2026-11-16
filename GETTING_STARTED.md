@@ -1055,6 +1055,27 @@ Downloads and files:
 - **"fee for service" / "fee_schedule"** spelled differently by a payer no
   longer drop rates.
 
+## What changed in version 0.9.0
+
+Built for stores of 2 to 5 billion rates.
+
+- **A big new file no longer rebuilds every payer.** When one file is too
+  large for a quick update, only the payers it touches are rebuilt — part
+  by part, each part saved as it finishes, continuing after a restart — and
+  every other payer stays as it is. Before, one big file started a full
+  rebuild of the whole store (about 1.5 hours at 1.5 billion rates, 5 hours
+  or more at 5 billion).
+- **Medians and quartiles use bounded memory.** The practice medians behind
+  My rates, Negotiate, leads and reports, and the Explorer's summary strip,
+  are now computed a group of codes at a time on a big store, so they no
+  longer run out of memory as the store grows. The numbers are identical to
+  the last cent (checked on real data and on random data).
+- **Screens that looked up a practice's NPIs no longer read the whole
+  store:** the Medicare practice list, the dossier, client packets, service
+  lines, and the new-clinic / closure lists use the saved practice ↔ NPI
+  table. Name lookups (NPPES enrichment) no longer re-read every rate for
+  each batch of 200 NPIs.
+
 ## What changed in version 0.8.9
 
 - **Screens open instantly after a restart.** Every whole-store answer (the

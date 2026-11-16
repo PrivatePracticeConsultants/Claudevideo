@@ -365,3 +365,40 @@ def test_pairs_answer_what_the_raw_scans_answered(cfg, store):
                 "(SELECT unnest(?::VARCHAR[])) AND npi IS NOT NULL", [tins]).fetchall()) == sorted(
                 con.execute("SELECT DISTINCT npi FROM rates WHERE tin_value IN "
                             "(SELECT unnest(?::VARCHAR[])) AND npi IS NOT NULL", [tins]).fetchall())
+
+
+# --------------------------------------------------------------------------
+# the kept per-part sets are saved in chunks, never the whole backlog at once
+
+
+def test_part_sets_are_saved_in_chunks_and_equal_the_raw_sets(cfg, store, monkeypatch):
+    """Five new parts with a chunk of two: the NPI / TIN / payer sets are
+    saved in three steps (the temp tables never hold more than a chunk) and
+    equal the raw sets. was: every new part scanned into ONE temp table,
+    saved at the end — 900 new parts of the 2 B-rate store (~360 M NPI rows)
+    filled memory and spilled until the disk was full."""
+    import mrfx.store as store_mod
+    _seed(store)
+    _write(store, "f_P-E.json", "P-E", _recs("P-E", 6))
+    monkeypatch.setattr(store_mod, "PART_SET_CHUNK_PARTS", 2)
+    applies, peak = [], []
+    real = store._apply_part_sets
+
+    def spy(con, drop, scanned, current):
+        applies.append(len(scanned))
+        peak.append(con.execute("SELECT count(DISTINCT part) FROM __pt_new").fetchone()[0])
+        return real(con, drop, scanned, current)
+    monkeypatch.setattr(store, "_apply_part_sets", spy)
+    with store.connect() as con:
+        assert store._part_sets_current(con) is True
+        rel = store._rate_npis_relation(con)
+        assert rel == "(SELECT npi FROM rate_npi_set)"
+        assert applies == [2, 2, 1] and max(peak) <= 2
+        assert sorted(con.execute("SELECT DISTINCT npi FROM rate_npi_set").fetchall()) == sorted(
+            con.execute(f"SELECT DISTINCT npi FROM ({store_mod._RATE_NPIS_SQL})").fetchall())
+        assert sorted(con.execute("SELECT part, tin_value FROM part_tin_set").fetchall()) == sorted(
+            con.execute("SELECT DISTINCT parse_filename(filename), tin_value FROM "
+                        f"read_parquet('{store.rates_dir}/*.parquet', filename=true) "
+                        "WHERE tin_value IS NOT NULL").fetchall())
+        assert con.execute("SELECT count(*) FROM rate_npi_parts").fetchone()[0] == 5
+        assert con.execute("SELECT count(*) FROM part_set_parts").fetchone()[0] == 5

@@ -753,6 +753,10 @@ _RATE_NPIS_SQL_T = """
         WHERE tin_is_really_npi AND tin_value IS NOT NULL
     ) WHERE regexp_full_match(npi, '[0-9]{{10}}')"""
 _RATE_NPIS_SQL = _RATE_NPIS_SQL_T.format(src="rates")
+# the kept per-part sets (rate_npi_set, part_tin_set, part_payer_set) are
+# saved every this many scanned parts or pending rows (2-5 B scale, 0.9.0)
+PART_SET_CHUNK_PARTS = 25
+PART_SET_CHUNK_ROWS = 20_000_000
 
 # "Latest" = each CONTRACT's newest month, a contract being a payer x provider x
 # code line (benchmark._rates_relation explains the grain). tin_is_really_npi is
@@ -7735,19 +7739,10 @@ class Store:
         if not gone and not changed:
             return "(SELECT npi FROM rate_npi_set)"
         con.execute("CREATE OR REPLACE TEMP TABLE __npi_new (part VARCHAR, npi VARCHAR)")
-        scanned = []
-        for name in changed:
-            src = f"read_parquet('{sql_path(self.rates_dir / name)}')"
-            try:
-                con.execute("INSERT INTO __npi_new SELECT ?, npi FROM ("
-                            + _RATE_NPIS_SQL_T.format(src=src) + ")", [name])
-                scanned.append(name)
-            except duckdb.Error:
-                continue        # unreadable right now: retried next call
-        drop = gone + scanned
-        if not drop:
-            return "(SELECT npi FROM rate_npi_set)"
-        if self.write_lock.acquire(timeout=3):
+
+        def apply(drop: list, scanned: list) -> bool:
+            if not self.write_lock.acquire(timeout=3):
+                return False
             try:
                 con.execute("BEGIN TRANSACTION")
                 try:
@@ -7762,7 +7757,6 @@ class Store:
                     con.execute("DROP TABLE IF EXISTS rate_npis")
                     con.execute("DELETE FROM meta WHERE key = 'rate_npis_parts'")
                     con.execute("COMMIT")
-                    return "(SELECT npi FROM rate_npi_set)"
                 except Exception:
                     try:
                         con.execute("ROLLBACK")
@@ -7771,6 +7765,33 @@ class Store:
                     raise
             finally:
                 self.write_lock.release()
+            con.execute("DELETE FROM __npi_new")
+            return True
+        # applied every PART_SET_CHUNK parts / rows (2-5 B scale, 0.9.0): the
+        # whole backlog held in one temp table first — ~400 k NPIs per part,
+        # 900 new parts = 360 M rows — filled the 2 B-rate store's memory and
+        # spilled until the disk was full
+        drop, scanned, pending_rows, applied_all = list(gone), [], 0, True
+        for name in changed:
+            src = f"read_parquet('{sql_path(self.rates_dir / name)}')"
+            try:
+                n = con.execute("INSERT INTO __npi_new SELECT ?, npi FROM ("
+                                + _RATE_NPIS_SQL_T.format(src=src) + ")", [name]).fetchone()
+                scanned.append(name)
+                drop.append(name)
+                pending_rows += int(n[0]) if n and n[0] is not None else 0
+            except duckdb.Error:
+                continue        # unreadable right now: retried next call
+            if applied_all and (len(scanned) >= PART_SET_CHUNK_PARTS
+                                or pending_rows >= PART_SET_CHUNK_ROWS):
+                if apply(drop, scanned):
+                    drop, scanned, pending_rows = [], [], 0
+                else:
+                    applied_all = False      # a writer is busy: keep reading
+        if not drop:
+            return "(SELECT npi FROM rate_npi_set)"
+        if applied_all and apply(drop, scanned):
+            return "(SELECT npi FROM rate_npi_set)"
         # a writer is busy: the exact current set, from what was just read
         con.execute("CREATE OR REPLACE TEMP TABLE __npi_drop AS "
                     "SELECT unnest(?::VARCHAR[]) AS part", [drop])
@@ -7856,7 +7877,8 @@ class Store:
         con.execute("CREATE OR REPLACE TEMP TABLE __pp_new (part VARCHAR, payer VARCHAR, "
                     "file_month VARCHAR, n BIGINT)")
         con.execute("CREATE OR REPLACE TEMP TABLE __pt_new (part VARCHAR, tin_value VARCHAR)")
-        scanned, complete = [], True
+        scanned, complete, pending_rows = [], True, 0
+        drop = list(gone)
         for name in changed:
             if budget_s is not None and time.monotonic() - t0 > budget_s:
                 complete = False
@@ -7865,16 +7887,31 @@ class Store:
             try:
                 con.execute(f"INSERT INTO __pp_new SELECT ?, payer, file_month, count(*) "
                             f"FROM {src} GROUP BY payer, file_month", [name])
-                con.execute(f"INSERT INTO __pt_new SELECT DISTINCT ?, tin_value FROM {src} "
-                            "WHERE tin_value IS NOT NULL", [name])
+                n = con.execute(f"INSERT INTO __pt_new SELECT DISTINCT ?, tin_value FROM {src} "
+                                "WHERE tin_value IS NOT NULL", [name]).fetchone()
                 scanned.append(name)
+                drop.append(name)
+                pending_rows += int(n[0]) if n and n[0] is not None else 0
             except duckdb.Error:
                 con.execute("DELETE FROM __pp_new WHERE part = ?", [name])
                 con.execute("DELETE FROM __pt_new WHERE part = ?", [name])
                 complete = False      # unreadable right now: next call
-        drop = gone + scanned
+                continue
+            # saved every PART_SET_CHUNK parts / rows, never the whole backlog
+            # in temp tables at once (2-5 B scale, 0.9.0)
+            if len(scanned) >= PART_SET_CHUNK_PARTS or pending_rows >= PART_SET_CHUNK_ROWS:
+                if not self._apply_part_sets(con, drop, scanned, current):
+                    return False
+                drop, scanned, pending_rows = [], [], 0
         if not drop:
             return complete and not changed
+        return self._apply_part_sets(con, drop, scanned, current) and complete
+
+    def _apply_part_sets(self, con: duckdb.DuckDBPyConnection, drop: list, scanned: list,
+                         current: dict) -> bool:
+        """One chunk of `_part_sets_current`, in one short transaction under
+        the writer lock; the temp tables are emptied after. False: a writer
+        held the lock (nothing applied; the next call rescans)."""
         if not self.write_lock.acquire(timeout=3):
             return False
         try:
@@ -7896,7 +7933,9 @@ class Store:
                 raise
         finally:
             self.write_lock.release()
-        return complete
+        con.execute("DELETE FROM __pp_new")
+        con.execute("DELETE FROM __pt_new")
+        return True
 
     def parts_holding(self, ident: str) -> list[str] | None:
         """The rate parts that hold `ident` as a TIN or an NPI (review 13 item

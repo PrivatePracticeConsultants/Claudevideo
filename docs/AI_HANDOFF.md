@@ -972,6 +972,55 @@ Pinned by `tests/mrfx/test_review14.py` (every Group 1-3 case fails on
   paste is durable (`meta('pending_paste')`, `resume_pending_paste`). A
   hospital of an already-loaded name from another file is refused.
 
+### 0.9.0 additions (Nov 16, 2026) — 2-5 B rates
+
+Method: hard-linked copies of the 99 M store (`scratchpad/scalex/make.py`:
+each copy a real `files` row, finished 1 s before its original, so no fold-in
+starts) at 10x and 20x, every endpoint timed cold/warm by
+`scratchpad/scalex/driver.py` once start-up work settles; memory pressure at
+4-5 B emulated by running the 1 B store with `duckdb_memory_gb: 2`. Copies
+duplicate rows, so the RAW store grows but the spine does not: spine-bound
+costs are bounded by construction (slicing) and pinned by forced-slice
+equivalence tests, not by the timing runs.
+
+- **Exact medians that cannot spill.** DuckDB's `median` / `quantile_cont`
+  hold every value of their group in memory. (a) `Store._materialise_sliced`:
+  a `spine_materialised` query carrying `{code_pred}` (all three
+  `benchmark._house*_table_sql`) runs per batch of codes once the latest spine
+  passes `Store.MATERIALISE_SLICE_ROWS` (40 M), each batch COPY'd to
+  `<out>.slices/NNNN.parquet` and concatenated — groups never span codes, so
+  the rows are identical. (b) `mrfx/quantiles.py exact_quantiles_sql`: the
+  strip's p25/median/p75 from counts per distinct value (GROUP BY + window,
+  both spill); `lo*(1-d)+hi*d` is DuckDB's own form — `lo+d*(hi-lo)` differs
+  in the last bit (57 of 400 random sets) and flips half-cents. (c) the
+  summary's per-code table runs per code batch above `api.SUMMARY_SLICE_ROWS`.
+  Any new whole-spine median must follow (a) or (b).
+- **Big updates are payer-scoped durable plans.** `_apply_rollup_delta`'s
+  "too big" (parts x rows > store) raises `_too_big` (a `RollupNeedsFull`
+  with `too_big`); `update_rollups_incremental` re-raises it as
+  `RollupScoped(scope)` = {payers, cover_ts, cover_names, pend_gen, pending}
+  — the markers and removal notes THIS update would have stamped. `fold_in`
+  (and the row-rules thread) call `rebuild_rollups(scope=...)`; `_new_plan`
+  counts only those payers, uses the scope's markers instead of a fresh
+  snapshot (a file of another payer landing meanwhile stays uncovered),
+  never answers `rollup_needs_full`, stores `plan["scope"]` (a resume stays
+  scoped), adds a scoped prune (`DELETE … WHERE payer IN scope AND payer NOT
+  IN rebuilt`), and builds the directory from the one-pass source over ALL
+  rates (`_dir_source_chunks` ignores spine slices of a scoped plan). Scoped
+  only when the spine is rebuilt in place: a missing spine or a column change
+  drops the scope (full build). Was: one big file of one payer -> a full
+  rebuild of every payer.
+- `unenriched_npis` reads `_rate_npis_relation` (the per-part NPI set),
+  not `DISTINCT … FROM rates` per batch of 200. Medicare org / referral
+  leaders, dossier's "is it in the store", packets, service lines, new
+  clinics and closures read `pairs_relation()`; a modal TIN / ZIP over rate
+  rows = `ORDER BY sum(c) DESC, value LIMIT 1` over the pairs (mode's tie
+  rule: the smallest).
+- Considered and NOT done: `parquet_metadata_cache` — DuckDB validates a
+  cached footer by the file's mtime in whole seconds, and a part replaced
+  within the second it was read would be read with the old footer.
+- Pinned by `tests/mrfx/test_scale.py`.
+
 ### 0.8.9 additions (Nov 14, 2026) — answers kept across restarts
 
 - `Store.answer_get / answer_put` (serve only: `persist_answers` =
