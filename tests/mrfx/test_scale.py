@@ -402,6 +402,13 @@ def test_part_sets_are_saved_in_chunks_and_equal_the_raw_sets(cfg, store, monkey
                         "WHERE tin_value IS NOT NULL").fetchall())
         assert con.execute("SELECT count(*) FROM rate_npi_parts").fetchone()[0] == 5
         assert con.execute("SELECT count(*) FROM part_set_parts").fetchone()[0] == 5
+        # the temp tables are NEW after each chunk, not emptied with DELETE: a
+        # temp table's deleted rows keep their storage — the 2 B run's "chunked"
+        # table still grew to the whole backlog and spilled 5.7 GB
+        sizes = dict(con.execute(
+            "SELECT table_name, estimated_size FROM duckdb_tables() "
+            "WHERE temporary AND table_name IN ('__npi_new', '__pt_new', '__pp_new')").fetchall())
+        assert sizes == {"__npi_new": 0, "__pt_new": 0, "__pp_new": 0}, sizes
 
 
 # --------------------------------------------------------------------------

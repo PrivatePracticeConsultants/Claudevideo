@@ -7847,7 +7847,10 @@ class Store:
                     raise
             finally:
                 self.write_lock.release()
-            con.execute("DELETE FROM __npi_new")
+            # a NEW table, never DELETE: a temp table's deleted rows keep their
+            # storage (no checkpoint frees it) — at 2 B rates the "emptied"
+            # table still grew to 360 M rows and spilled until the disk was full
+            con.execute("CREATE OR REPLACE TEMP TABLE __npi_new (part VARCHAR, npi VARCHAR)")
             return True
         # applied every PART_SET_CHUNK parts / rows (2-5 B scale, 0.9.0): the
         # whole backlog held in one temp table first — ~400 k NPIs per part,
@@ -8015,8 +8018,10 @@ class Store:
                 raise
         finally:
             self.write_lock.release()
-        con.execute("DELETE FROM __pp_new")
-        con.execute("DELETE FROM __pt_new")
+        # new tables, never DELETE (a temp table's deleted rows keep their storage)
+        con.execute("CREATE OR REPLACE TEMP TABLE __pp_new (part VARCHAR, payer VARCHAR, "
+                    "file_month VARCHAR, n BIGINT)")
+        con.execute("CREATE OR REPLACE TEMP TABLE __pt_new (part VARCHAR, tin_value VARCHAR)")
         return True
 
     def parts_holding(self, ident: str) -> list[str] | None:
