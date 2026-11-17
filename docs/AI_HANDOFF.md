@@ -1016,6 +1016,49 @@ equivalence tests, not by the timing runs.
   clinics and closures read `pairs_relation()`; a modal TIN / ZIP over rate
   rows = `ORDER BY sum(c) DESC, value LIMIT 1` over the pairs (mode's tie
   rule: the smallest).
+- **Start-up at 2 B (found by the 2 B run, 900 parts, 1.98 B rows).** Three
+  whole-backlog steps filled the disk: (1) `_rate_npis_relation` and
+  `_part_sets_current` scanned EVERY new part into one temp table before one
+  apply (~360 M NPI rows) -> now saved every `PART_SET_CHUNK_PARTS` (25) parts
+  / `PART_SET_CHUNK_ROWS` (20 M) rows, each chunk its own short transaction;
+  and the temp tables are REPLACED after each chunk — `DELETE` on a DuckDB
+  temp table keeps the deleted rows' storage (estimated_size never drops), so
+  a DELETE-emptied chunk table still grew to the whole backlog. (2)
+  `pairs_relation` merged all parts' kept pairs (360 M rows) in ONE GROUP BY
+  (6.7 GB spill) after every new file -> a manifest
+  (`tin_npi_pairs.<stamp>.parquet.parts.json`) names the exact parts a merged
+  file covers; the next merge adds only new parts to the newest file whose
+  parts are all unchanged; a full merge runs in hash passes of
+  `PAIRS_MERGE_ROWS` (40 M) input rows. (3) `enrichment_progress` /
+  `unenriched_npis` ran count(DISTINCT npi) over rate_npi_set (21 s at 2 B,
+  every header refresh / every 200-NPI batch) -> `_rate_npis_distinct`: the
+  distinct NPIs in `rate_npis.<stamp>.parquet`, kept the same incremental way.
+  Measured at 2 B, each start-up step alone, 8 GB: NPI sets 301 s, payer/TIN
+  sets 110 s, full pairs merge 336 s, placement 2 s, names 0.5 s — zero spill,
+  3.1 GB peak RSS (before: two steps failed, spill 5.7 / 6.7 GB, disk full).
+  Header pieces 1.4 s (were 22 s); an enrichment batch 0.3 s (was ~20 s).
+- **Measured at 2 B (1.98 B rows, 8 GB, settled, cache dropped): 135
+  endpoints, 0 errors, all repeat answers byte-identical; sum of cold times
+  305 s (the 1 B run on 0.8.9 code: 508 s).** Every rate number equals the
+  99 M base store's (`scratchpad/scalex/compare.py`: 111 bodies identical,
+  the rest differ only in provenance lines, raw counts exactly x20 and paths).
+  Still linear in the files holding ONE provider: the NPI drawer (13 s warm)
+  and /api/validate (10.6 s) read every part that holds the NPI / TIN (60
+  parts here), no row-group pruning (parts are pyarrow-written without bloom
+  filters; adding them means rewriting parts — a next step, not done).
+- **A big update at 2 B** (a new month of one payer, 2.2 M rows, against its
+  134 M): `RollupScoped` -> 50 spine slices of that payer only + the
+  directory one-pass source (287 s) = 847 s, zero spill; independently
+  recomputed per code from the raw parts: 7,024,828 spine rows, 0 differences;
+  directory 194,000 rows, 0 differences; the other 14 payers' 73.8 M spine
+  rows identical to the base store.
+- **Memory pressure at 2 B** (`duckdb_memory_gb: 2`, standing in for ~8 B
+  at 8 GB): 135 endpoints, the same statuses as at 8 GB, 0 errors / 0 out of
+  memory, peak RSS 4.5 GB, peak spill 3.6 GB, total cold time +17 %; on the
+  same store the answers equal the 8 GB run's (102 compared: 99 identical,
+  3 differ only in an export's file-name timestamp / free-disk sentence).
+  Peak RSS at 8 GB was 9.9 GB (the budget is DuckDB's; Python + the web
+  server add ~2 GB) — size `duckdb_memory_gb` at RAM minus ~4 GB.
 - Considered and NOT done: `parquet_metadata_cache` — DuckDB validates a
   cached footer by the file's mtime in whole seconds, and a part replaced
   within the second it was read would be read with the old footer.

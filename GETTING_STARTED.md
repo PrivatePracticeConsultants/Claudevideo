@@ -1070,6 +1070,14 @@ Built for stores of 2 to 5 billion rates.
   are now computed a group of codes at a time on a big store, so they no
   longer run out of memory as the store grows. The numbers are identical to
   the last cent (checked on real data and on random data).
+- **Starting the app on a very large store no longer fills the disk.** The
+  first start after an update counts what every rate file holds; it now saves
+  that work in small steps instead of all at once (on a 2-billion-rate test
+  store the old way filled 7 GB of temporary space and stopped).
+- **The header and name lookups stay quick:** the "names looked up" progress
+  and each batch of NPPES lookups read a small saved list of the store's
+  NPIs instead of counting them again (22 seconds -> about 1 second on the
+  2-billion-rate test store).
 - **Screens that looked up a practice's NPIs no longer read the whole
   store:** the Medicare practice list, the dossier, client packets, service
   lines, and the new-clinic / closure lists use the saved practice ↔ NPI
