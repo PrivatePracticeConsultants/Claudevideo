@@ -7297,7 +7297,7 @@ class Store:
         """
         with self.connect() as con:
             try:
-                rate_npis = self._rate_npis_relation(con)
+                rate_npis = self._rate_npis_distinct(con)
             except duckdb.Error:   # the set cannot be updated now: the raw read
                 rate_npis = f"({_RATE_NPIS_SQL})"
             try:
@@ -7434,7 +7434,7 @@ class Store:
             # finishing had to wait for its bookkeeping (found in the round-5
             # review; see docs/NEXT_STEPS_PROMPT_5.md).
             with self.connect() as con:
-                rel = self._rate_npis_relation(con)
+                rel = self._rate_npis_distinct(con)
                 total = con.execute(f"SELECT count(DISTINCT npi) FROM {rel}").fetchone()[0]
                 enriched, named = con.execute(
                     "SELECT count(*), count(*) FILTER (WHERE org_name IS NOT NULL) "
@@ -7799,6 +7799,75 @@ class Store:
                 continue
             out[p.name] = f"{st.st_size}|{st.st_mtime_ns}"
         return out
+
+    def _rate_npis_distinct(self, con: duckdb.DuckDBPyConnection) -> str:
+        """A relation (one column `npi`, each once) of the NPIs the rates
+        reference — what `SELECT DISTINCT npi FROM _rate_npis_relation(con)`
+        returns, from a small file beside the store (0.9.0).
+
+        rate_npi_set holds every part's NPIs: ~400 k per part, 360 M rows at
+        2 B rates for ~4 M distinct NPIs. Its DISTINCT took 21 s at 2 B and
+        ran on every header refresh (enrichment progress, each minute) and
+        every enrichment batch of 200 NPIs. The file is stamped with the parts
+        the set covers; a part landing adds its NPIs to the newest file whose
+        parts are all still on disk unchanged (a UNION — the same set), and a
+        removed or rewritten part rebuilds it from the set. Never raises: the
+        DISTINCT over the set answers when the file cannot be written."""
+        import json as _json
+        rel = self._rate_npis_relation(con)
+        fallback = f"(SELECT DISTINCT npi FROM {rel})"
+        if "__npi_new" in rel:          # a writer held the lock: not applied
+            return fallback
+        try:
+            parts = dict(con.execute("SELECT part, sig FROM rate_npi_parts").fetchall())
+            stamp = hashlib.sha1(_json.dumps(sorted(parts.items())).encode()).hexdigest()[:16]
+            path = self.dir / f"rate_npis.{stamp}.parquet"
+            lock = self.__dict__.setdefault("_npis_distinct_lock", threading.Lock())
+            with lock:
+                if not path.exists():
+                    base = None
+                    for man in self.dir.glob("rate_npis.*.parquet.parts.json"):
+                        f = man.with_name(man.name.removesuffix(".parts.json"))
+                        try:
+                            got = _json.loads(man.read_text())
+                            mt = f.stat().st_mtime
+                        except (OSError, ValueError):
+                            continue
+                        if (isinstance(got, dict) and got
+                                and all(parts.get(k) == v for k, v in got.items())
+                                and (base is None or mt > base[2])):
+                            base = (f, got, mt)
+                    tmp = path.with_name(f"{path.name}.{os.getpid()}-{os.urandom(3).hex()}.tmp")
+                    try:
+                        if base is not None:
+                            new = sorted(k for k in parts if k not in base[1])
+                            con.execute(
+                                f"COPY (SELECT npi FROM read_parquet('{sql_path(base[0])}') "
+                                "UNION SELECT npi FROM rate_npi_set WHERE part IN "
+                                "(SELECT unnest(?::VARCHAR[]))) "
+                                f"TO '{sql_path(tmp)}' (FORMAT PARQUET)", [new])
+                        else:
+                            con.execute("COPY (SELECT DISTINCT npi FROM rate_npi_set) "
+                                        f"TO '{sql_path(tmp)}' (FORMAT PARQUET)")
+                        os.replace(tmp, path)
+                    except BaseException:
+                        tmp.unlink(missing_ok=True)
+                        raise
+                    man = path.with_name(path.name + ".parts.json")
+                    man_tmp = man.with_name(man.name + f".{os.getpid()}.tmp")
+                    man_tmp.write_text(_json.dumps(parts))
+                    os.replace(man_tmp, man)
+                    for old in self.dir.glob("rate_npis.*.parquet*"):
+                        if old.name.startswith(path.name) or old.name.endswith(".tmp"):
+                            continue
+                        try:
+                            old.unlink()
+                        except OSError:          # still open on Windows: next time
+                            pass
+            return f"read_parquet('{sql_path(path)}')"
+        except Exception:  # noqa: BLE001 — the DISTINCT over the set is always right
+            logging.getLogger(__name__).debug("distinct rate NPIs file unavailable", exc_info=True)
+            return fallback
 
     def _rate_npis_relation(self, con: duckdb.DuckDBPyConnection) -> str:
         """Bring rate_npi_set up to date with the parts on disk and return a
@@ -8700,6 +8769,7 @@ class Store:
             for p in self.dir.glob("tin_zip_place.*"):
                 unlink_with_retry(p)
             for pat in ("practice_medians*.parquet*", "spine_units*.parquet*", "tin_npi_pairs.*",
+                        "rate_npis.*",
                         "spine_counts.*",
                         "summary_strips.*.json"):
                 for p in self.dir.glob(pat):

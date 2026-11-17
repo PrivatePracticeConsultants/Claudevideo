@@ -464,3 +464,61 @@ def test_pairs_merge_adds_new_parts_to_the_last_merge(cfg, store, monkeypatch):
     got = _pairs_file_rows(store)
     assert seen[-1] is None
     assert got == _pairs_from_scratch(store)
+
+
+# --------------------------------------------------------------------------
+# the distinct rate NPIs: a small stamped file, kept incrementally
+
+
+def test_distinct_rate_npis_file_is_exact_and_incremental(cfg, store, monkeypatch):
+    """The file equals DISTINCT over the per-part set; a new part is UNIONed
+    into the last file (not rebuilt from the whole set); a removed part
+    rebuilds it. was: count(DISTINCT npi) over the per-part set — 360 M rows,
+    21 s at 2 B rates — on each header refresh and each enrichment batch."""
+    import mrfx.store as store_mod
+    _seed(store)
+
+    def check():
+        with store.connect() as con:
+            rel = store._rate_npis_distinct(con)
+            assert rel.startswith("read_parquet(")
+            got = sorted(con.execute(f"SELECT npi FROM {rel}").fetchall())
+            want = sorted(con.execute(f"SELECT DISTINCT npi FROM ({store_mod._RATE_NPIS_SQL})").fetchall())
+            assert got == want and len(got) == len(set(got))
+            return rel
+    first = check()
+    executed = []
+    real_connect = store.connect
+
+    class Spy:
+        def __init__(self, con):
+            self.con = con
+
+        def __enter__(self):
+            self.con.__enter__()
+            return self
+
+        def __exit__(self, *a):
+            return self.con.__exit__(*a)
+
+        def execute(self, sql, *a):
+            executed.append(sql)
+            return self.con.execute(sql, *a)
+
+        def __getattr__(self, k):
+            return getattr(self.con, k)
+    _write(store, "f_P-E.json", "P-E", _recs("P-E", 6))
+    monkeypatch.setattr(store, "connect", lambda: Spy(real_connect()))
+    second = check()
+    assert second != first
+    copies = [q for q in executed if q.startswith("COPY")]
+    assert copies and "UNION" in copies[-1] and "read_parquet" in copies[-1]   # from the base
+    assert len(list(store.dir.glob("rate_npis.*.parquet"))) == 1               # old one removed
+    store.forget_file("f_P-B.json")
+    executed.clear()
+    check()
+    copies = [q for q in executed if q.startswith("COPY")]
+    assert copies and "UNION" not in copies[-1]                               # rebuilt from the set
+    with store.connect() as con:
+        assert store.unenriched_npis(limit=10 ** 6) == [r[0] for r in con.execute(
+            f"SELECT DISTINCT npi FROM ({store_mod._RATE_NPIS_SQL}) ORDER BY npi").fetchall()]
