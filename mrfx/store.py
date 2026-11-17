@@ -6040,7 +6040,10 @@ class Store:
                     log.info("full analytics build: payer by payer, each part saved "
                              "as it finishes — the dashboard shows each payer as it "
                              "lands, and a stop or restart continues where it left off")
-                plan = self._new_plan(con, kind, log, scope=scope if kind == "full" else None)
+                # `scope` only for a scoped build: the plain call keeps its
+                # three-argument shape (tests/repro harnesses stub it)
+                plan = (self._new_plan(con, kind, log, scope=scope)
+                        if kind == "full" and scope else self._new_plan(con, kind, log))
             else:
                 log.info("analytics build: resuming at part %d of %d (%s)",
                          plan["next"] + 1, len(plan["slices"]),
