@@ -1225,4 +1225,4 @@ def test_paused_rows_block_forget_and_the_caches_and_version(cfg, store, capsys)
     # 0.8.8: slow screens pre-loaded at launch;
     # 0.8.7: the dashboard redesign — dark design
     # system, iPad rail, iPhone tab bar, Benchmark bullets)
-    assert capsys.readouterr().out.strip() == f"mrfx {__version__}" == "mrfx 0.8.9"
+    assert capsys.readouterr().out.strip() == f"mrfx {__version__}" == "mrfx 0.9.0"
