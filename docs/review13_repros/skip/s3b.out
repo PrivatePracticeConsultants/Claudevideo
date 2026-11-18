@@ -1,0 +1,5 @@
+sha256 on 256 MB in memory: 0.199s = 1,289 MB/s
+uhc_2026-11-01_UnitedHealthcare-Insurance-Compan…: 36 MB gz -> 623 MB; inflate 0.63s, inflate+sha 1.23s; extra +0.60s = +0.97 s/GB inflated (+95% of the inflate alone; the parse itself is far slower than the inflate)
+wy_2026-11_710_26B0_in-network-rates.json.gz…: 119 MB gz -> 1,113 MB; inflate 2.27s, inflate+sha 3.23s; extra +0.96s = +0.86 s/GB inflated (+42% of the inflate alone; the parse itself is far slower than the inflate)
+uhc_2026-11-01_UnitedHealthcare-Insurance-Compan…: 262 MB gz -> 5,488 MB; inflate 4.87s, inflate+sha 9.08s; extra +4.21s = +0.77 s/GB inflated (+87% of the inflate alone; the parse itself is far slower than the inflate)
+exit 0

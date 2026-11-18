@@ -41,9 +41,11 @@ import re
 from pathlib import Path
 
 from .catalog import CODE_CATALOG, code_info, resolve_discipline
+from .modifiers import base_sql, normalize as normalize_modifiers
 from .sniff import open_stream
 from .states import state_code_or_none
 from .store import Store, sql_path
+from .rounding import half_up
 
 log = logging.getLogger(__name__)
 
@@ -75,6 +77,23 @@ _DOLLAR_COLS = (
 
 def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
+
+
+def _modifier_set(raw) -> str | None:
+    """The ONE modifier rule (mrfx/modifiers.py) applied to a hospital's
+    modifiers: sorted, de-duplicated, split, a place-of-service list moved
+    out — stored '|'-joined like the insurer side, so base_sql reads both
+    the same way (round 7 P1.11: hospital modifiers were stored raw)."""
+    if raw is None:
+        return None
+    items = raw if isinstance(raw, (list, tuple)) else [str(raw).replace("|", ",")]
+    mods, _pos, _split, _moved = normalize_modifiers(list(items), [])
+    return "|".join(mods) or None
+
+
+_CODE_SLOT_RE = re.compile(r"^code (\d+)$")
+_CODE_TYPE_SLOT_RE = re.compile(r"^code (\d+) type$")
+_CPT_TYPES = ("CPT", "HCPC")
 
 
 def _slug(s: str) -> str:
@@ -133,7 +152,43 @@ def _csv_columns(header: list[str]) -> dict:
         "gross": find("standard_charge|gross", contains=("gross",)),
         "cash": find("standard_charge|discounted_cash", contains=("discounted", "cash")),
         "modifiers": find("modifiers"),
+        "code_slots": _code_slots(header),
+        "wide": _wide_payer_columns(header),
     }
+
+
+def _code_slots(header: list[str]) -> list[tuple[int, int | None]]:
+    """[(code|N column, code|N|type column)] in N order. The CMS template
+    allows several codes per line (code|1 a chargemaster number, code|2 the
+    CPT); only code|1 was read, so such a file imported nothing (P1.11)."""
+    codes, types = {}, {}
+    for i, raw in enumerate(header):
+        k = _norm(raw)
+        m = _CODE_SLOT_RE.match(k)
+        if m:
+            codes.setdefault(int(m.group(1)), i)
+            continue
+        m = _CODE_TYPE_SLOT_RE.match(k)
+        if m:
+            types.setdefault(int(m.group(1)), i)
+    return [(codes[n], types.get(n)) for n in sorted(codes)]
+
+
+def _wide_payer_columns(header: list[str]) -> dict[tuple[str, str], dict]:
+    """The CMS WIDE CSV puts each payer and plan in the column NAME:
+    standard_charge|<payer>|<plan>|negotiated_dollar (+ …|methodology,
+    estimated_amount|<payer>|<plan>). {(payer, plan): {field: column}}."""
+    out: dict[tuple[str, str], dict] = {}
+    for i, raw in enumerate(header):
+        parts = [p.strip() for p in str(raw).split("|")]
+        if len(parts) == 4 and parts[0].lower() == "standard_charge" and parts[1]:
+            field = parts[3].lower()
+            if field in ("negotiated_dollar", "methodology"):
+                out.setdefault((parts[1], parts[2]), {})[
+                    "dollar" if field == "negotiated_dollar" else "methodology"] = i
+        elif len(parts) == 3 and parts[0].lower() == "estimated_amount" and parts[1]:
+            out.setdefault((parts[1], parts[2]), {})["estimate"] = i
+    return {k: v for k, v in out.items() if "dollar" in v or "estimate" in v}
 
 
 def _csv_meta(path: Path) -> dict:
@@ -176,42 +231,74 @@ def _read_csv_rows(path: Path, want: set[str]):
         if not header:
             raise HospitalImportError("the file has no header row")
         col = _csv_columns(header)
-        if col["code"] is None or col["dollar"] is None:
+        # WIDE layout: no payer column, payers in the column names. The
+        # tall-file "negotiated dollar" lookup then matched the FIRST payer's
+        # column, so a two-payer file imported one payer as "Unknown payer"
+        # (P1.11) — read every payer/plan column instead.
+        wide = col["wide"] if col["payer"] is None else {}
+        slots = col["code_slots"] or ([(col["code"], col["code_type"])]
+                                      if col["code"] is not None else [])
+        if not slots or (col["dollar"] is None and not wide):
             raise HospitalImportError(
                 "this CSV has no code column and/or no negotiated-dollar column "
                 "— it does not look like a CMS hospital standard-charges file "
                 f"(columns seen: {', '.join(header[:12])}…)")
 
-        def at(row, key):
-            i = col[key]
+        def cell(row, i):
             return (row[i] if i is not None and i < len(row) else None) or None
 
+        def at(row, key):
+            return cell(row, col[key])
+
+        def code_of(row):
+            """The first code|N slot holding a wanted CPT/HCPCS code (a slot
+            typed as something else — CDM, RC, NDC — never matches)."""
+            for ci, ti in slots:
+                c = str(cell(row, ci) or "").strip().upper()
+                if c in want:
+                    t = str(cell(row, ti) or "").strip().upper() if ti is not None else ""
+                    if not t or t.startswith(_CPT_TYPES):     # "CPT", "CPT4", "HCPCS"
+                        return c, t or None
+            return None, None
+
         for row in reader:
-            code = str(at(row, "code") or "").strip().upper()
-            if code not in want:
+            code, ctype = code_of(row)
+            if code is None:
                 continue
             setting = _norm(at(row, "setting") or "")
             if setting and setting not in _KEEP_SETTINGS:
+                continue
+            base = {
+                "hospital_name": meta["hospital_name"],
+                "last_updated_on": meta["last_updated_on"],
+                "billing_code": code,
+                "code_type": ctype,
+                "setting": setting or None,
+                "gross_charge": _num(at(row, "gross")),
+                "cash_price": _num(at(row, "cash")),
+                "modifiers": _modifier_set(at(row, "modifiers")),
+            }
+            if wide:
+                for (payer, plan), cols in wide.items():
+                    dollar = _num(cell(row, cols.get("dollar")))
+                    estimate = _num(cell(row, cols.get("estimate")))
+                    if dollar is None and estimate is None:
+                        continue
+                    yield {**base, "payer_raw": payer or None, "plan_name": plan or None,
+                           "rate": dollar, "estimated_amount": estimate,
+                           "methodology": str(cell(row, cols.get("methodology")) or ""
+                                              ).strip() or None}
                 continue
             dollar = _num(at(row, "dollar"))
             estimate = _num(at(row, "estimate"))
             if dollar is None and estimate is None:
                 continue
-            yield {
-                "hospital_name": meta["hospital_name"],
-                "last_updated_on": meta["last_updated_on"],
-                "billing_code": code,
-                "code_type": str(at(row, "code_type") or "").strip().upper() or None,
-                "payer_raw": str(at(row, "payer") or "").strip() or None,
-                "plan_name": str(at(row, "plan") or "").strip() or None,
-                "setting": setting or None,
-                "rate": dollar,
-                "estimated_amount": estimate,
-                "methodology": str(at(row, "methodology") or "").strip() or None,
-                "gross_charge": _num(at(row, "gross")),
-                "cash_price": _num(at(row, "cash")),
-                "modifiers": str(at(row, "modifiers") or "").strip() or None,
-            }
+            yield {**base,
+                   "payer_raw": str(at(row, "payer") or "").strip() or None,
+                   "plan_name": str(at(row, "plan") or "").strip() or None,
+                   "rate": dollar,
+                   "estimated_amount": estimate,
+                   "methodology": str(at(row, "methodology") or "").strip() or None}
 
 
 # -------------------------------------------------------------------- JSON
@@ -285,9 +372,8 @@ def _read_json_rows(path: Path, want: set[str]):
                                     or pi.get("methodology") or "").strip()[:120] or None,
                                 "gross_charge": gross,
                                 "cash_price": cash,
-                                "modifiers": "|".join(
-                                    str(m) for m in (sc.get("billing_code_modifier") or [])
-                                ) or None,
+                                "modifiers": _modifier_set(
+                                    [str(m) for m in (sc.get("billing_code_modifier") or [])]),
                             }
         except HospitalImportError:
             raise
@@ -363,6 +449,26 @@ def import_hospital_file(store: Store, path: str | Path, *,
                          "therapy line at all"),
                 "caveat": HOSPITAL_CAVEAT}
 
+    # a second hospital with the same NAME in another place (or from another
+    # file) silently REPLACED the first (review 14 Group 3: two "Mercy
+    # Hospital" files in MO, the parity line kept only the second). The same
+    # hospital re-imported (same place) still replaces itself — idempotent.
+    with store.connect() as con:
+        try:
+            prev = con.execute("SELECT state, city, source_file FROM hospital_files "
+                               "WHERE hospital_name = ?", [name]).fetchone()
+        except Exception:  # noqa: BLE001 — no table yet
+            prev = None
+    if prev and prev[2] != path.name and (
+            (prev[0] or None) != (st or None) or (prev[1] or None) != (ct or None)):
+        # (the SAME file loaded again — e.g. with the --state it lacked — is
+        # the same hospital and replaces itself)
+        where = ", ".join(x for x in (prev[1], prev[0]) if x) or "no place recorded"
+        raise HospitalImportError(
+            f"a hospital named {name!r} is already loaded ({where}, from {prev[2]}) — "
+            "this file would replace it. To keep both, give this one its own name "
+            "(mrfx hospital <file> --name \"<name> — <city>\"); to replace it, "
+            "forget the loaded one first")
     out_dir = Path(store.dir) / "hospital"
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / f"{_slug(name)}.parquet"
@@ -465,6 +571,27 @@ def hospital_status(store: Store) -> dict:
     }
 
 
+def hospital_filters(m: dict, payer: str | None = None,
+                     state: str | None = None) -> tuple[list[str], list]:
+    """The hospital side's WHERE over `hospital_rates h`: ONE rule for the
+    parity table and the negotiation documents' parity lines (review 13 6.2)."""
+    where = ["h.rate IS NOT NULL"]
+    if m.get("base_only", True):
+        # the practice side reads base modifiers only (the house basis); the
+        # hospital side pooled every modifier — a 59/KX line beside a base
+        # rate (round 7 P1.11). One rule on both sides.
+        where.append(base_sql("coalesce(h.modifiers, '')",
+                              bool(m.get("include_assistant"))))
+    params: list = []
+    if payer:
+        where.append("h.payer = ?")
+        params.append(payer)
+    if state:
+        where.append("h.state = ?")
+        params.append(state_code_or_none(state))
+    return where, params
+
+
 def hospital_parity(store: Store, market: dict | None = None, *,
                     payer: str | None = None, state: str | None = None,
                     subject: str | None = None, limit: int = 200) -> dict:
@@ -475,8 +602,7 @@ def hospital_parity(store: Store, market: dict | None = None, *,
     "you're owed $X" figure — the two rates pay for different things.
     """
     from .benchmark import (BenchmarkError, _market_where, _rates_relation,
-                            normalize_market, resolve_plan_scope,
-                            resolve_subject_tins)
+                            normalize_market, resolve_plan_scope)
 
     limit = max(1, min(int(limit), 2000))
     ensure_view(store)
@@ -489,25 +615,30 @@ def hospital_parity(store: Store, market: dict | None = None, *,
     if payer:
         m = {**m, "payers": [payer]}
     if state:
-        m = {**m, "state": state}
+        # normalized ("Missouri" -> "MO"): set raw AFTER normalize_market, it
+        # matched no practice while the hospital side matched the state
+        from .states import state_code
+        try:
+            m = {**m, "state": state_code(state)}
+        except ValueError as exc:
+            raise BenchmarkError(str(exc)) from exc
     where, params = _market_where(m, bool(m.get("include_assistant")),
                                   bool(m.get("include_non_dollar")))
     rel = _rates_relation(m)
 
     subject_tins: list[str] = []
     if subject:
-        subject_tins = resolve_subject_tins(store, subject)
+        # the subject's own TINs and rows: the ONE subject rule (review 9 4.4)
+        from .benchmark import subject_market, subject_tins_for_market
+        subject_tins = subject_tins_for_market(store, subject, m)
         if not subject_tins:
             raise BenchmarkError(f"no practice matches {subject!r}")
+        s_m = subject_market(m)
+        s_where, s_params = _market_where(s_m, bool(m.get("include_assistant")),
+                                          bool(m.get("include_non_dollar")))
+        s_rel = _rates_relation(s_m)
 
-    hosp_where = ["h.rate IS NOT NULL"]
-    hosp_params: list = []
-    if payer:
-        hosp_where.append("h.payer = ?")
-        hosp_params.append(payer)
-    if state or m.get("state"):
-        hosp_where.append("h.state = ?")
-        hosp_params.append(state_code_or_none(state or m["state"]))
+    hosp_where, hosp_params = hospital_filters(m, payer, state or m.get("state"))
 
     sql = f"""
     WITH practice AS (
@@ -523,21 +654,32 @@ def hospital_parity(store: Store, market: dict | None = None, *,
                count(DISTINCT tin_value) AS n_practices
         FROM practice GROUP BY payer, billing_code
     ),
-    hosp AS (
-        SELECT h.payer, h.billing_code,
-               round(median(h.rate), 2)        AS hospital_median,
-               round(min(h.rate), 2)           AS hospital_min,
-               round(max(h.rate), 2)           AS hospital_max,
-               count(DISTINCT h.hospital_name) AS n_hospitals
+    per_hosp AS (
+        -- ONE rate per hospital first (median of its plan rows), as the
+        -- practice side is per-TIN first: a hospital listing three plans at
+        -- $100 outvoted one listing a single $200 plan — median $100, 2.0x,
+        -- where per hospital it is $150, 3.0x (audit 8 P2-11)
+        SELECT h.payer, h.billing_code, h.hospital_name, h.state, median(h.rate) AS rate
         FROM hospital_rates h
         WHERE {' AND '.join(hosp_where)}
-        GROUP BY h.payer, h.billing_code
+        -- name AND state: two hospitals of one name in two states were pooled
+        -- as one hospital with no state filter (review 9 item 4.10)
+        GROUP BY h.payer, h.billing_code, h.hospital_name, h.state
+    ),
+    hosp AS (
+        SELECT payer, billing_code,
+               round(median(rate), 2)        AS hospital_median,
+               round(min(rate), 2)           AS hospital_min,
+               round(max(rate), 2)           AS hospital_max,
+               count(*)                      AS n_hospitals
+        FROM per_hosp
+        GROUP BY payer, billing_code
     )
     SELECT p.payer, p.billing_code, p.practice_median, p.n_practices,
            hs.hospital_median, hs.hospital_min, hs.hospital_max, hs.n_hospitals
     FROM pmkt p JOIN hosp hs USING (payer, billing_code)
     ORDER BY (hs.hospital_median / nullif(p.practice_median, 0)) DESC NULLS LAST,
-             p.billing_code
+             p.billing_code, p.payer
     LIMIT {int(limit)}
     """
     with store.connect() as con:
@@ -550,31 +692,33 @@ def hospital_parity(store: Store, market: dict | None = None, *,
                 WITH per_tin AS (
                     SELECT t.payer, t.billing_code, t.tin_value,
                            median(t.negotiated_rate) AS rate
-                    FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
-                    WHERE {where} AND t.tin_value IN (SELECT unnest(?::VARCHAR[]))
+                    FROM {s_rel} t LEFT JOIN tin_directory td USING (tin_value)
+                    WHERE {s_where} AND t.tin_value IN (SELECT unnest(?::VARCHAR[]))
                     GROUP BY t.payer, t.billing_code, t.tin_value
                 )
                 SELECT payer, billing_code, round(median(rate), 2)
                 FROM per_tin GROUP BY payer, billing_code
-            """, [*params, subject_tins])
+            """, [*s_params, subject_tins])
             subj = {(p, c): r for p, c, r in scur.fetchall()}
 
     for r in rows:
         r["description"] = code_info(r["billing_code"])[0]
         pm, hm = r["practice_median"], r["hospital_median"]
         # a RATIO, never a subtraction presented as money owed
-        r["hospital_multiple"] = round(hm / pm, 2) if pm else None
+        r["hospital_multiple"] = half_up(hm / pm, 2) if pm else None
         if subject_tins:
             s = subj.get((r["payer"], r["billing_code"]))
             r["subject_rate"] = s
-            r["subject_multiple"] = round(hm / s, 2) if s else None
+            r["subject_multiple"] = half_up(hm / s, 2) if s else None
 
+    # the median of the UNROUNDED multiples, rounded once (3.15x where the
+    # rounded-then-medianed figure read 3.14x — review 10 group 4)
     with_mult = [r for r in rows if r.get("hospital_multiple")]
     med_mult = None
     if with_mult:
-        vals = sorted(r["hospital_multiple"] for r in with_mult)
+        vals = sorted(r["hospital_median"] / r["practice_median"] for r in with_mult)
         mid = len(vals) // 2
-        med_mult = round(vals[mid] if len(vals) % 2 else
+        med_mult = half_up(vals[mid] if len(vals) % 2 else
                          (vals[mid - 1] + vals[mid]) / 2, 2)
     return {
         "loaded": True, "rows": rows, "count": len(rows),
@@ -651,7 +795,7 @@ def cash_anchors(store: Store, *, state: str | None = None,
         # the discount a payer negotiated off self-pay, which is the shape of
         # the conversation a practice is having with itself about cash pricing
         r["negotiated_pct_of_cash"] = (
-            round(100.0 * r["negotiated_median"] / r["cash_median"], 1)
+            half_up(100.0 * r["negotiated_median"] / r["cash_median"], 1)
             if r["cash_median"] and r["negotiated_median"] else None)
     return {
         "loaded": bool(rows), "rows": rows, "count": len(rows),

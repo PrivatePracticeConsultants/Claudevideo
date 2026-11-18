@@ -1,0 +1,12 @@
+DELETE -> {'stopped': True}
+digest failed for 710001: stopped
+digest failed for 710002: stopped
+digest failed for 710003: stopped
+stopped run answered: 409 {"detail":"stopped"}
+next plain digest: 200
+   710001 error= stopped gaps= None
+   710002 error= stopped gaps= None
+   710003 error= stopped gaps= None
+cache key unchanged; store._digest_cache rows with error: 3
+monthly packets built after the stop:
+  packet file mentions 'stopped': index.html ... State field). To run a deliberate pooled national comparison, pass market.allow_national=true; What changed this month: stopped; Contract ga

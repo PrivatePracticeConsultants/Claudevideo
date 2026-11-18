@@ -5,14 +5,24 @@ httpx==0.28.1
 ijson==3.5.1
 duckdb==1.5.5
 pyarrow==25.0.1
+# the fast in-network splitter (mrfx/fastscan.py); 2.3.x is the last line
+# with Windows wheels for every CPython 3.11-3.14 (2.5 dropped 3.11)
+numpy==2.3.5
 pydantic==2.13.4
 PyYAML==6.0.3
 rich==14.0.0
 tqdm==4.67.1
 pytest==9.1.1
+# builds the program's own `pip install -e .` offline (the updater passes
+# --no-build-isolation): without it every update needed PyPI to fetch one
+setuptools==84.2.1
 fastapi==0.141.1
 # pinned explicitly: transitive via fastapi, and the web layer's CVEs land here
 starlette==1.6.0
+# ^ its test client prefers `httpx2` and, without it, falls back to httpx with a
+#   DeprecationWarning (seen on every suite run). Not added here: this file also
+#   installs on the user's PC and the app itself needs only httpx. Before ANY
+#   starlette bump, add httpx2 (2.16.0 on PyPI, Nov 2026) or the tests stop importing.
 uvicorn==0.35.0
 watchfiles==1.2.0
 python-multipart==0.0.32

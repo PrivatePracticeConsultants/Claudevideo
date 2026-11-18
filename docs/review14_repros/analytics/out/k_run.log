@@ -1,0 +1,203 @@
+{
+ "ready_s": 1.2,
+ "rss_idle_mb": 1463,
+ "drop_to_done_s": 5.0,
+ "drop_to_covered_s": 17.5,
+ "timeline": [
+  {
+   "dt": -0.0,
+   "state": "current",
+   "files": "45/45",
+   "payers": "15/15",
+   "sentence": "",
+   "err": null
+  },
+  {
+   "dt": 3.0,
+   "state": "building",
+   "files": "45/46",
+   "payers": "15/16",
+   "sentence": "Analytics cover 15 of 16 payers (45 of 46 files). Adding the newly loaded files to the analytics",
+   "err": null
+  },
+  {
+   "dt": 14.6,
+   "state": "current",
+   "files": "46/46",
+   "payers": "16/16",
+   "sentence": "",
+   "err": null
+  }
+ ],
+ "rss_peak_main_mb": 2010,
+ "rss_peak_total_mb": 2010,
+ "hash_with_moda": {
+  "files": [
+   46,
+   46,
+   99430768
+  ],
+  "meta": {
+   "spine_token": "ff5cd3eeb4e0f141",
+   "rollup_schema_version": "2",
+   "rollup_covered_through": "2026-11-12 08:54:14.671257",
+   "rollup_covered_names": "[\"moda_ModaTXPriceTrans_20261101.json.gz\"]",
+   "directory_names_through": "2026-11-01 00:00:00",
+   "directory_schema_version": "6"
+  },
+  "rates_by_tin_tbl": "set:79161348:700130113947170112732343040:5346982716212178268",
+  "tin_directory_tbl": "set:195781:1805133109197828422911912:3134570495324598370",
+  "payers": [
+   [
+    "Moda",
+    133599
+   ],
+   [
+    "Payer 00",
+    5269140
+   ],
+   [
+    "Payer 01",
+    5268604
+   ],
+   [
+    "Payer 02",
+    5269050
+   ],
+   [
+    "Payer 03",
+    5267341
+   ],
+   [
+    "Payer 04",
+    5270065
+   ],
+   [
+    "Payer 05",
+    5267579
+   ],
+   [
+    "Payer 06",
+    5268439
+   ],
+   [
+    "Payer 07",
+    5266667
+   ],
+   [
+    "Payer 08",
+    5268854
+   ],
+   [
+    "Payer 09",
+    5269980
+   ],
+   [
+    "Payer 10",
+    5268926
+   ],
+   [
+    "Payer 11",
+    5268253
+   ],
+   [
+    "Payer 12",
+    5268185
+   ],
+   [
+    "Payer 13",
+    5268245
+   ],
+   [
+    "Payer 14",
+    5268421
+   ]
+  ],
+  "hash_s": 0.4
+ },
+ "forget": {
+  "rc": 0,
+  "out": "moda_ModaTXPriceTrans_20261101.json.gz: removed 430,768 rows, freed 0.9 MB\n08:54:36 INFO    mrfx.store: analytics memory budget: 6 GB (5.6 GiB, as DuckDB reports it) \u2014 chosen automatically from this machine's RAM; raise duckdb_memory_gb in config/mrfx.yaml if rebuilds run out\n08:54:37 INFO    mrfx.store: analytics update: 0 new file(s), 1 queued slice(s) \u2014 recomputing 1 payer slice(s) instead of the whole store\n08:54:44 INFO    mrfx.store: analytics update finished in 7s (payer slice, not a full rebuild)\n08:54:44 INFO    mrfx.ingest: forgot moda_ModaTXPriceTrans_20261101.json.gz: 430768 rows and 0.9 MB removed\n",
+  "s": 8.9
+ },
+ "hash_after_forget": {
+  "files": [
+   45,
+   45,
+   99000000
+  ],
+  "meta": {
+   "spine_token": "b14bac2fcd29b08d",
+   "rollup_schema_version": "2",
+   "rollup_covered_through": "2026-11-12 08:54:14.671257",
+   "rollup_covered_names": "[\"moda_ModaTXPriceTrans_20261101.json.gz\"]",
+   "directory_names_through": "2026-11-01 00:00:00",
+   "directory_schema_version": "6"
+  },
+  "rates_by_tin_tbl": "set:79027749:699191508509275952709874553:3119853143512578565",
+  "tin_directory_tbl": "set:194000:1788841819110324513618135:14497193866928991297",
+  "payers": [
+   [
+    "Payer 00",
+    5269140
+   ],
+   [
+    "Payer 01",
+    5268604
+   ],
+   [
+    "Payer 02",
+    5269050
+   ],
+   [
+    "Payer 03",
+    5267341
+   ],
+   [
+    "Payer 04",
+    5270065
+   ],
+   [
+    "Payer 05",
+    5267579
+   ],
+   [
+    "Payer 06",
+    5268439
+   ],
+   [
+    "Payer 07",
+    5266667
+   ],
+   [
+    "Payer 08",
+    5268854
+   ],
+   [
+    "Payer 09",
+    5269980
+   ],
+   [
+    "Payer 10",
+    5268926
+   ],
+   [
+    "Payer 11",
+    5268253
+   ],
+   [
+    "Payer 12",
+    5268185
+   ],
+   [
+    "Payer 13",
+    5268245
+   ],
+   [
+    "Payer 14",
+    5268421
+   ]
+  ],
+  "hash_s": 0.4
+ }
+}

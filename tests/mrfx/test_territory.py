@@ -128,7 +128,7 @@ def test_too_few_payers_refuses_to_call_a_market_concentrated(cfg, store):
     assert c["hhi"] is not None, "the raw number is still shown, just unbadged"
 
 
-def _referral_world(store, tmp_path):
+def _referral_world(store, tmp_path, extra=""):
     """A client, two local rivals, and three physicians with different habits."""
     me, rival1, rival2 = "1417594896", "1999999992", "1215555554"
     docs = ["1901234561", "1811223340", "1722334459"]
@@ -156,7 +156,8 @@ def _referral_world(store, tmp_path):
         f"{docs[0]},{rival1},900,120,3\n"       # sends a lot, none to me
         f"{docs[1]},{rival2},400,60,3\n"        # sends elsewhere...
         f"{docs[1]},{me},100,15,3\n"            # ...and a little to me
-        f"{docs[2]},{me},500,80,3\n")           # loyal: only to me
+        f"{docs[2]},{me},500,80,3\n"            # loyal: only to me
+        + extra)
     import_shared_patients(store, p)
     return me, docs
 
@@ -183,6 +184,35 @@ def test_steal_share_ranks_the_referrals_going_elsewhere(cfg, store, tmp_path):
     assert "send patients to therapy practices" in r["headline"]
     assert "proxy for referral, not a record of one" in r["note"]
     assert r["dataset"] and r["dataset_id"]
+
+
+def test_steal_share_counts_only_therapy_providers_as_rivals(cfg, store, tmp_path):
+    """Round 6 P3: every NPI in the client's city counted as a "rival", so a
+    physician sending patients to the local imaging centre (no therapy
+    taxonomy) was listed as sending patients "to therapy practices".
+    Hand-worked: a Springfield physiatry practice bills 97110 itself (so the
+    referral import keeps its pairs) and sends 40 patients to Springfield
+    Imaging and none to a therapist: it is no steal-share target. The two
+    therapy-referring physicians keep their exact numbers."""
+    physiatry, imaging = "1225588773", "1336699884"
+    with store.rates_part_writer("b.json") as w:
+        w.write_batch([_row("439876543", physiatry, 55.0)])
+    store.save_npis_bulk([
+        dict(npi=imaging, org_name="Springfield Imaging", entity_type="NPI-2",
+             taxonomy_code="261QR0200X", taxonomy_codes="261QR0200X",
+             city="Springfield", state="MO", address="x", zip="65801", phone=None),
+        dict(npi=physiatry, org_name="Springfield Physiatry", entity_type="NPI-2",
+             taxonomy_code="2081P0004X", taxonomy_codes="2081P0004X",
+             city="Springfield", state="MO", address="x", zip="65801", phone=None)])
+    _referral_world(store, tmp_path, extra=f"{physiatry},{imaging},300,40,3\n")
+    r = steal_share(store, "431234567")
+    by = {x["npi"]: x for x in r["rows"]}
+    assert physiatry not in by, "a referral to a non-therapy provider is not a steal"
+    assert by["1901234561"]["patients_elsewhere"] == 120
+    assert by["1811223340"]["patients_elsewhere"] == 60
+    assert r["n_cold"] == 1
+    # the 1-10 a CMS release cannot show is said, not implied away
+    assert "under 11" in r["headline"] and "under 11" in r["note"]
 
 
 def test_steal_share_refuses_a_practice_it_cannot_place(cfg, store, tmp_path):
@@ -299,3 +329,32 @@ def test_no_practice_inside_the_radius_falls_outside_every_band(cfg, store):
             f"at {radius} miles, {m['unbanded']} placed practice(s) fell "
             f"outside every band: {m['bands']}")
         assert m["n_banded"] == m["n_placed"]
+
+
+def test_concentration_index_uses_exact_shares(cfg, store):
+    """Six payers, one practice each: every share is 1/6. By hand the index
+    is 6 x (100/6)^2 = 1666.67 -> 1667. Squaring the DISPLAY shares (16.7)
+    gave 6 x 278.89 = 1673 (round 6 P3)."""
+    _payer_mix(store, {p: 1 for p in "ABCDEF"})
+    c = payer_concentration(store, MARKET)
+    assert [p["share_pct"] for p in c["payers"]] == [16.7] * 6
+    assert c["hhi"] == 1667
+
+
+def test_concentration_median_is_one_rate_per_practice(cfg, store):
+    """Aetna, 97110: practice X is published on three place-of-service sets
+    at $40 each, Y at $60, Z at $70. By hand, one rate per practice gives
+    median(40, 60, 70) = $60. The median over raw contract lines,
+    median(40, 40, 40, 60, 70) = $40, let X's three lines outvote the market."""
+    rows = [dict(_row("431000001", "1417594896", 40.0), service_code=pos)
+            for pos in (["11"], ["22"], ["19"])]
+    rows += [_row("431000002", "1417594897", 60.0), _row("431000003", "1417594898", 70.0)]
+    with store.rates_part_writer("a.json") as w:
+        w.write_batch(rows)
+    store.rebuild_rollups()
+    with store.connect() as con:
+        lines = con.execute("SELECT count(*) FROM rates_by_tin WHERE tin_value = '431000001'"
+                            ).fetchone()[0]
+    assert lines == 3, "the fixture must really publish X three times"
+    c = payer_concentration(store, MARKET, code="97110")
+    assert c["payers"][0]["median_rate"] == 60.0

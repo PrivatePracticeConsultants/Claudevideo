@@ -1,0 +1,70 @@
+
+== A. two links, same bytes, two hosts
+   url: {'id': 1, 'status': 'done', 'kind': 'in_network', 'duplicate_of': None, 'error': None, 'has_sha': True}
+   url: {'id': 2, 'status': 'skipped', 'kind': 'duplicate', 'duplicate_of': None, 'error': "identical to a file already ingested (payers host copies of each other's files) — skipped as duplicate of http", 'has_sha': True}
+   file: ('86cd1bbe_tpa.json.gz', 'done', 200, None)
+   rates: 200 from 1 source file(s) (one copy = 200)
+
+== B1. link then inbox copy
+   url: {'id': 1, 'status': 'done', 'kind': 'in_network', 'duplicate_of': None, 'error': None, 'has_sha': True}
+   file: ('c63e8739_tpa.json.gz', 'done', 200, None)
+   file: ('tpa_copy.json.gz', 'skipped', 0, 'identical to c63e8739_tpa.json.gz, which is already loaded — not loaded twice (the same fi')
+   rates: 200 from 1 source file(s) (one copy = 200)
+
+== B2. inbox then link
+   url: {'id': 1, 'status': 'skipped', 'kind': 'duplicate', 'duplicate_of': 'tpa_copy.json.gz', 'error': 'identical to tpa_copy.json.gz, which is already loaded — skipped as a duplicate (it is not counted twice)', 'has_sha': True}
+   file: ('tpa_copy.json.gz', 'done', 200, None)
+   rates: 200 from 1 source file(s) (one copy = 200)
+ERROR:mrfx.ingest:ingest failed for 7887d2ac_tpa.json.gz
+Traceback (most recent call last):
+  File "/home/user/Claudevideo/mrfx/ingest.py", line 1415, in _ingest_file_locked
+    parser, result = run_in_network_parse(
+                     ~~~~~~~~~~~~~~~~~~~~^
+        cfg,
+        ^^^^
+    ...<6 lines>...
+            store, name, progress.update if progress else None)),
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit13/skip/s4_claims.py", line 93, in flaky
+    raise RuntimeError("injected parser failure on the first loader")
+RuntimeError: injected parser failure on the first loader
+
+== C. two links; the first loader's parse fails once
+   url: {'id': 1, 'status': 'failed', 'kind': 'in_network', 'duplicate_of': None, 'error': 'injected parser failure on the first loader', 'has_sha': True}
+   url: {'id': 2, 'status': 'done', 'kind': 'in_network', 'duplicate_of': None, 'error': None, 'has_sha': True}
+   file: ('7887d2ac_tpa.json.gz', 'failed', 0, 'RuntimeError: injected parser failure on the first loader')
+   file: ('af4dbb99_tpa.json.gz', 'done', 200, None)
+   rates: 200 from 1 source file(s) (one copy = 200)
+   parse calls: 2; downloads dir: []
+ERROR:mrfx.ingest:ingest failed for tpa_copy.json.gz
+Traceback (most recent call last):
+  File "/home/user/Claudevideo/mrfx/ingest.py", line 1415, in _ingest_file_locked
+    parser, result = run_in_network_parse(
+                     ~~~~~~~~~~~~~~~~~~~~^
+        cfg,
+        ^^^^
+    ...<6 lines>...
+            store, name, progress.update if progress else None)),
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit13/skip/s4_claims.py", line 118, in flaky
+    raise RuntimeError("injected parser failure on the inbox loader")
+RuntimeError: injected parser failure on the inbox loader
+
+== C2. inbox load FAILED, then the link
+   url: {'id': 1, 'status': 'done', 'kind': 'in_network', 'duplicate_of': None, 'error': None, 'has_sha': True}
+   file: ('91d135f2_tpa.json.gz', 'done', 200, None)
+   file: ('tpa_copy.json.gz', 'failed', 0, 'RuntimeError: injected parser failure on the inbox loader')
+   rates: 200 from 1 source file(s) (one copy = 200)
+
+== D. four links, same bytes, two concurrent downloaders
+   url: {'id': 1, 'status': 'done', 'kind': 'in_network', 'duplicate_of': None, 'error': None, 'has_sha': True}
+   url: {'id': 2, 'status': 'skipped', 'kind': 'duplicate', 'duplicate_of': None, 'error': "identical to a file already ingested (payers host copies of each other's files) — skipped as duplicate of http", 'has_sha': True}
+   url: {'id': 3, 'status': 'skipped', 'kind': 'duplicate', 'duplicate_of': None, 'error': "identical to a file already ingested (payers host copies of each other's files) — skipped as duplicate of http", 'has_sha': True}
+   url: {'id': 4, 'status': 'skipped', 'kind': 'duplicate', 'duplicate_of': None, 'error': "identical to a file already ingested (payers host copies of each other's files) — skipped as duplicate of http", 'has_sha': True}
+   file: ('46d55586_tpa.json.gz', 'done', 200, None)
+   rates: 200 from 1 source file(s) (one copy = 200)
+exit 0

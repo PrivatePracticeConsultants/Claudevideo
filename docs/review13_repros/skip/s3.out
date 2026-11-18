@@ -1,0 +1,64 @@
+raw 204,771 B; gz level1 42,964 B; gz level9 39,976 B; identical? False
+
+== inbox A1_gz1_vs_gz9
+   file: ('acme_l1.json.gz', 'done', 300, None)
+   file: ('acme_l9.json.gz', 'done', 300, None)
+   rates: 600  (one copy = 300 rows)
+   fingerprints: [('acme_l1.json.gz', 42964, True, 1, 'gz'), ('acme_l9.json.gz', 39976, True, 1, 'gz')]
+
+== inbox A2_json_vs_gz
+   file: ('acme.json', 'done', 300, None)
+   file: ('acme.json.gz', 'done', 300, None)
+   rates: 600  (one copy = 300 rows)
+   fingerprints: [('acme.json', 204771, True, None, 'other'), ('acme.json.gz', 39976, True, 1, 'gz')]
+
+== link then inbox A3_link_gz_then_inbox_json
+   file: ('acme.json', 'done', 300, None)
+   file: ('ee5a7e22_link.json.gz', 'done', 300, None)
+   url row: {'id': 1, 'status': 'done', 'kind': 'in_network', 'duplicate_of': None, 'error': None}
+   rates: 600  (one copy = 300 rows)
+   fingerprints: [('acme.json', 204771, True, None, 'other'), ('ee5a7e22_link.json.gz', 39976, True, 1, 'gz')]
+
+== link then inbox A4_link_gz_then_inbox_regz
+   file: ('86eaf033_link.json.gz', 'done', 300, None)
+   file: ('acme_browser.json.gz', 'done', 300, None)
+   url row: {'id': 1, 'status': 'done', 'kind': 'in_network', 'duplicate_of': None, 'error': None}
+   rates: 600  (one copy = 300 rows)
+   fingerprints: [('86eaf033_link.json.gz', 39976, True, 1, 'gz'), ('acme_browser.json.gz', 42964, True, 1, 'gz')]
+
+== B. cost of a decompressed-content fingerprint (real files)
+   uhc_2026-11-01_UnitedHealthcare-Insurance-Company-of-New-Yor…: 36 MB gz -> 623 MB inflated; inflate 1.77s (352 MB/s), inflate+sha 1.29s (+-0.49s = -0.78 s/GB inflated), raw sha 0.04s
+   uhc_2026-11-01_UnitedHealthcare-Insurance-Company-of-the-Riv…: 262 MB gz -> 5,488 MB inflated; inflate 12.26s (447 MB/s), inflate+sha 10.20s (+-2.06s = -0.38 s/GB inflated), raw sha 0.25s
+
+== C. LOCAL_HASH_MAX_BYTES lowered to 1,048,576 B (the > 4 GB rule on 3.5 MB files)
+
+== inbox C1_inbox_inbox_over_limit
+   file: ('big_a.json.gz', 'done', 1500, None)
+   file: ('big_b.json.gz', 'done', 1500, None)
+   rates: 3000  (one copy = 300 rows)
+   fingerprints: [('big_a.json.gz', 3723477, False, None, 'gz'), ('big_b.json.gz', 3723477, False, None, 'gz')]
+
+== inbox C1b two scans, over limit
+   file: ('big_a.json.gz', 'done', 1500, None)
+   file: ('big_b.json.gz', 'done', 1500, None)
+   rates: 3000; fingerprints: [('big_a.json.gz', 3723477, False, None, 'gz'), ('big_b.json.gz', 3723477, False, None, 'gz')]
+   after re-dropping a COPY of big_a under its own name:
+   file: ('big_a-6516beb6.json.gz', 'needs_choice', 0, 'A different file with the same name as big_a.json.gz (the same payer and month). Replace b')
+   file: ('big_a.json.gz', 'done', 1500, None)
+   file: ('big_b.json.gz', 'done', 1500, None)
+   rates: 3000; held: ['big_a-6516beb6.json.gz']
+
+== link then inbox C2_link_then_inbox_over_limit
+   file: ('a1f6c58b_link.json.gz', 'done', 1500, None)
+   file: ('copy.json.gz', 'skipped', 0, 'identical to a1f6c58b_link.json.gz, which is already loaded — not loaded twice (the same f')
+   url row: {'id': 1, 'status': 'done', 'kind': 'in_network', 'duplicate_of': None, 'error': None}
+   rates: 1500  (one copy = 300 rows)
+   fingerprints: [('a1f6c58b_link.json.gz', 3723477, True, 1, 'gz')]
+
+== inbox then link C3_inbox_then_link_over_limit
+   file: ('62586298_link.json.gz', 'done', 1500, None)
+   file: ('copy.json.gz', 'done', 1500, None)
+   url row: {'id': 1, 'status': 'done', 'kind': 'in_network', 'duplicate_of': None, 'error': None}
+   rates: 3000  (one copy = 300 rows)
+   fingerprints: [('62586298_link.json.gz', 3723477, True, 1, 'gz'), ('copy.json.gz', 3723477, False, None, 'gz')]
+exit 0

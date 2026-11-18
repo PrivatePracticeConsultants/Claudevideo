@@ -1,0 +1,6 @@
+defaults: monthly_refresh = False | monthly_recheck = True
+could not read known sources config/known_sources.yaml: [Errno 2] No such file or directory: 'config/known_sources.yaml'
+tick: {'month': '2026-12', 'dated': 0, 'static': 1, 'queued': 0, 'retried': 0, 'requeued_static': 1, 'done': True}
+requests during the re-check: [('/index.json', 200, None, 402), ('/2026-11-01_twin_in-network-rates.json.gz', 206, 'bytes=0-0', 1), ('/2026-12-01_twin_in-network-rates.json.gz', 200, None, 476)]
+queue: [('index.json', 'done', ''), ('2026-11-01_twin_in-network-rates.json.gz', 'done', 'checked 2026-11-12: unchanged by the same version tag and the same size'), ('2026-12-01_twin_in-network-rates.json.gz', 'done', '')]
+months loaded: [('2026-11', 60)]

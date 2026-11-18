@@ -1,0 +1,71 @@
+----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 50320)
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.13/socketserver.py", line 697, in process_request_thread
+    self.finish_request(request, client_address)
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.13/socketserver.py", line 362, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+    ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.13/socketserver.py", line 766, in __init__
+    self.handle()
+    ~~~~~~~~~~~^^
+  File "/usr/local/lib/python3.13/http/server.py", line 453, in handle
+    self.handle_one_request()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/usr/local/lib/python3.13/http/server.py", line 419, in handle_one_request
+    self.raw_requestline = self.rfile.readline(65537)
+                           ~~~~~~~~~~~~~~~~~~~^^^^^^^
+  File "/usr/local/lib/python3.13/socket.py", line 723, in readinto
+    return self._sock.recv_into(b)
+           ~~~~~~~~~~~~~~~~~~~~^^^
+ConnectionResetError: [Errno 104] Connection reset by peer
+----------------------------------------
+
+== A (early_dedup_mb=1): twin link first time -> skipped/duplicate, bytes sent 5,296,343 of 3,723,479
+----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 50338)
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.13/socketserver.py", line 697, in process_request_thread
+    self.finish_request(request, client_address)
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.13/socketserver.py", line 362, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+    ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.13/socketserver.py", line 766, in __init__
+    self.handle()
+    ~~~~~~~~~~~^^
+  File "/usr/local/lib/python3.13/http/server.py", line 453, in handle
+    self.handle_one_request()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/usr/local/lib/python3.13/http/server.py", line 419, in handle_one_request
+    self.raw_requestline = self.rfile.readline(65537)
+                           ~~~~~~~~~~~~~~~~~~~^^^^^^^
+  File "/usr/local/lib/python3.13/socket.py", line 723, in readinto
+    return self._sock.recv_into(b)
+           ~~~~~~~~~~~~~~~~~~~~^^^
+ConnectionResetError: [Errno 104] Connection reset by peer
+----------------------------------------
+   re-paste of the skipped/duplicate link: add_urls -> {'added': 1, 'skipped': 0, 'invalid': 0}; bytes sent again 5,296,343; row now skipped/duplicate err='checksum-equal to http://127.0.0.1:34067/big.json.gz, already loaded — same size, same first 1 MB, s'
+
+== A (early_dedup_mb=15): twin link first time -> skipped/duplicate, bytes sent 3,723,479 of 3,723,479
+   re-paste of the skipped/duplicate link: add_urls -> {'added': 1, 'skipped': 0, 'invalid': 0}; bytes sent again 3,723,479; row now skipped/duplicate err="identical to a file already ingested (payers host copies of each other's files) — skipped as duplica"
+
+== B: clear_queued -> 1 [{'id': 1, 'status': 'skipped', 'kind': 'canceled', 'duplicate_of': None, 'bytes_done': 0, 'error': 'cleared from the queue', 'url': 'http://127.0.0.1:44745/s.json.gz'}]
+   re-paste of the canceled row: {'added': 1, 'skipped': 0, 'invalid': 0} [{'id': 1, 'status': 'done', 'kind': 'in_network', 'duplicate_of': None, 'bytes_done': 2617, 'error': None, 'url': 'http://127.0.0.1:44745/s.json.gz'}]
+
+== C: done rate link re-pasted: add_urls -> {'added': 0, 'skipped': 1, 'invalid': 0}; requests since: 0; row: [{'id': 1, 'status': 'done', 'kind': 'in_network', 'duplicate_of': None, 'bytes_done': 2617, 'error': None, 'url': 'http://127.0.0.1:41417/s.json.gz'}]
+   GETTING_STARTED.md:688-690 says: 'To pick up new codes in files you already have, re-add those links (the app re-downloads and re-extracts them).'
+   forget_file -> {'rows': 100, 'bytes': 6846}
+   row after forget: [{'id': 1, 'status': 'skipped', 'kind': 'in_network', 'duplicate_of': None, 'bytes_done': 2617, 'error': 'data removed by user — press retry to re-download and re-ingest', 'url': 'http://127.0.0.1:41417/s.json.gz'}]
+   re-paste after forget: add_urls -> {'added': 1, 'skipped': 0, 'invalid': 0}; requests 1; row: [{'id': 1, 'status': 'done', 'kind': 'in_network', 'duplicate_of': None, 'bytes_done': 2617, 'error': None, 'url': 'http://127.0.0.1:41417/s.json.gz'}]
+   rates: (100,)
+
+== D: first: [('oversize', 'unknown', 'file is 0.0 GB — larger than the confirm_over_gb safety limit (0.0 GB). Press "download anyway" on t')]
+   direct re-paste of the oversize row: {'added': 1, 'skipped': 0, 'invalid': 0} ['queued']
+   after drain: [('oversize', 'file is 0.0 GB — larger than the confirm_over_gb safety limit (0.0 GB). Press "download anyway" on t')]
+
+== E: queued row after re-paste with a new signature: https://cdn.example.com/r.json.gz?sig=NEW&se=2026-02-01
+   downloading row after re-paste: https://cdn.example.com/r.json.gz?sig=NEW&se=2026-02-01
+   done row after re-paste (url kept fresh for the next re-check?): https://cdn.example.com/r.json.gz?sig=NEWEST&se=2026-04-01 done
+exit 0

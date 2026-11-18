@@ -1,0 +1,100 @@
+{
+ "base8_unbuilt": [
+  {
+   "f": "bcbsms_2026-10_320_33B0_in-network-rates_01_of_10.json.gz",
+   "status": "done",
+   "rows": null,
+   "s": 8.2
+  },
+  {
+   "f": "bcbsms_2026-10_460_70J0_in-network-rates_03_of_13.json.gz",
+   "status": "done",
+   "rows": null,
+   "s": 1.9
+  },
+  {
+   "f": "moda_ModaTXPriceTrans_20261101.json.gz",
+   "status": "done",
+   "rows": null,
+   "s": 1.0
+  },
+  {
+   "f": "tufts_2026-11-01_TuftsHealthPublicPlans_DirectSubsidizedIndividual_in-network-rates.zip",
+   "status": "done",
+   "rows": null,
+   "s": 2.9
+  },
+  {
+   "f": "wy_2026-10-27_000005300_in-network-rates_05_of_09.json.gz",
+   "status": "done",
+   "rows": null,
+   "s": 1.8
+  },
+  {
+   "f": "wv_hmhs_2026-10-27_000000647_in-network-rates_01_of_02.json.gz",
+   "status": "done",
+   "rows": null,
+   "s": 1.8
+  },
+  {
+   "f": "security_networx_PRG000049.zip",
+   "status": "done",
+   "rows": null,
+   "s": 8.4
+  },
+  {
+   "f": "uhc_2026-11-01_HEALTHSCOPE-BENEFITS_Third-Party-Administrator_SHO_U1_3342_in-network-rates.json.gz",
+   "status": "done",
+   "rows": null,
+   "s": 1.3
+  }
+ ],
+ "ref8_build_s": 21.7,
+ "base7_built": [
+  {
+   "f": "bcbsms_2026-10_320_33B0_in-network-rates_01_of_10.json.gz",
+   "status": "done",
+   "rows": null,
+   "s": 7.7
+  },
+  {
+   "f": "bcbsms_2026-10_460_70J0_in-network-rates_03_of_13.json.gz",
+   "status": "done",
+   "rows": null,
+   "s": 2.2
+  },
+  {
+   "f": "moda_ModaTXPriceTrans_20261101.json.gz",
+   "status": "done",
+   "rows": null,
+   "s": 1.2
+  },
+  {
+   "f": "tufts_2026-11-01_TuftsHealthPublicPlans_DirectSubsidizedIndividual_in-network-rates.zip",
+   "status": "done",
+   "rows": null,
+   "s": 2.7
+  },
+  {
+   "f": "wy_2026-10-27_000005300_in-network-rates_05_of_09.json.gz",
+   "status": "done",
+   "rows": null,
+   "s": 2.4
+  },
+  {
+   "f": "wv_hmhs_2026-10-27_000000647_in-network-rates_01_of_02.json.gz",
+   "status": "done",
+   "rows": null,
+   "s": 2.0
+  },
+  {
+   "f": "security_networx_PRG000049.zip",
+   "status": "done",
+   "rows": null,
+   "s": 7.5
+  },
+  {
+   "build_s": 23.8
+  }
+ ]
+}

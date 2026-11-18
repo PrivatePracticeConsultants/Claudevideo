@@ -1,0 +1,162 @@
+{
+ "names_hold_at": 63.7,
+ "kilo_at": 66.7,
+ "lima_at": -1,
+ "both_done_at": null,
+ "all_covered_at": 241.2,
+ "false_current": [],
+ "timeline": [
+  {
+   "dt": 0.0,
+   "state": "current",
+   "files": "7/7",
+   "payers": "6/6",
+   "sentence": "",
+   "err": null
+  },
+  {
+   "dt": 63.0,
+   "state": "building",
+   "files": "7/7",
+   "payers": "6/6",
+   "sentence": "Analytics cover 6 of 6 payers (7 of 7 files). Refreshing practice names and places",
+   "err": null
+  },
+  {
+   "dt": 70.0,
+   "state": "building",
+   "files": "7/8",
+   "payers": "6/7",
+   "sentence": "Analytics cover 6 of 7 payers (7 of 8 files). Refreshing practice names and places",
+   "err": null
+  },
+  {
+   "dt": 123.6,
+   "state": "behind",
+   "files": "7/8",
+   "payers": "6/7",
+   "sentence": "Analytics cover 6 of 7 payers (7 of 8 files). 1 newly loaded file not in the analytics yet \u2014 added when the queue is idle",
+   "err": null
+  },
+  {
+   "dt": 240.6,
+   "state": "building",
+   "files": "7/8",
+   "payers": "6/7",
+   "sentence": "Analytics cover 6 of 7 payers (7 of 8 files). Adding the newly loaded files to the analytics",
+   "err": null
+  },
+  {
+   "dt": 241.1,
+   "state": "current",
+   "files": "8/8",
+   "payers": "7/7",
+   "sentence": "",
+   "err": null
+  }
+ ],
+ "events": [
+  [
+   62.6,
+   "dir_enter",
+   null
+  ],
+  [
+   62.8,
+   "full_enter",
+   null
+  ],
+  [
+   63.4,
+   "names_hold",
+   null
+  ],
+  [
+   69.0,
+   "incr_enter",
+   null
+  ],
+  [
+   69.0,
+   "incr_exit",
+   -1.0
+  ],
+  [
+   123.4,
+   "slice_done",
+   null
+  ],
+  [
+   123.4,
+   "full_exit",
+   60.686459377000574
+  ],
+  [
+   240.6,
+   "incr_enter",
+   null
+  ],
+  [
+   240.6,
+   "delta_enter",
+   null
+  ],
+  [
+   240.7,
+   "delta_exit",
+   null
+  ],
+  [
+   240.8,
+   "incr_exit",
+   0.18489507400045113
+  ]
+ ],
+ "log": [
+  "09:00:19 INFO    mrfx.cli: opening the store at /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/J3/store \u2026",
+  "09:00:19 INFO    mrfx.store: analytics memory budget: 2 GB (1.9 GiB, as DuckDB reports it) \u2014 set by duckdb_memory_gb; raise duckdb_memory_gb in config/mrfx.yaml if rebuilds run out",
+  "09:00:19 INFO    mrfx.cli: watching /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/J3/inbox",
+  "  store: /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/J3/store  (7 file(s) ingested)",
+  "  inbox: /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/J3/inbox  (drop .json / .json.gz / .zip here)",
+  "  if the app ever freezes: open /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/J3/store/diagnostics/stacks_latest.txt",
+  "09:01:23 INFO    mrfx.enrich: scoped name refresh unavailable (12,718 of 12,367 TINs affected \u2014 the full directory rebuild is cheaper) \u2014 full directory rebuild",
+  "09:01:23 INFO    mrfx.store: analytics build: planning (counting rows per payer and code)\u2026",
+  "09:01:23 INFO    mrfx.store: analytics build planned: 1 slice(s) over 6,768,352 rows (0 payer(s))",
+  "09:01:29 INFO    mrfx.store: analytics rebuild already running \u2014 skipping this refresh so it can't stack another multi-hour pass behind it (the running rebuild covers current data; the next cycle catches the rest)",
+  "09:01:29 INFO    mrfx.ingest: inbox scan: a rebuild is already running \u2014 skipping this best-effort refresh (the running one covers it)",
+  "09:02:23 INFO    mrfx.store: analytics build finished in 61s",
+  "09:04:20 INFO    mrfx.fetch: updating analytics rollups (1 newly ingested file(s))...",
+  "09:04:20 INFO    mrfx.store: analytics update: 1 new file(s), 0 queued slice(s) \u2014 recomputing 1 payer slice(s) instead of the whole store",
+  "09:04:21 INFO    mrfx.store: analytics update finished in 0s (payer slice, not a full rebuild)"
+ ],
+ "truth": {
+  "done_files": 8,
+  "raw_rows": 6768832,
+  "spine_rows": 445396,
+  "expected_rows": 445396,
+  "missing": 0,
+  "extra": 0,
+  "files_fully_in_spine": 8,
+  "files_rowcount_mismatch": [],
+  "spine_payers": [
+   "Blue Cross Blue Shield of North Dakota",
+   "Blue Cross Blue Shield of Wyoming",
+   "Highmark WV",
+   "Kilo Benefit Trust",
+   "Moda",
+   "Security Health Plan of Wisconsin, Inc,",
+   "Tufts Health Public Plans, Inc."
+  ],
+  "raw_payers": [
+   "Blue Cross Blue Shield of North Dakota",
+   "Blue Cross Blue Shield of Wyoming",
+   "Highmark WV",
+   "Kilo Benefit Trust",
+   "Moda",
+   "Security Health Plan of Wisconsin, Inc,",
+   "Tufts Health Public Plans, Inc."
+  ],
+  "hash_spine": null,
+  "hash_dir": null
+ }
+}

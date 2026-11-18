@@ -1,0 +1,7 @@
+rates before: 640 parts: 4
+live store rates after ingest: 840
+backup: mrfx-backup-2026-11-12_0808.zip manifest counts: {'rates': 840, 'files_done': 4} verdict: backup OK: 5 files match their checksums; recorded 840 rate rows
+mrfx verify: True backup OK: 5 files match their checksums; recorded 840 rate rows
+RESTORED store: rates = 640 files done = 4 parts = 4
+live parts: 5
+ROWS LOST IN THE BACKUP: 200

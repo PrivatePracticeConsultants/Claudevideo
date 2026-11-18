@@ -69,9 +69,14 @@ def test_market_overview_ranks_payers_above_and_below_market(store):
     # practices is a DISTINCT count (8 seeded), not sum-over-codes (would be 32)
     assert all(x["practices"] == 8 for x in ov["payer_index"])
     assert "basis_note" in ov  # honesty: overview states its basis
-    # by_discipline must render against PARSER-cased disciplines ("PT" — the
-    # lowercase IN-list regression made this section silently empty on real data)
+    # by_discipline is ONE comparable service per discipline — the moderate
+    # evaluation — so a store without 97162/97166/92523 shows no row rather
+    # than a median over a different code mix (review 10 item 3.5)
+    assert ov["by_discipline"] == []
+    _seed(store, codes=("97162",), month="2026-07")
+    ov = market_overview(store)
     assert [d["discipline"] for d in ov["by_discipline"]] == ["pt"]
+    assert ov["by_discipline"][0]["label"].endswith("(97162)")
     assert ov["by_discipline"][0]["median"] is not None
     assert ov["by_discipline"][0]["practices"] == 8
 

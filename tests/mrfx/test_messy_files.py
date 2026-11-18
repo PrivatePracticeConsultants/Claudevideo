@@ -221,14 +221,18 @@ def test_large_file_two_pass_bounded_refs_and_progress(cfg, store, monkeypatch):
 
     def spy(self, *a, **k):
         orig_init(self, *a, **k)
-        seen["keep"] = self._keep_ref_ids
+        seen["parser"] = self
     monkeypatch.setattr(InNetworkParser, "__init__", spy)
 
     bar_calls = []
     res = ingest_file(cfg, store, p, progress_bar=lambda d, t, pct: bar_calls.append((d, t, pct)))
     assert res["status"] == "done" and res["rows"] == 1
-    # pass 2 was told to keep ONLY ref 7 — not the 2,000 unused ones
-    assert seen["keep"] == {7}
+    # ONLY ref 7 was kept in memory — not the 2,000 unused ones (the keep set
+    # is known up front on the classic path, and filled in during the single
+    # read on the fast path; either way it is exactly the cited set)
+    parser = seen["parser"]
+    assert parser._keep_ref_ids == {7}
+    assert set(parser.result.embedded_refs) == {7}
     rows = rates(store)
     assert rows[0]["npi"] == "1111111111" and rows[0]["negotiated_rate"] == 40.0
     # progress ran and finished at 100%

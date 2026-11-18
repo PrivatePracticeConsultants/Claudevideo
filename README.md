@@ -236,6 +236,19 @@ they matter:
   line on its own); therapy codes nearby practices bill that a client doesn't;
   and what local hospitals charge self-pay patients, from files already
   imported.
+- **Floors and hospital parity in the documents.** With a state Medicaid
+  schedule or hospital price files loaded, the negotiation one-pager, payer
+  comparison, proposal and dossier carry one line per code ("Medicaid pays
+  $30.00 for 97110 in MO; Payer A pays you $28.00 (below Medicaid)"); with
+  nothing loaded the line is omitted with the reason.
+- **Save as PDF** beside every printable report (the built-in headless
+  browser prints the same HTML), and `mrfx packets --pdf`.
+- **A progress bar with Stop on every output**, and a header line that says
+  how much of the loaded data the analytics already cover while a big store
+  is still being folded in.
+- **Weekly backups while the app runs** (`backup_dir`), checked and kept N
+  deep; bookmarkable links (`#benchmark?subject=…&state=MO`) and a "Find a
+  practice" box.
 
 ## Territory and growth
 
@@ -342,7 +355,7 @@ badge and are never displayed as authoritative; confirming a URL persists it to
 
 `config/known_sources.yaml` is a shipped catalog of every payer entry point
 this app has been live-tested against — each entry carries its verification
-date and what happened (files listed, rows ingested, quirks). 38 entries are
+date and what happened (files listed, rows ingested, quirks). 109 of its 150 entries (as of 2026-11-11) are
 **auto-queueable** (Highmark's 15 hosted Blue plans incl. FL/AZ/ID/MN/LA/NE,
 BCBS Mississippi's stable TOC, BCBS Tennessee's /tcr directory page,
 Cigna's signed-manifest page, BCBS South Carolina's CloudFront indexes,
@@ -360,7 +373,7 @@ SelectHealth's per-plan index directory (UT/ID/NV), Moda Health's
 first-of-month TOCs (OR/AK/TX), the First Health PPO rental network
 via Healthgram's stable TOC, Tufts Health Public Plans (MA), and Security
 Health Plan's per-employer zip-TOC listing (WI)); the
-rest (34) are portals that need a browser click (Humana, HCSC,
+rest (41) are portals that need a browser click (Humana, HCSC,
 BCBS AL/MA/RI/VT/KS, Wellmark, Horizon NJ,
 Premera, Priority Health, HMSA, Blue Shield
 of CA, Excellus, Capital BC, IBX, BCBS MN, UHS, plus a batch from the
@@ -408,8 +421,9 @@ Three link kinds are auto-detected:
   Provider Network file ingested 88,649 rows).
 - **JavaScript-only portals** (Molina, HealthSparq-hosted Blues, and other
   pages whose file lists exist only after scripts run): with the optional
-  Playwright install (`pip install playwright && playwright install
-  chromium`) the app renders the page in headless Chromium and harvests
+  headless browser (downloaded by the app itself on first use —
+  `render_auto_install`; `playwright install chromium` by hand only if that
+  step fails offline) the app renders the page in headless Chromium and harvests
   links from the rendered DOM **and** from the JSON responses the page's
   own scripts fetch — and when nothing appears, it dismisses consent
   overlays and clicks the controls that look like they reveal the list
@@ -483,6 +497,17 @@ dropping the companion in later re-ingests the affected files automatically.
 estimate and the companion verdict (`READY` / `NEEDS COMPANION` /
 `NOT A RATE FILE` / `UNREADABLE`) from the header alone.
 
+**Remote references are not downloaded.** The schema also lets a reference
+entry carry only a `location` URL whose file holds that one entry's provider
+list. MRF Explorer does not fetch those: rate groups that depend on them are
+skipped and counted, and the Files tab and `mrfx ingest` say "their provider
+lists are remote links MRF Explorer doesn't download" — distinct from the
+missing-companion case, because dropping those linked files in cannot help
+(they carry no `provider_group_id` to match on). None of the 22 real payer
+files scanned in full in Nov 2026 (BCBS WY/MS/ND, Florida Blue, UHC, Moda,
+Aetna, Tufts, Security Health, Highmark; up to 42 GB uncompressed) used
+remote references.
+
 ## Volume expectations
 
 In-network files run 1–100+ GB uncompressed (some ~1 TB), and one licensee's
@@ -522,6 +547,13 @@ the progress bar advancing to 100%.
 ---
 
 # bcbs-mo-mrf — BCBS Missouri PT/Rehab negotiated-rate extraction
+
+> **Legacy tool (`src/` + `run.py`), kept for reference only.** Everything
+> from here down describes that earlier extractor, NOT MRF Explorer. Where they
+> differ, MRF Explorer's behavior is documented above — notably: MRF Explorer
+> does **not** download `location`-style remote provider-reference files (this
+> legacy tool does); it skips the rate groups that cite them and counts them
+> so the Files tab can say so (see "Companion provider-reference files").
 
 Extracts commercial negotiated reimbursement rates for targeted physical-therapy /
 rehab provider groups in Missouri from Blue Cross Blue Shield

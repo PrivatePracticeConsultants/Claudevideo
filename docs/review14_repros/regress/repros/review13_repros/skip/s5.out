@@ -1,0 +1,25 @@
+loaded: [('acme_rates.json.gz', 'done', 100, None)] (100, 1, [40.0])
+
+A. same bytes re-dropped: [('acme_rates.json.gz', 'done', 100, None)] inbox: [] rates: (100, 1, [40.0])
+
+B. corrected same-size file: [{'file': 'acme_rates.json.gz', 'status': 'needs_choice'}] held: ['acme_rates-b9779c21.json.gz']
+    ('acme_rates-b9779c21.json.gz', 'needs_choice', 0, 'A different file with the same name as acme_rates.json.gz (the same payer and month). Replace acme_rates.json.gz with it')
+    ('acme_rates.json.gz', 'done', 100, None)
+   after another scan (restart): held still ['acme_rates-b9779c21.json.gz'] [('acme_rates-b9779c21.json.gz', 'needs_choice', 0, 'A different file with the same name as acme_rates.json.gz (the same payer and month). Replace acme_rates.json.gz with it')]
+   Replace chosen -> .replacing acme_rates.json.gz ; row: [('acme_rates.json.gz', 'queued', 100, None)]
+   after scan: [('acme_rates.json.gz', 'done', 100, None)] (100, 1, [40.0, 47.0])
+
+F. original re-dropped after Replace -> held: ['acme_rates-6d7e003e.json.gz']
+   Keep both -> acme_rates-6d7e003e.json.gz ; files: [('acme_rates-6d7e003e.json.gz', 'done', 100, None), ('acme_rates.json.gz', 'done', 100, None)] (200, 2, [40.0, 47.0])
+
+C. June under the May name: [('acme_rates-6d7e003e.json.gz', 'done', 100, None), ('acme_rates-78988ed7.json.gz', 'done', 100, None), ('acme_rates.json.gz', 'done', 100, None)] (300, 3, [40.0, 45.0, 47.0])
+
+D. pre-audit-8 file (no identity row, processed copy gone); corrected same-size file with an OLD mtime dropped:
+   files: [('acme_rates.json.gz', 'done', 100, None)]
+   inbox now: [] processed: ['acme_rates.json.gz']
+   rates: (100, 1, [40.0])  (47.0 present = the corrected file loaded; absent = silently treated as 'same')
+   same drop with a fresh mtime: [('acme_rates.json.gz', 'done', 100, None)] held: []
+/home/user/Claudevideo/.venv/lib/python3.13/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+  from starlette.testclient import TestClient as TestClient  # noqa
+   /api/files row keys mentioning identity/fingerprint: [] row error: None
+exit 0

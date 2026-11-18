@@ -1,0 +1,26 @@
+== preflight: CONTENT decides (file name is irrelevant)
+  in_network named 'allowed-amounts.json' -> ('in_network', 'NEEDS COMPANION', ['This file uses provider references. You must also drop in the matching provider-reference '])
+  in_network named 'prescription-drug.json.gz' -> ('in_network', 'NEEDS COMPANION', ['This file uses provider references. You must also drop in the matching provider-reference '])
+  in_network with a UTF-8 BOM -> ('in_network', 'NEEDS COMPANION', ['This file uses provider references. You must also drop in the matching provider-reference '])
+  in_network with a BOM inside gzip -> ('in_network', 'NEEDS COMPANION', ['This file uses provider references. You must also drop in the matching provider-reference '])
+  provider_references (>1 MB) BEFORE in_network -> ('in_network', 'READY', ['large embedded provider_references table precedes in_network; classified as a rate file (t', 'Uses provider references; reference table is embedded in this file.'])
+  small provider_references before in_network -> ('in_network', 'READY', ['Uses provider references; reference table is embedded in this file.'])
+  provider_references only (no in_network) -> ('provider_reference', 'NOT A RATE FILE', ['Standalone provider-reference file — it carries NPIs, not rates. Ingesting it fills the re'])
+  JSON ARRAY index -> ('unknown', 'UNREADABLE', ['no in_network / provider_references / reporting_structure key found'])
+  JSON array of in_network items (no object wrapper) -> ('unknown', 'UNREADABLE', ['no in_network / provider_references / reporting_structure key found'])
+  out_of_network content -> ('allowed_amounts', 'NOT A RATE FILE', ['This is an out-of-network allowed-amounts file (billed/allowed averages), not a negotiated'])
+  empty file -> ('unknown', 'UNREADABLE', ['the file is empty (0 bytes) — the download or copy did not finish'])
+  UTF-16 -> ('unknown', 'UNREADABLE', ['the file is saved as UTF-16 (Windows "Unicode") — open it and save it as UTF-8, then drop '])
+  zip: manifest FIRST, rates second -> ('in_network', 'NEEDS COMPANION', ['This file uses provider references. You must also drop in the matching provider-reference '])
+  zip: rates named .txt only -> ('unknown', 'UNREADABLE', ['unreadable: ValueError: zip archive contains no .json member'])
+  zip: two rate members, the SMALLER is the target payer -> ('in_network', 'NEEDS COMPANION', ['This file uses provider references. You must also drop in the matching provider-reference ']) (largest member is read; the other is IGNORED, log only)
+  TOC content -> ('toc', 'NOT A RATE FILE', ['This is an index/TOC file, not a rate file; drop the in-network files it references (see i'])
+  blobs content -> ('blob_listing', 'NOT A RATE FILE', ['This is a portal file listing (blobs API response), not a rate file; the files it lists wi'])
+== expand_blobs_listing: the NAME decides (UHC/Optum listings)
+  queued: ['https://x/1.json.gz', 'https://x/7.json.gz', 'https://x/8.json']
+  NOT queued (silently, log only):  ['https://x/2.json.gz', 'https://x/3.json.gz', 'https://x/4.json.gz', 'https://x/5.json.gz', 'https://x/6.json.gz']
+== expand_toc: no name filter at all (content of the child decides later)
+   (['https://x/allowed-amounts.json.gz', 'https://x/ndc_in-network.json.gz', 'https://x/relative/r.json.gz', 'https://x/r.json.gz?sig=1'], False)
+== extract_links_from_text: name sets PRIORITY only (dropped only past the cap)
+  cap 100: ['https://x/in-network-rates.json.gz', 'https://x/other.json.gz', 'https://x/allowed-amounts.json.gz', 'https://x/rx_formulary.json.gz', 'https://x/drug-free-workplace_in-network.json.gz']
+  cap 2  : ['https://x/in-network-rates.json.gz', 'https://x/other.json.gz']

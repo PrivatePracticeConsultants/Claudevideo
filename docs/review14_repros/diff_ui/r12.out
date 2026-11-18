@@ -1,0 +1,4 @@
+backup OK: backup OK: 6 files match their checksums; recorded 320 rate rows
+disk_usage was asked about: ['/tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/diff_ui/t12_g2e9ls2m/bk'] (never the store drive)
+write_lock spans while backing up (s): [0.29]
+manifest linked_parts: {'rates': 320, 'files_done': 4} — parts were COPIED into the store drive's .backup_snapshot under the lock

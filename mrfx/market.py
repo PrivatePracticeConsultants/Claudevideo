@@ -25,8 +25,9 @@ proof of collection, and absence in an MRF is not proof of non-coverage.
 
 from __future__ import annotations
 
+from .rounding import half_up
 from .benchmark import (BASIS_NOTE, BenchmarkError, _market_where,
-                        _rates_relation, month_label, normalize_market)
+                        _rates_relation, anchor_state, month_label, normalize_market)
 from .catalog import code_info
 from .store import Store
 
@@ -65,7 +66,15 @@ def _code_scope(code, market):
 
 def geographic_rates(store: Store, code: str, market: dict, limit: int = 60) -> dict:
     """Median negotiated rate for one code, ranked across states — territory
-    intelligence for prospecting and for advising a multi-site client."""
+    intelligence for prospecting and for advising a multi-site client.
+
+    The state IS this view's dimension: a State (or city) picked elsewhere on
+    the tab only highlights its row. Applied as a filter it kept that state's
+    practices and then listed every OTHER state of theirs — "TX $28.84 · 123
+    practices" under State AL (TX is $26.17 across 1,874) — and the
+    "National median" was Alabama's (review 10 item 2.3)."""
+    selected = (market or {}).get("state")
+    market = {k: v for k, v in (market or {}).items() if k not in ("state", "city")}
     code, m, where, params, rel = _code_scope(code, market)
     sql = f"""
     WITH base AS (
@@ -75,20 +84,26 @@ def geographic_rates(store: Store, code: str, market: dict, limit: int = 60) -> 
         WHERE {where} AND td.states IS NOT NULL AND len(td.states) > 0
         GROUP BY t.tin_value
     ),
-    exploded AS (SELECT unnest(states) AS state, tin_value, rate FROM base)
+    exploded AS (SELECT unnest(states) AS state, tin_value, rate FROM base),
+    -- only real states: an NPI filed under a military mail code (AE, AP, AA)
+    -- or a territory the app does not list was ranked as a "state" (review 12
+    -- item 4.1a; the state list already keeps STATE_CODES only)
+    exploded_st AS (SELECT * FROM exploded
+                    WHERE state IN (SELECT unnest(?::VARCHAR[])))
     SELECT state,
            count(DISTINCT tin_value)            AS n_practices,
            round(median(rate), 2)               AS median_rate,
            round(quantile_cont(rate, .25), 2)   AS p25,
            round(quantile_cont(rate, .75), 2)   AS p75
-    FROM exploded
+    FROM exploded_st
     GROUP BY state
     HAVING count(DISTINCT tin_value) >= ?
     ORDER BY median_rate DESC, state
     LIMIT ?
     """
     with store.connect() as con:
-        rows = _dicts(con.execute(sql, [*params, _MIN_CELL, limit]))
+        from .states import STATE_CODES
+        rows = _dicts(con.execute(sql, [*params, sorted(STATE_CODES), _MIN_CELL, limit]))
         # one national reference median (same per-TIN grain, ignoring geography)
         nat = con.execute(
             f"""WITH base AS (SELECT t.tin_value, median(t.negotiated_rate) AS rate
@@ -100,6 +115,7 @@ def geographic_rates(store: Store, code: str, market: dict, limit: int = 60) -> 
         "as_of": month_label(m["month"]), "min_practices": _MIN_CELL,
         "national_median": nat[0], "national_practices": nat[1],
         "states": rows,
+        "selected_state": (str(selected).strip().upper() or None) if selected else None,
         "basis_note": BASIS_NOTE, "geo_note": _GEO_NOTE,
     }
 
@@ -130,18 +146,24 @@ def negotiability(store: Store, code: str, market: dict) -> dict:
            round(max(rate), 2)                  AS max_rate
     FROM base GROUP BY payer
     HAVING count(DISTINCT tin_value) >= ?
-    ORDER BY (quantile_cont(rate, .90) - quantile_cont(rate, .10)) DESC, payer
+    -- ranked by the % spread it is labelled with (spread_pct), not dollars:
+    -- a $10 spread on a $40 code is more negotiation than $12 on $150 (audit 8 P3)
+    ORDER BY (quantile_cont(rate, .90) - quantile_cont(rate, .10))
+             / nullif(quantile_cont(rate, .50), 0) DESC NULLS LAST, payer
     """
     with store.connect() as con:
         rows = _dicts(con.execute(sql, [*params, _MIN_CELL]))
     for r in rows:
         p10, p50, p90 = r["p10"], r["p50"], r["p90"]
-        r["spread_pct"] = round(100 * (p90 - p10) / p50) if p50 else None
-        r["spread_ratio"] = round(p90 / p10, 2) if p10 else None
+        r["spread_pct"] = half_up(100 * (p90 - p10) / p50) if p50 else None
+        r["spread_ratio"] = half_up(p90 / p10, 2) if p10 else None
         sp = r["spread_pct"]
         r["negotiability"] = (
             "wide" if sp is not None and sp >= 25 else
             "moderate" if sp is not None and sp >= 10 else "tight")
+    # ordered by the spread PRINTED beside each row (from the rounded p10 /
+    # p50 / p90), so adjacent rows never look inverted by a point (4.10)
+    rows.sort(key=lambda r: (r["spread_pct"] is None, -(r["spread_pct"] or 0), r["payer"]))
     return {
         "code": code, "description": code_info(code)[0],
         "as_of": month_label(m["month"]), "min_practices": _MIN_CELL,
@@ -155,7 +177,8 @@ def negotiability(store: Store, code: str, market: dict) -> dict:
 
 def medicare_index(store: Store, code: str, market: dict) -> dict:
     """The market's and each payer's median rate for one code, as a percent of
-    Medicare (the median non-facility MPFS rate across loaded localities). The
+    Medicare (the non-facility MPFS rate of ONE locality: the market state's
+    anchor, store.medicare_anchor — not a median across localities). The
     domain's headline anchor. Absent an MPFS load, returns the dollar rates with
     pct_medicare = null and mpfs_loaded = null."""
     code, m, where, params, rel = _code_scope(code, market)
@@ -182,21 +205,22 @@ def medicare_index(store: Store, code: str, market: dict) -> dict:
     with store.connect() as con:
         rows = _dicts(con.execute(per_payer, [*params, _MIN_CELL]))
         mkt = con.execute(market_sql, params).fetchone()
-        # median across whatever localities were loaded — a single national
-        # anchor, NOT locality/GPCI-matched to the practice (stated in the note)
-        base = con.execute(
-            "SELECT median(non_facility_rate) FROM mpfs WHERE code = ?", [code]).fetchone()[0]
+
+    # the market state's Medicare locality (store.medicare_anchor) — refused,
+    # not borrowed, when no loaded locality matches
+    anchor = store.medicare_anchor(anchor_state(store, m))
+    base = anchor["rates"].get(code)
 
     def pct(v):
-        return round(100 * v / base) if base and v else None
+        return half_up(100 * v / base) if base and v else None
 
     for r in rows:
         r["pct_medicare"] = pct(r["median_rate"])
     return {
         "code": code, "description": code_info(code)[0],
         "as_of": month_label(m["month"]), "min_practices": _MIN_CELL,
-        "mpfs_rate": round(base, 2) if base else None,
-        "mpfs_loaded": store.mpfs_loaded(),
+        "mpfs_rate": half_up(base, 2) if base else None,
+        "mpfs_loaded": anchor["label"],
         "market_median": mkt[0], "market_p25": mkt[1], "market_p75": mkt[2],
         # surface the backing count so a "market median" from 1-4 practices reads
         # as thin, not authoritative (the per-payer rows already gate on _MIN_CELL)
@@ -205,11 +229,11 @@ def medicare_index(store: Store, code: str, market: dict) -> dict:
         "market_p25_pct_medicare": pct(mkt[1]),
         "market_p75_pct_medicare": pct(mkt[2]),
         "payers": rows, "basis_note": BASIS_NOTE,
-        "medicare_note": (
-            "% of Medicare uses the median non-facility MPFS rate across the "
-            "localities you loaded — one national anchor applied to every rate, "
-            "NOT matched to each practice's GPCI locality. Load a single-locality "
-            "MPFS file to anchor to that region."),
+        "medicare_note": (anchor["refusal"] or (
+            f"% of Medicare uses the non-facility rate of {anchor['label']} — the "
+            "locality loaded for this market's state; one locality per state, not "
+            "each practice's own GPCI locality within the state.")
+            if anchor["label"] or anchor["refusal"] else ""),
     }
 
 

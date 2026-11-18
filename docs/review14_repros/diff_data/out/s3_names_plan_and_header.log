@@ -1,0 +1,10 @@
+S3a names plan part-way: names 1/17 | rollups_stale(): True | reason: an analytics build is part-way (1 of 17 parts saved) — it continues where it stopped
+   incremental refused: an analytics build is part-way — it continues as a full build -> rebuild_rollups() (FULL)
+   plans created by the catch-up (kind, slices, spine slices): [('full', 287, 269)]
+S3b header: Analytics cover 0 of 4 payers (8 of 8 files). A full analytics build is part-way (4 of 55 parts saved) — it continues when the queue is idle
+   /api/payers covered: ['Beta', "O'Neil Health", 'Zeta']
+   /api/rates payer='Alpha': total=492
+   /api/rates payer='Beta': total=489
+   /api/rates payer="O'Neil Health": total=494
+   /api/rates payer='Zeta': total=182
+   document sentence: ['Analytics cover 0 of 4 payers (8 of 8 files). Every number here comes from those; the files loaded since are not in the analytics yet, so payers, practices and months they add are missing from this document.']

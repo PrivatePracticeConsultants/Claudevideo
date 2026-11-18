@@ -1,0 +1,6 @@
+Stop pressed while 'Printing the PDF': {'stopped': True}
+stopped PDF answered (code, seconds since its start, type): (409, 18.7, 'application/json') | seconds after Stop: 18.4
+a second PDF requested at the same moment answered (code, s): (200, 38.0)
+API error on /api/report/pitch
+playwright._impl._errors.Error: Page.pdf: Protocol error (Page.printToPDF): Printing failed
+150k-row report as PDF: HTTP 500 after 28 s: {"error":"Something went wrong answering this (Error). The details are in the server log."}

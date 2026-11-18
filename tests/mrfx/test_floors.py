@@ -228,7 +228,7 @@ def test_the_pitch_report_carries_the_trend_column_when_there_is_history(cfg, st
                           {"month": "2026-06", "state": "MO", "therapy_only": False})
     html = render_pitch_report(cfg, store, b)
     assert "Your trend" in html and "<svg" in html
-    assert "not interpolated" in html or "is a gap, not a flat segment" in html
+    assert "follow the SAME contracts in every month" in html
 
 
 # ------------------------------------------------- NPPES weekly incrementals

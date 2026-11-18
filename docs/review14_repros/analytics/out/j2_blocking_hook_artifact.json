@@ -1,0 +1,155 @@
+{
+ "names_hold_at": 64.9,
+ "kilo_at": 67.9,
+ "lima_at": 67.9,
+ "both_done_at": 72.1,
+ "all_covered_at": 125.5,
+ "false_current": [],
+ "timeline": [
+  {
+   "dt": 0.0,
+   "state": "current",
+   "files": "7/7",
+   "payers": "6/6",
+   "sentence": "",
+   "err": null
+  },
+  {
+   "dt": 64.1,
+   "state": "building",
+   "files": "7/7",
+   "payers": "6/6",
+   "sentence": "Analytics cover 6 of 6 payers (7 of 7 files). Adding the newly loaded files to the analytics",
+   "err": null
+  },
+  {
+   "dt": 68.6,
+   "state": "building",
+   "files": "7/8",
+   "payers": "6/7",
+   "sentence": "Analytics cover 6 of 7 payers (7 of 8 files). Refreshing practice names and places",
+   "err": null
+  },
+  {
+   "dt": 72.1,
+   "state": "building",
+   "files": "7/9",
+   "payers": "6/8",
+   "sentence": "Analytics cover 6 of 8 payers (7 of 9 files). Refreshing practice names and places",
+   "err": null
+  },
+  {
+   "dt": 125.1,
+   "state": "current",
+   "files": "9/9",
+   "payers": "8/8",
+   "sentence": "",
+   "err": null
+  }
+ ],
+ "events": [
+  [
+   64.0,
+   "dir_enter",
+   null
+  ],
+  [
+   64.2,
+   "full_enter",
+   null
+  ],
+  [
+   64.7,
+   "names_hold",
+   null
+  ],
+  [
+   69.4,
+   "incr_enter",
+   null
+  ],
+  [
+   124.7,
+   "slice_done",
+   null
+  ],
+  [
+   124.7,
+   "full_exit",
+   60.55047589300011
+  ],
+  [
+   124.8,
+   "delta_enter",
+   null
+  ],
+  [
+   124.9,
+   "delta_exit",
+   null
+  ],
+  [
+   124.9,
+   "incr_exit",
+   0.1820787670003483
+  ],
+  [
+   126.1,
+   "incr_enter",
+   null
+  ],
+  [
+   126.2,
+   "incr_exit",
+   0.0
+  ]
+ ],
+ "log": [
+  "08:54:27 INFO    mrfx.cli: opening the store at /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/J2/store \u2026",
+  "08:54:27 INFO    mrfx.store: analytics memory budget: 2 GB (1.9 GiB, as DuckDB reports it) \u2014 set by duckdb_memory_gb; raise duckdb_memory_gb in config/mrfx.yaml if rebuilds run out",
+  "08:54:27 INFO    mrfx.cli: watching /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/J2/inbox",
+  "  store: /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/J2/store  (7 file(s) ingested)",
+  "  inbox: /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/J2/inbox  (drop .json / .json.gz / .zip here)",
+  "  if the app ever freezes: open /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/J2/store/diagnostics/stacks_latest.txt",
+  "08:55:32 INFO    mrfx.enrich: scoped name refresh unavailable (12,718 of 12,367 TINs affected \u2014 the full directory rebuild is cheaper) \u2014 full directory rebuild",
+  "08:55:32 INFO    mrfx.store: analytics build: planning (counting rows per payer and code)\u2026",
+  "08:55:32 INFO    mrfx.store: analytics build planned: 1 slice(s) over 6,768,352 rows (0 payer(s))",
+  "08:56:33 INFO    mrfx.store: analytics build finished in 61s",
+  "08:56:33 INFO    mrfx.store: analytics update: 2 new file(s), 0 queued slice(s) \u2014 recomputing 2 payer slice(s) instead of the whole store",
+  "08:56:33 INFO    mrfx.store: analytics update finished in 0s (payer slice, not a full rebuild)",
+  "08:56:34 INFO    mrfx.fetch: updating analytics rollups (1 newly ingested file(s))...",
+  "  warnings.warn('resource_tracker: %r: %s' % (name, e))"
+ ],
+ "truth": {
+  "done_files": 9,
+  "raw_rows": 6769192,
+  "spine_rows": 445756,
+  "expected_rows": 445756,
+  "missing": 0,
+  "extra": 0,
+  "files_fully_in_spine": 9,
+  "files_rowcount_mismatch": [],
+  "spine_payers": [
+   "Blue Cross Blue Shield of North Dakota",
+   "Blue Cross Blue Shield of Wyoming",
+   "Highmark WV",
+   "Kilo Benefit Trust",
+   "Lima Care",
+   "Moda",
+   "Security Health Plan of Wisconsin, Inc,",
+   "Tufts Health Public Plans, Inc."
+  ],
+  "raw_payers": [
+   "Blue Cross Blue Shield of North Dakota",
+   "Blue Cross Blue Shield of Wyoming",
+   "Highmark WV",
+   "Kilo Benefit Trust",
+   "Lima Care",
+   "Moda",
+   "Security Health Plan of Wisconsin, Inc,",
+   "Tufts Health Public Plans, Inc."
+  ],
+  "hash_spine": null,
+  "hash_dir": null
+ }
+}

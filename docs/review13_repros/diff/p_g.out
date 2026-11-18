@@ -1,0 +1,7 @@
+##### G
+loaded: [('2026-05',)] loaded_size: [(656,)]
+requests: [('/index.json', 200, None), ('/files/r.json.gz', 200, 'bytes=0-0')]
+   (1, 'done', 'toc', None)
+   (2, 'done', 'in_network', None)
+file months now: [('2026-05',)]
+VERDICT: LEFT AT THE OLD MONTH — never re-downloaded, no note on the row

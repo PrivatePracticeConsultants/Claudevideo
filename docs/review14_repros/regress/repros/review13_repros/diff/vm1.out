@@ -1,0 +1,96 @@
+directory: [('073000001', ['MO'], 'MO'), ('073000002', ['MO'], 'MO'), ('073000003', ['MO'], 'MO'), ('073000004', ['MO'], 'MO'), ('073000005', ['MO'], 'MO'), ('073000006', ['MO'], 'MO'), ('073000007', ['KS', 'MO'], 'KS'), ('073000009', ['MO'], 'MO'), ('073000010', ['KS'], 'KS'), ('073000011', ['MO'], 'MO')]
+spine disciplines: [('OT', 4), ('PT', 75), ('unspecified', 4)]
+npi-slot rows: [(4,)]
+  [ok] MIN_PRACTICES == market._MIN_CELL: got 5
+
+== population (no subject) ==
+  [ok] row order: got ['Payer A', 'Payer B', 'Payer C', 'All payers']
+  [ok] A: got (7, 140.0, 140.0, 110.0, 170.0, 1, False)
+  [ok] B: got (6, 166.67, 170.0, 145.0, 195.0, 1, False)
+  [ok] C suppressed: got (None, None, None, None, None, 0, True)
+  [ok] All: got (7, 141.43, 150.0, 105.0, 185.0, None, False)
+  [ok] incomplete total: got 2
+
+== subject T3 (one TIN) ==
+  [ok] T3 A: got (120.0, 33, 7, 'Q2', -20.0, -14.3, -20.0, -14.3)
+  [ok] T3 B: got (140.0, 20, 6, 'Q1', -26.67, -16.0, -30.0, -17.6)
+  [ok] T3 C: got None
+  [ok] T3 All: got (130.0, 33, 7, 'Q2', -11.43, -8.1, -20.0, -13.3)
+  [ok] market unchanged with subject: got {'Payer A': (7, 140.0, 140.0, 110.0, 170.0, 1, False), 'Payer B': (6, 166.67, 170.0, 145.0, 195.0, 1, False), 'Payer C': (None, None, None, None, None, 0, True), 'All payers': (7, 141.43, 150.0, 105.0, 185.0, None, False)}
+
+== subject T4 (value == A median, == All P25? no: 150) ==
+  [ok] T4 A (v == median): got (140.0, 50, 7, 'Q3', 0.0, 0.0, 0.0, 0.0)
+
+== subject DUO REHAB (T5 + T6, both in MO) ==
+  [ok] DUO tins: got 2
+  [ok] DUO A: got (170.0, 80, 6, 'Q4', 30.0, 21.4, 30.0, 21.4)
+  [ok] DUO B: got (200.0, 100, 5, 'Q4', 33.33, 20.0, 30.0, 17.6)
+  [ok] DUO All: got (185.0, 80, 6, 'Q4', 43.57, 30.8, 35.0, 23.3)
+  [ok] DUO: market practices still count T5 and T6 separately: got 7
+
+== subject SPAN REHAB (T4 in MO + T10 in KS) ==
+  [ok] SPAN tins: got 2
+  [ok] SPAN A: got (210.0, 100, 7, 'Q4', 70.0, 50.0, 70.0, 50.0)
+  [ok] SPAN B: got (160.0, 40, 6, 'Q2', -6.67, -4.0, -10.0, -5.9)
+
+== subject T10 (KS only; not in the market) ==
+  [ok] T10 A (ranked among 7 + itself): got (280.0, 100, 8, 'Q4', 140.0, 100.0, 140.0, 100.0)
+  [ok] T10 B: got None
+  [ok] T10 All: got (280.0, 100, 8, 'Q4')
+
+== payers filter ==
+  [ok] payers rows: got ['Payer B', 'All payers']
+  [ok] payers All == B: got (6, 166.67, 170.0, 145.0, 195.0)
+  [ok] payers subject All == B value: got 140.0
+
+== pinned month 2026-05 ==
+  [ok] pinned rows: got ['Payer A', 'All payers']
+  [ok] pinned A: got (7, 134.29, 140.0, 110.0, 170.0, 1, False)
+  [ok] pinned T1 value (May bare $10): got 40.0
+  [ok] pinned as_of_rule: got 'only the 2026-05 files'
+
+== refusals ==
+  [ok] refusal {'discipline': 'PT'}: got (422, True)
+  [ok] refusal {'state': 'MO'}: got (422, True)
+  [ok] refusal {'state': 'KS', 'discipline': 'PT'}: got (422, True)
+  [ok] refusal {'state': 'MO', 'discipline': 'SLP'}: got (422, True)
+  custom unknown code -> 422 99999 is not a therapy code this app knows — check the code
+
+== CSV == JSON == HTML (DUO case, negatives + a no-visit payer) ==
+  [ok] csv stats Payer A: got ('140.00', '140.00', '110.00', '170.00', '7')
+  [ok] html stats Payer A: got ('$140.00', '$140.00', '$110.00', '$170.00', '7')
+  [ok] csv subject Payer A: got ('170.00', '80', 'Q4', '30.00', '21.4')
+  [ok] html subject Payer A: got ('$170.00', 'p80 of 6', 'Q4')
+  [ok] csv stats Payer B: got ('166.67', '170.00', '145.00', '195.00', '6')
+  [ok] html stats Payer B: got ('$166.67', '$170.00', '$145.00', '$195.00', '6')
+  [ok] csv subject Payer B: got ('200.00', '100', 'Q4', '33.33', '20.0')
+  [ok] html subject Payer B: got ('$200.00', 'p100 of 5', 'Q4')
+  [ok] csv/html suppressed Payer C: got ('yes', True)
+  [ok] csv/html no visit Payer C: got ('', 'no complete visit')
+  [ok] csv stats All payers: got ('141.43', '150.00', '105.00', '185.00', '7')
+  [ok] html stats All payers: got ('$141.43', '$150.00', '$105.00', '$185.00', '7')
+  [ok] csv subject All payers: got ('185.00', '80', 'Q4', '43.57', '30.8')
+  [ok] html subject All payers: got ('$185.00', 'p80 of 6', 'Q4')
+  [ok] html negative vs mean: got True
+  html T3 row sample: <tr><td>Payer A</td><td class='num'>7</td><td class='num'>$140.00</td><td class='num'>$140.00</td><td class='num'>$110.00</td><td class='num'>$170.00</td><td class='num'>1</td><td class='num'>$120.00</td><td class='num'>p33 of 7</td><td class='num'>Q2</td><td class='num'>-$20.00 (-14.3%)</td><td class='num'>-$20.00 (-14.3%)</td></tr>
+
+== determinism & caching ==
+  [ok] two calls identical: got True
+  [ok] identical after rollup regeneration: got True
+  [ok] entity edit invalidates the cache (DUO A): got (180.0, 100, 5, 'Q4')
+  [ok] entity edit: subject_tins: got 3
+  [ok] spine change rebuilds the table (T3 A now 200): got 200.0
+  [ok] spine change: A stats: got (7, 151.43, 160.0)
+
+== _position boundaries (pure function) ==
+  [ok] quartile v=99.99: got 'Q1'
+  [ok] quartile v=100.0: got 'Q2'
+  [ok] quartile v=119.99: got 'Q2'
+  [ok] quartile v=120.0: got 'Q3'
+  [ok] quartile v=139.99: got 'Q3'
+  [ok] quartile v=140.0: got 'Q4'
+  [ok] p25 == median, v == both -> Q3: got 'Q3'
+  [ok] ties: 0 below + half of 3 tied over 4 others = 37.5 -> 38: got 38
+  [ok] no others -> percentile None: got None
+
+FAILS: none

@@ -1,0 +1,5 @@
+database file: 0.33 GB
+backup took 10.1 s; write_lock held by it for [8.29, 0.07] s
+status-write latency: before median 0.045 s; during backup max 8.32 s
+dashboard read latency: before median 0.037 s; during backup median 0.024 s, max 0.19 s
+zip: 0.33 GB; backup OK: 16 files match their checksums; recorded 1,372,066 rate rows

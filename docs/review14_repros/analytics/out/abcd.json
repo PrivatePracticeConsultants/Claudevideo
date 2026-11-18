@@ -1,0 +1,617 @@
+{
+ "phases": [
+  {
+   "label": "A",
+   "done_at": 2.9,
+   "covered_at": 3.8,
+   "done_to_covered_s": 0.9,
+   "analytics": {
+    "state": "current",
+    "reason": "",
+    "pct": null,
+    "eta_text": "",
+    "covered_files": 2,
+    "done_files": 2,
+    "covered_payers": 2,
+    "loaded_payers": 2,
+    "covered_rows": 2200,
+    "loaded_rows": 2200,
+    "sentence": ""
+   }
+  },
+  {
+   "label": "B",
+   "done_at": 1.1,
+   "covered_at": 1.1,
+   "done_to_covered_s": 0.0,
+   "analytics": {
+    "state": "current",
+    "reason": "",
+    "pct": null,
+    "eta_text": "",
+    "covered_files": 3,
+    "done_files": 3,
+    "covered_payers": 3,
+    "loaded_payers": 3,
+    "covered_rows": 3000,
+    "loaded_rows": 3000,
+    "sentence": ""
+   }
+  },
+  {
+   "label": "C",
+   "done_at": 0.8,
+   "covered_at": 1.4,
+   "done_to_covered_s": 0.7,
+   "analytics": {
+    "state": "current",
+    "reason": "",
+    "pct": null,
+    "eta_text": "",
+    "covered_files": 4,
+    "done_files": 4,
+    "covered_payers": 3,
+    "loaded_payers": 3,
+    "covered_rows": 3600,
+    "loaded_rows": 3600,
+    "sentence": ""
+   }
+  },
+  {
+   "label": "D-new-payer",
+   "done_at": 1.7,
+   "covered_at": 1.7,
+   "done_to_covered_s": 0.0,
+   "analytics": {
+    "state": "current",
+    "reason": "",
+    "pct": null,
+    "eta_text": "",
+    "covered_files": 5,
+    "done_files": 5,
+    "covered_payers": 4,
+    "loaded_payers": 4,
+    "covered_rows": 4080,
+    "loaded_rows": 4080,
+    "sentence": ""
+   }
+  },
+  {
+   "label": "D-existing-payer",
+   "done_at": 2.3,
+   "covered_at": 2.3,
+   "done_to_covered_s": 0.0,
+   "analytics": {
+    "state": "current",
+    "reason": "",
+    "pct": null,
+    "eta_text": "",
+    "covered_files": 6,
+    "done_files": 6,
+    "covered_payers": 4,
+    "loaded_payers": 4,
+    "covered_rows": 4480,
+    "loaded_rows": 4480,
+    "sentence": ""
+   }
+  }
+ ],
+ "ready_s": 1.298809289932251,
+ "before_A": {
+  "t": 1794470965.233707,
+  "analytics": {
+   "state": "current",
+   "reason": "",
+   "pct": null,
+   "eta_text": "",
+   "covered_files": 0,
+   "done_files": 0,
+   "covered_payers": 0,
+   "loaded_payers": 0,
+   "covered_rows": 0,
+   "loaded_rows": 0,
+   "sentence": ""
+  },
+  "data_generation": 0,
+  "payers": [],
+  "covered": [],
+  "rates_total": 0,
+  "code": {},
+  "code_ranked_n": 0,
+  "code_payers": [],
+  "took": 0.24
+ },
+ "add_A": {
+  "added": 2,
+  "skipped": 0,
+  "invalid": 0
+ },
+ "after_A": {
+  "t": 1794470969.2892532,
+  "analytics": {
+   "state": "current",
+   "reason": "",
+   "pct": null,
+   "eta_text": "",
+   "covered_files": 2,
+   "done_files": 2,
+   "covered_payers": 2,
+   "loaded_payers": 2,
+   "covered_rows": 2200,
+   "loaded_rows": 2200,
+   "sentence": ""
+  },
+  "data_generation": 5,
+  "payers": [
+   "Alpha Health Plan",
+   "Bravo Insurance Co"
+  ],
+  "covered": [
+   "Alpha Health Plan",
+   "Bravo Insurance Co"
+  ],
+  "rates_total": 2200,
+  "rates_by_payer": {
+   "Alpha Health Plan": 1200,
+   "Bravo Insurance Co": 1000,
+   "Charlie Benefits": 0
+  },
+  "code": {},
+  "code_ranked_n": 500,
+  "code_payers": [],
+  "took": 0.22
+ },
+ "before_B": {
+  "t": 1794470974.509871,
+  "analytics": {
+   "state": "current",
+   "reason": "",
+   "pct": null,
+   "eta_text": "",
+   "covered_files": 2,
+   "done_files": 2,
+   "covered_payers": 2,
+   "loaded_payers": 2,
+   "covered_rows": 2200,
+   "loaded_rows": 2200,
+   "sentence": ""
+  },
+  "data_generation": 5,
+  "payers": [
+   "Alpha Health Plan",
+   "Bravo Insurance Co"
+  ],
+  "covered": [
+   "Alpha Health Plan",
+   "Bravo Insurance Co"
+  ],
+  "rates_total": 2200,
+  "rates_by_payer": {
+   "Charlie Benefits": 0
+  },
+  "code": {},
+  "code_ranked_n": 500,
+  "code_payers": [],
+  "took": 0.12
+ },
+ "add_B": {
+  "added": 1,
+  "skipped": 0,
+  "invalid": 0
+ },
+ "after_B": {
+  "t": 1794470975.7203035,
+  "analytics": {
+   "state": "current",
+   "reason": "",
+   "pct": null,
+   "eta_text": "",
+   "covered_files": 3,
+   "done_files": 3,
+   "covered_payers": 3,
+   "loaded_payers": 3,
+   "covered_rows": 3000,
+   "loaded_rows": 3000,
+   "sentence": ""
+  },
+  "data_generation": 6,
+  "payers": [
+   "Alpha Health Plan",
+   "Bravo Insurance Co",
+   "Charlie Benefits"
+  ],
+  "covered": [
+   "Alpha Health Plan",
+   "Bravo Insurance Co",
+   "Charlie Benefits"
+  ],
+  "rates_total": 3000,
+  "rates_by_payer": {
+   "Charlie Benefits": 800
+  },
+  "code": {},
+  "code_ranked_n": 500,
+  "code_payers": [],
+  "took": 0.17
+ },
+ "before_C": {
+  "t": 1794470980.8908978,
+  "analytics": {
+   "state": "current",
+   "reason": "",
+   "pct": null,
+   "eta_text": "",
+   "covered_files": 3,
+   "done_files": 3,
+   "covered_payers": 3,
+   "loaded_payers": 3,
+   "covered_rows": 3000,
+   "loaded_rows": 3000,
+   "sentence": ""
+  },
+  "data_generation": 6,
+  "payers": [
+   "Alpha Health Plan",
+   "Bravo Insurance Co",
+   "Charlie Benefits"
+  ],
+  "covered": [
+   "Alpha Health Plan",
+   "Bravo Insurance Co",
+   "Charlie Benefits"
+  ],
+  "rates_total": 3000,
+  "rates_by_payer": {
+   "Alpha Health Plan": 1200
+  },
+  "code": {},
+  "code_ranked_n": 500,
+  "code_payers": [],
+  "took": 0.23
+ },
+ "add_C": {
+  "added": 1,
+  "skipped": 0,
+  "invalid": 0
+ },
+ "after_C": {
+  "t": 1794470982.5587878,
+  "analytics": {
+   "state": "current",
+   "reason": "",
+   "pct": null,
+   "eta_text": "",
+   "covered_files": 4,
+   "done_files": 4,
+   "covered_payers": 3,
+   "loaded_payers": 3,
+   "covered_rows": 3600,
+   "loaded_rows": 3600,
+   "sentence": ""
+  },
+  "data_generation": 7,
+  "payers": [
+   "Alpha Health Plan",
+   "Bravo Insurance Co",
+   "Charlie Benefits"
+  ],
+  "covered": [
+   "Alpha Health Plan",
+   "Bravo Insurance Co",
+   "Charlie Benefits"
+  ],
+  "rates_total": 3600,
+  "rates_by_payer": {
+   "Alpha Health Plan": 1800
+  },
+  "code": {},
+  "code_ranked_n": 500,
+  "code_payers": [],
+  "took": 0.14
+ },
+ "before_D1": {
+  "t": 1794470987.7031126,
+  "analytics": {
+   "state": "current",
+   "reason": "",
+   "pct": null,
+   "eta_text": "",
+   "covered_files": 4,
+   "done_files": 4,
+   "covered_payers": 3,
+   "loaded_payers": 3,
+   "covered_rows": 3600,
+   "loaded_rows": 3600,
+   "sentence": ""
+  },
+  "data_generation": 7,
+  "payers": [
+   "Alpha Health Plan",
+   "Bravo Insurance Co",
+   "Charlie Benefits"
+  ],
+  "covered": [
+   "Alpha Health Plan",
+   "Bravo Insurance Co",
+   "Charlie Benefits"
+  ],
+  "rates_total": 3600,
+  "rates_by_payer": {
+   "Delta Care Network": 0
+  },
+  "code": {},
+  "code_ranked_n": 500,
+  "code_payers": [],
+  "took": 0.14
+ },
+ "after_D1": {
+  "t": 1794470989.5656703,
+  "analytics": {
+   "state": "current",
+   "reason": "",
+   "pct": null,
+   "eta_text": "",
+   "covered_files": 5,
+   "done_files": 5,
+   "covered_payers": 4,
+   "loaded_payers": 4,
+   "covered_rows": 4080,
+   "loaded_rows": 4080,
+   "sentence": ""
+  },
+  "data_generation": 8,
+  "payers": [
+   "Alpha Health Plan",
+   "Bravo Insurance Co",
+   "Charlie Benefits",
+   "Delta Care Network"
+  ],
+  "covered": [
+   "Alpha Health Plan",
+   "Bravo Insurance Co",
+   "Charlie Benefits",
+   "Delta Care Network"
+  ],
+  "rates_total": 4080,
+  "rates_by_payer": {
+   "Delta Care Network": 480
+  },
+  "code": {},
+  "code_ranked_n": 500,
+  "code_payers": [],
+  "took": 0.16
+ },
+ "before_D2": {
+  "t": 1794470994.7287588,
+  "analytics": {
+   "state": "current",
+   "reason": "",
+   "pct": null,
+   "eta_text": "",
+   "covered_files": 5,
+   "done_files": 5,
+   "covered_payers": 4,
+   "loaded_payers": 4,
+   "covered_rows": 4080,
+   "loaded_rows": 4080,
+   "sentence": ""
+  },
+  "data_generation": 8,
+  "payers": [
+   "Alpha Health Plan",
+   "Bravo Insurance Co",
+   "Charlie Benefits",
+   "Delta Care Network"
+  ],
+  "covered": [
+   "Alpha Health Plan",
+   "Bravo Insurance Co",
+   "Charlie Benefits",
+   "Delta Care Network"
+  ],
+  "rates_total": 4080,
+  "rates_by_payer": {
+   "Bravo Insurance Co": 1000
+  },
+  "code": {},
+  "code_ranked_n": 500,
+  "code_payers": [],
+  "took": 0.17
+ },
+ "after_D2": {
+  "t": 1794470997.2441986,
+  "analytics": {
+   "state": "current",
+   "reason": "",
+   "pct": null,
+   "eta_text": "",
+   "covered_files": 6,
+   "done_files": 6,
+   "covered_payers": 4,
+   "loaded_payers": 4,
+   "covered_rows": 4480,
+   "loaded_rows": 4480,
+   "sentence": ""
+  },
+  "data_generation": 9,
+  "payers": [
+   "Alpha Health Plan",
+   "Bravo Insurance Co",
+   "Charlie Benefits",
+   "Delta Care Network"
+  ],
+  "covered": [
+   "Alpha Health Plan",
+   "Bravo Insurance Co",
+   "Charlie Benefits",
+   "Delta Care Network"
+  ],
+  "rates_total": 4480,
+  "rates_by_payer": {
+   "Bravo Insurance Co": 1400
+  },
+  "code": {},
+  "code_ranked_n": 500,
+  "code_payers": [],
+  "took": 0.26
+ },
+ "timeline": [
+  {
+   "dt": -0.0,
+   "state": "current",
+   "files": "0/0",
+   "payers": "0/0",
+   "sentence": "",
+   "err": null
+  },
+  {
+   "dt": 3.0,
+   "state": "behind",
+   "files": "0/2",
+   "payers": "0/2",
+   "sentence": "Analytics cover 0 of 2 payers (0 of 2 files). 2 newly loaded files not in the analytics yet \u2014 added when the queue is idle",
+   "err": null
+  },
+  {
+   "dt": 3.5,
+   "state": "building",
+   "files": "0/2",
+   "payers": "2/2",
+   "sentence": "Analytics cover 2 of 2 payers (0 of 2 files). Rolling up the rest \u2014 99 %, less than 2 min left (Bravo Insurance Co \u00b7 92507\u201397530)",
+   "err": null
+  },
+  {
+   "dt": 4.0,
+   "state": "current",
+   "files": "2/2",
+   "payers": "2/2",
+   "sentence": "",
+   "err": null
+  },
+  {
+   "dt": 10.5,
+   "state": "current",
+   "files": "3/3",
+   "payers": "3/3",
+   "sentence": "",
+   "err": null
+  },
+  {
+   "dt": 16.5,
+   "state": "behind",
+   "files": "3/4",
+   "payers": "3/3",
+   "sentence": "Analytics cover 3 of 3 payers (3 of 4 files). 1 newly loaded file not in the analytics yet \u2014 added when the queue is idle",
+   "err": null
+  },
+  {
+   "dt": 17.0,
+   "state": "current",
+   "files": "4/4",
+   "payers": "3/3",
+   "sentence": "",
+   "err": null
+  },
+  {
+   "dt": 24.5,
+   "state": "current",
+   "files": "5/5",
+   "payers": "4/4",
+   "sentence": "",
+   "err": null
+  },
+  {
+   "dt": 32.1,
+   "state": "current",
+   "files": "6/6",
+   "payers": "4/4",
+   "sentence": "",
+   "err": null
+  }
+ ],
+ "covered_vs_payers_mismatch": [],
+ "files_api": {
+  "bravo_2026-10_b.json.gz": {
+   "rows_emitted": 400,
+   "finished_at": "2026-11-12 08:09:57.004516",
+   "payer": "Bravo Insurance Co"
+  },
+  "delta_2026-10_a.json.gz": {
+   "rows_emitted": 480,
+   "finished_at": "2026-11-12 08:09:49.316662",
+   "payer": "Delta Care Network"
+  },
+  "8d73423f_alpha_2026-10_b.json.gz": {
+   "rows_emitted": 600,
+   "finished_at": "2026-11-12 08:09:41.591323",
+   "payer": "Alpha Health Plan"
+  },
+  "43b17c2b_charlie_2026-10_a.json.gz": {
+   "rows_emitted": 800,
+   "finished_at": "2026-11-12 08:09:35.046679",
+   "payer": "Charlie Benefits"
+  },
+  "87b570ca_alpha_2026-10_a.json.gz": {
+   "rows_emitted": 1200,
+   "finished_at": "2026-11-12 08:09:27.088226",
+   "payer": "Alpha Health Plan"
+  },
+  "1e7d86c7_bravo_2026-10_a.json.gz": {
+   "rows_emitted": 1000,
+   "finished_at": "2026-11-12 08:09:26.840719",
+   "payer": "Bravo Insurance Co"
+  }
+ },
+ "truth": {
+  "done_files": 6,
+  "raw_rows": 4480,
+  "spine_rows": 4480,
+  "expected_rows": 4480,
+  "missing": 0,
+  "extra": 0,
+  "files_fully_in_spine": 6,
+  "files_rowcount_mismatch": [],
+  "spine_payers": [
+   "Alpha Health Plan",
+   "Bravo Insurance Co",
+   "Charlie Benefits",
+   "Delta Care Network"
+  ],
+  "raw_payers": [
+   "Alpha Health Plan",
+   "Bravo Insurance Co",
+   "Charlie Benefits",
+   "Delta Care Network"
+  ],
+  "hash_spine": "4480:d6e02592563988382b6e2414e8ff903d",
+  "hash_dir": "1120:18cb3a57016ba0fe16a3ef37d4ab8e17"
+ },
+ "log_rollup": [
+  "08:09:24 INFO    mrfx.cli: opening the store at /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/abcd/store \u2026",
+  "08:09:24 INFO    mrfx.store: analytics memory budget: 2 GB (1.9 GiB, as DuckDB reports it) \u2014 set by duckdb_memory_gb; raise duckdb_memory_gb in config/mrfx.yaml if rebuilds run out",
+  "08:09:24 INFO    mrfx.cli: watching /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/abcd/inbox",
+  "  store: /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/abcd/store  (0 file(s) ingested)",
+  "  inbox: /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/abcd/inbox  (drop .json / .json.gz / .zip here)",
+  "  if the app ever freezes: open /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/analytics/abcd/store/diagnostics/stacks_latest.txt",
+  "08:09:28 INFO    mrfx.fetch: updating analytics rollups (2 newly ingested file(s))...",
+  "08:09:28 INFO    mrfx.fetch: first analytics build of this store \u2014 building them in full",
+  "08:09:28 INFO    mrfx.store: full analytics build: payer by payer, each part saved as it finishes \u2014 the dashboard shows each payer as it lands, and a stop or restart continues where it left off",
+  "08:09:28 INFO    mrfx.store: analytics build: planning (counting rows per payer and code)\u2026",
+  "08:09:28 INFO    mrfx.store: analytics build planned: 4 slice(s) over 2,200 rows (2 payer(s))",
+  "08:09:28 INFO    mrfx.store: analytics build: part 1 of 4 done (practice names and places, 0s)",
+  "08:09:28 INFO    mrfx.store: analytics build: part 2 of 4 done (removing payers no longer loaded, 0s)",
+  "08:09:28 INFO    mrfx.store: analytics build: part 3 of 4 done (Alpha Health Plan \u00b7 92507\u201397530, 0s)",
+  "08:09:28 INFO    mrfx.store: analytics build: part 4 of 4 done (Bravo Insurance Co \u00b7 92507\u201397530, 0s)",
+  "08:09:28 INFO    mrfx.store: analytics build finished in 0s",
+  "08:09:35 INFO    mrfx.fetch: updating analytics rollups (1 newly ingested file(s))...",
+  "08:09:35 INFO    mrfx.store: analytics update: 1 new file(s), 0 queued slice(s) \u2014 recomputing 1 payer slice(s) instead of the whole store",
+  "08:09:35 INFO    mrfx.store: analytics update finished in 0s (payer slice, not a full rebuild)",
+  "08:09:42 INFO    mrfx.fetch: updating analytics rollups (1 newly ingested file(s))...",
+  "08:09:42 INFO    mrfx.store: analytics update: 1 new file(s), 0 queued slice(s) \u2014 recomputing 1 payer slice(s) instead of the whole store",
+  "08:09:42 INFO    mrfx.store: analytics update finished in 0s (payer slice, not a full rebuild)",
+  "08:09:49 INFO    mrfx.store: analytics update: 1 new file(s), 0 queued slice(s) \u2014 recomputing 1 payer slice(s) instead of the whole store",
+  "08:09:49 INFO    mrfx.store: analytics update finished in 0s (payer slice, not a full rebuild)",
+  "08:09:57 INFO    mrfx.store: analytics update: 1 new file(s), 0 queued slice(s) \u2014 recomputing 1 payer slice(s) instead of the whole store",
+  "08:09:57 INFO    mrfx.store: analytics update finished in 0s (payer slice, not a full rebuild)"
+ ]
+}

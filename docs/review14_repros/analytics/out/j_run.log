@@ -1,0 +1,56 @@
+{
+ "kilo_dropped_s": 20.0,
+ "lima_pasted_s": 20.1,
+ "all_current_s": 241.0,
+ "false_current": [],
+ "concurrent_entries": [
+  [
+   22.4,
+   "incr_enter"
+  ],
+  [
+   115.1,
+   "full_enter"
+  ]
+ ],
+ "truth": {
+  "done_files": 12,
+  "raw_rows": 6770992,
+  "spine_rows": 447556,
+  "expected_rows": 447556,
+  "missing": 0,
+  "extra": 0,
+  "files_fully_in_spine": 12,
+  "files_rowcount_mismatch": [],
+  "spine_payers": [
+   "Blue Cross Blue Shield of North Dakota",
+   "Blue Cross Blue Shield of Wyoming",
+   "Highmark WV",
+   "Juliet Health",
+   "Kilo Benefit Trust",
+   "Lima Care",
+   "Moda",
+   "Security Health Plan of Wisconsin, Inc,",
+   "Tufts Health Public Plans, Inc."
+  ],
+  "raw_payers": [
+   "Blue Cross Blue Shield of North Dakota",
+   "Blue Cross Blue Shield of Wyoming",
+   "Highmark WV",
+   "Juliet Health",
+   "Kilo Benefit Trust",
+   "Lima Care",
+   "Moda",
+   "Security Health Plan of Wisconsin, Inc,",
+   "Tufts Health Public Plans, Inc."
+  ],
+  "hash_spine": null,
+  "hash_dir": null
+ },
+ "enrichment_last": {
+  "total": 47565,
+  "enriched": 47565,
+  "named": 46808,
+  "remaining": 0
+ }
+}

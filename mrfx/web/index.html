@@ -2,55 +2,89 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0d12">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>MRF Explorer</title>
 <link rel="stylesheet" href="styles.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect x='1' y='8' width='3' height='7' fill='%232a78d6'/><rect x='6' y='4' width='3' height='11' fill='%232a78d6'/><rect x='11' y='1' width='3' height='14' fill='%232a78d6'/></svg>">
 </head>
 <body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-overview" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="7" height="7" rx="2"/><rect x="13.5" y="3.5" width="7" height="4.5" rx="2"/><rect x="13.5" y="11" width="7" height="9.5" rx="2"/><rect x="3.5" y="13.5" width="7" height="7" rx="2"/></symbol>
+  <symbol id="i-clients" viewBox="0 0 24 24"><circle cx="9" cy="8.5" r="3.5"/><path d="M2.8 19.5c.7-3.2 3.2-5 6.2-5s5.5 1.8 6.2 5"/><path d="M15.5 5.3a3.4 3.4 0 0 1 0 6.4M17.5 14.7c1.9.6 3.2 2.3 3.7 4.8"/></symbol>
+  <symbol id="i-rates" viewBox="0 0 24 24"><path d="M5 3.5h14v17l-3-1.8-2 1.8-2-1.8-2 1.8-2-1.8-3 1.8z"/><path d="M8.5 8.5h7M8.5 12h7M8.5 15.5h4"/></symbol>
+  <symbol id="i-negotiate" viewBox="0 0 24 24"><path d="M12 3.5v17M5 7.5h14"/><path d="M5 7.5 2.5 14a3 3 0 0 0 5 0zM19 7.5 16.5 14a3 3 0 0 0 5 0z"/><path d="M8.5 20.5h7"/></symbol>
+  <symbol id="i-market" viewBox="0 0 24 24"><path d="M3.5 20.5h17"/><rect x="5" y="11" width="3" height="6.5" rx="1"/><rect x="10.5" y="6" width="3" height="11.5" rx="1"/><rect x="16" y="9" width="3" height="8.5" rx="1"/></symbol>
+  <symbol id="i-changes" viewBox="0 0 24 24"><path d="M3.5 16.5 9 11l4 4 7.5-7.5"/><path d="M15 7.5h5.5V13"/></symbol>
+  <symbol id="i-leads" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="1" fill="currentColor"/></symbol>
+  <symbol id="i-medicare" viewBox="0 0 24 24"><path d="M3 12h4l2.5-6 4 12 2.5-6h5"/></symbol>
+  <symbol id="i-files" viewBox="0 0 24 24"><path d="M12 3.5v11M7.5 10l4.5 4.5 4.5-4.5"/><path d="M4 15.5v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></symbol>
+  <symbol id="i-sources" viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="7.5" ry="2.8"/><path d="M4.5 6v6c0 1.6 3.4 2.8 7.5 2.8s7.5-1.2 7.5-2.8V6M4.5 12v6c0 1.6 3.4 2.8 7.5 2.8s7.5-1.2 7.5-2.8v-6"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></symbol>
+  <symbol id="i-chev-r" viewBox="0 0 24 24"><path d="m9.5 6 6 6-6 6"/></symbol>
+  <symbol id="i-chev-d" viewBox="0 0 24 24"><path d="m6 9.5 6 6 6-6"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M7 7l10 10M17 7 7 17"/></symbol>
+  <symbol id="i-filter" viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 19.5h14"/></symbol>
+  <symbol id="i-print" viewBox="0 0 24 24"><path d="M7 9V3.5h10V9"/><rect x="3.5" y="9" width="17" height="7.5" rx="2"/><path d="M7 14h10v6.5H7z"/></symbol>
+  <symbol id="i-run" viewBox="0 0 24 24"><path d="M7.5 5v14l11-7z"/></symbol>
+  <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5.5" cy="12" r="1.3" fill="currentColor"/><circle cx="12" cy="12" r="1.3" fill="currentColor"/><circle cx="18.5" cy="12" r="1.3" fill="currentColor"/></symbol>
+  <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3.5 21.5 20h-19z"/><path d="M12 10v4.5M12 17.3v.2"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5.5M12 7.8v.2"/></symbol>
+  <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3L19.5 9"/><path d="M19.5 4v5h-5"/></symbol>
+  <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></symbol>
+  <symbol id="i-logo" viewBox="0 0 24 24"><path d="M4 18V6l5 7 3-4 3 4 5-7v12" stroke-width="2.2"/></symbol>
+</svg>
 
 <aside id="side">
   <div class="brand">
-    <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1" y="8" width="3" height="7" rx="1"/><rect x="6" y="4" width="3" height="11" rx="1"/><rect x="11" y="1" width="3" height="14" rx="1"/></svg>
-    MRF <span>Explorer</span>
+    <span class="brand-mark"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#i-logo"/></svg></span>
+    <span class="brand-name">MRF Explorer <span>· rates</span></span>
+    <button id="side-close" class="btn" type="button" aria-label="Close menu"><svg class="icon"><use href="#i-x"/></svg></button>
   </div>
   <nav>
     <div class="navgroup">
       <span class="navlabel">Practice</span>
-      <button data-view="overview">Overview</button>
-      <button data-view="clients">Clients</button>
+      <button data-view="overview" title="Overview"><svg class="icon"><use href="#i-overview"/></svg><span class="nl">Overview</span></button>
+      <button data-view="clients" title="Clients"><svg class="icon"><use href="#i-clients"/></svg><span class="nl">Clients</span></button>
     </div>
     <div class="navgroup">
       <span class="navlabel">Rates</span>
-      <button data-view="explorer" class="active">Explorer</button>
-      <button data-view="cpt">Code comparison</button>
-      <button data-view="markets">Markets</button>
-      <button data-view="changes">Rate changes</button>
-    </div>
-    <div class="navgroup">
-      <span class="navlabel">Consulting</span>
-      <button data-view="benchmark">Benchmark</button>
-      <button data-view="negotiate">Negotiate</button>
-      <button data-view="ratecard">Rate card</button>
+      <button data-view="ratecard" data-group="myrates" title="My rates"><svg class="icon"><use href="#i-rates"/></svg><span class="nl">My rates</span></button>
+      <button data-view="negotiate" title="Negotiate"><svg class="icon"><use href="#i-negotiate"/></svg><span class="nl">Negotiate</span></button>
+      <button data-view="explorer" data-group="market" class="active" title="Market rates"><svg class="icon"><use href="#i-market"/></svg><span class="nl">Market rates</span></button>
+      <button data-view="changes" title="Rate changes"><svg class="icon"><use href="#i-changes"/></svg><span class="nl">Rate changes</span></button>
     </div>
     <div class="navgroup">
       <span class="navlabel">Growth</span>
-      <button data-view="leads">Leads</button>
-      <button data-view="medicare">Medicare</button>
-      <button data-view="roster">Payer roster</button>
+      <button data-view="leads" title="Leads"><svg class="icon"><use href="#i-leads"/></svg><span class="nl">Leads</span></button>
+      <button data-view="medicare" title="Medicare"><svg class="icon"><use href="#i-medicare"/></svg><span class="nl">Medicare</span></button>
     </div>
     <div class="navgroup">
       <span class="navlabel">Data</span>
-      <button data-view="files">Files &amp; imports</button>
-      <button data-view="sources">Sources</button>
+      <button data-view="files" title="Files &amp; imports"><svg class="icon"><use href="#i-files"/></svg><span class="nl">Files &amp; imports</span></button>
+      <button data-view="sources" title="Sources"><svg class="icon"><use href="#i-sources"/></svg><span class="nl">Sources</span></button>
     </div>
   </nav>
+  <div class="side-foot">Your data stays on this computer.</div>
 </aside>
 
 <div id="shell">
 <header>
-  <div id="topbar-title">Explorer</div>
+  <div id="topbar-title">Market rates — Browse rates</div>
   <span class="topbar-spacer"></span>
+  <div id="find-box" title="Type a practice name, a 9-digit tax ID or a 10-digit NPI, then Enter: its rates open on the right">
+    <input type="search" id="find-practice" list="find-list" placeholder="Find a practice — name, tax ID or NPI" autocomplete="off" aria-label="Find a practice">
+    <datalist id="find-list"></datalist>
+    <span id="find-msg" class="muted"></span>
+  </div>
   <div id="dataset-stats">loading…</div>
 </header>
 
@@ -71,7 +105,7 @@
       </div>
       <button class="btn" id="cl-add">Add</button>
       <span class="muted" style="max-width:560px">Every cell reuses the same math as its own tab —
-        rate moves from <b>Changes</b> (newest month vs the one before), gaps from
+        rate moves from <b>Changes</b> (each payer's newest file vs its previous one), gaps from
         <b>Benchmark</b>, and referral alerts from <b>Medicare</b> — so the digest can never
         disagree with a drill-down. Click through to investigate.</span>
     </div>
@@ -176,8 +210,8 @@
         </div>
       </div>
       <div class="field">
-        <label>Month <span class="muted" style="text-transform:none" title="With 'all months' the medians and row counts pool every ingested vintage of a contract; the report tabs (Benchmark, Rate card, Leads, Markets) default to 'latest' — one current rate per contract. Pick a month here to match them.">(all months = pooled)</span></label>
-        <select id="f-month"><option value="">all months</option></select>
+        <label>Month <span class="muted" style="text-transform:none" title="'latest' shows each contract's newest file — one current rate per contract, the basis of every report tab (Benchmark, Rate card, Leads, Markets). 'all months' pools every loaded vintage (a rate republished monthly counts once per month).">(latest = current rates)</span></label>
+        <select id="f-month"><option value="latest">latest — each contract's newest file</option><option value="">all months (pooled)</option></select>
       </div>
       <div class="field" style="max-width:640px">
         <label>Code quick-pick <span class="muted" style="text-transform:none">(grouped by discipline)</span></label>
@@ -277,6 +311,7 @@
             <th data-sort="billing_class">Class</th>
             <th>POS</th>
             <th data-sort="negotiated_rate" class="num">Rate</th>
+            <th data-sort="file_month" title="the month of the file this rate came from — with 'all months' a contract appears once per month you've loaded">Month</th>
             <th data-sort="rate_variants" class="num">Variants</th>
             <th data-sort="negotiated_type">Type</th>
             <th data-sort="source_count" class="num">Sources</th>
@@ -312,7 +347,13 @@
         <datalist id="cpt-state-opts"></datalist>
       </label>
       <label class="toggle"><input type="checkbox" id="cpt-base-only" checked> base rates only (no CQ/CO)</label>
-      <button class="btn primary" id="cpt-export">Export + methodology</button>
+      <label title="Professional = a practice's own claim. Institutional = a hospital/facility line for the same code — a different payment, ranked on its own (review 10)">Claim type
+        <select id="cpt-class">
+          <option value="professional" selected>professional (practices)</option>
+          <option value="institutional">institutional (facilities)</option>
+          <option value="">both</option>
+        </select></label>
+      <button class="btn primary" id="cpt-export" title="The rows behind this page, one per contract line (each place-of-service set separately), so every median shown can be recomputed">Export + methodology</button>
     </div>
     <div class="chips codechips" id="cpt-chips" style="margin-bottom:10px"></div>
     <div id="cpt-payer-rank"></div>
@@ -355,7 +396,7 @@
       <label class="toggle" style="text-transform:none">Sort
         <select id="ro-sort"><option value="name">name</option><option value="size">size (NPIs)</option><option value="paid">best-paid</option><option value="codes">most codes</option></select>
       </label>
-      <label class="toggle" title="keep only PT/OT/SLP providers & therapy practices (by NPPES taxonomy)"><input type="checkbox" id="ro-therapy"> therapy only</label>
+      <label class="toggle" style="text-transform:none" title="who your rates are compared with: OUTPATIENT REHAB CLINICS (an organization NPI registered only as a therapy clinic or therapist group, a PT/OT/SLP clinician mix, or therapists billing Medicare in private practice — and not at a CMS-listed hospital or nursing-home address), clinics by organization NPI taxonomy (that registration alone — 261QP2000X, 225100000X …), therapy practices (the clinician-mix test alone), or every practice the payer prices">Compare against <select id="ro-peer"><option value="clinics" selected>outpatient rehab clinics</option><option value="org">clinics by organization NPI taxonomy</option><option value="therapy">therapy practices</option><option value="all">all practices</option></select></label>
       <button class="btn primary" id="ro-run">Run</button>
       <button class="btn" id="ro-csv" disabled>Download CSV</button>
     </div>
@@ -384,7 +425,7 @@
         <input type="text" id="mk-payer" list="mk-payer-opts" placeholder="all" style="width:130px;margin-left:4px">
         <datalist id="mk-payer-opts"></datalist>
       </label>
-      <label class="toggle" title="keep only PT/OT/SLP providers & therapy practices (by NPPES taxonomy)"><input type="checkbox" id="mk-therapy"> therapy only</label>
+      <label class="toggle" style="text-transform:none" title="who your rates are compared with: OUTPATIENT REHAB CLINICS (an organization NPI registered only as a therapy clinic or therapist group, a PT/OT/SLP clinician mix, or therapists billing Medicare in private practice — and not at a CMS-listed hospital or nursing-home address), clinics by organization NPI taxonomy (that registration alone — 261QP2000X, 225100000X …), therapy practices (the clinician-mix test alone), or every practice the payer prices">Compare against <select id="mk-peer"><option value="clinics" selected>outpatient rehab clinics</option><option value="org">clinics by organization NPI taxonomy</option><option value="therapy">therapy practices</option><option value="all">all practices</option></select></label>
       <label class="toggle" style="text-transform:none" title="a 5-digit ZIP: adds a distance-band view — does this code pay differently a short drive away?">ZIP
         <input type="text" id="mk-zip" placeholder="63103" style="width:66px;margin-left:4px">
       </label>
@@ -431,9 +472,7 @@
         <div class="field"><label>Target percentile</label>
           <select id="b-target"><option value="50">median (p50)</option><option value="75">p75</option></select>
         </div>
-        <label class="toggle" title="keep only OUTPATIENT PT/OT/SLP practices: at least 75% of the practice's identified providers are PT/OT/SLP (incl. PTA/OTA) or it is a Physical-Therapy clinic; at least half its providers must be identified; and it carries no hospital, skilled-nursing, home-health, residential or hospice NPI. Hides physician and chiropractic groups, multispecialty/physiatry rehab groups, hospital systems and facilities that merely bill 97xxx codes. Needs NPI identification.">
-          <input type="checkbox" id="b-therapy" checked> therapy practices only
-        </label>
+        <label class="toggle" style="text-transform:none" title="who your rates are compared with: OUTPATIENT REHAB CLINICS (an organization NPI registered only as a therapy clinic or therapist group, a PT/OT/SLP clinician mix, or therapists billing Medicare in private practice — and not at a CMS-listed hospital or nursing-home address), clinics by organization NPI taxonomy (that registration alone — 261QP2000X, 225100000X …), therapy practices (the clinician-mix test alone), or every practice the payer prices">Compare against <select id="b-peer"><option value="clinics" selected>outpatient rehab clinics</option><option value="org">clinics by organization NPI taxonomy</option><option value="therapy">therapy practices</option><option value="all">all practices</option></select></label>
         <div class="field"><label>Peer set</label>
           <select id="b-peerset"><option value="">auto — all entities in market</option></select>
         </div>
@@ -493,9 +532,7 @@
         <div class="field"><label>Discipline</label>
           <select id="ng-disc"><option value="">any</option><option>PT</option><option>OT</option><option>SLP</option></select>
         </div>
-        <label class="toggle" title="market = only therapy practices (majority PT/OT/SLP, no hospitals). Needs NPI identification.">
-          <input type="checkbox" id="ng-therapy" checked> therapy practices only
-        </label>
+        <label class="toggle" style="text-transform:none" title="who your rates are compared with: OUTPATIENT REHAB CLINICS (an organization NPI registered only as a therapy clinic or therapist group, a PT/OT/SLP clinician mix, or therapists billing Medicare in private practice — and not at a CMS-listed hospital or nursing-home address), clinics by organization NPI taxonomy (that registration alone — 261QP2000X, 225100000X …), therapy practices (the clinician-mix test alone), or every practice the payer prices">Compare against <select id="ng-peer"><option value="clinics" selected>outpatient rehab clinics</option><option value="org">clinics by organization NPI taxonomy</option><option value="therapy">therapy practices</option><option value="all">all practices</option></select></label>
         <div class="field"><label>Comparable entities <span class="muted" style="text-transform:none">(each adds a column)</span></label>
           <div style="display:flex;gap:6px">
             <input type="text" id="ng-comp" list="ng-comps" placeholder="entity name, TIN, or NPI…" style="flex:1">
@@ -537,6 +574,7 @@
           Compares every CPT code you're priced on against this payer's market
           (median/percentiles), your named comparables, and what your other
           payers pay you — the working numbers for a rate request.</div>
+        <div id="ng-paidmore" style="margin-top:14px"></div>
 
         <div class="validate-card" style="margin-top:14px">
           <h3>Hospital comparison — what this payer pays the hospital</h3>
@@ -645,9 +683,7 @@
         <div class="field"><label>Billing class</label>
           <select id="rc-class"><option value="professional">professional</option><option value="institutional">institutional</option></select>
         </div>
-        <label class="toggle" title="compare against OUTPATIENT PT/OT/SLP practices only (same rule as the other tabs' therapy filter) — hides physician groups, hospitals and facilities from the peer median">
-          <input type="checkbox" id="rc-therapy"> therapy practices only (peers)
-        </label>
+        <label class="toggle" style="text-transform:none" title="who your rates are compared with: OUTPATIENT REHAB CLINICS (an organization NPI registered only as a therapy clinic or therapist group, a PT/OT/SLP clinician mix, or therapists billing Medicare in private practice — and not at a CMS-listed hospital or nursing-home address), clinics by organization NPI taxonomy (that registration alone — 261QP2000X, 225100000X …), therapy practices (the clinician-mix test alone), or every practice the payer prices">Compare against <select id="rc-peer"><option value="clinics" selected>outpatient rehab clinics</option><option value="org">clinics by organization NPI taxonomy</option><option value="therapy">therapy practices</option><option value="all">all practices</option></select></label>
         <div class="mpfs-row">
           <span id="rc-mpfs-status" class="muted">MPFS: not loaded</span>
           <span class="muted" style="text-transform:none">load one on the Benchmark tab to add % of Medicare</span>
@@ -662,6 +698,39 @@
       <div class="bench-results">
         <div id="rc-out" class="empty"><h3>Pick a practice</h3>
           See every code it has a negotiated rate for, by payer, and which payers pay best.</div>
+        <div class="validate-card" style="margin-top:14px">
+          <h3>One visit, by payer — what a standard visit is worth</h3>
+          <p class="muted">Prices one follow-up visit at this practice's own contracted rates with
+            each payer (the same rates and filters as the rate card). Units follow the CMS
+            8-minute rule. The default visit is the four most-billed timed therapy codes, one
+            15-minute unit each; pick another visit or edit the codes and minutes. The total
+            is the contracted value per visit — the ceiling on net revenue per visit (NRPV).</p>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <select id="sv-preset" style="max-width:520px"></select>
+            <button class="btn primary" id="sv-run">Price a visit</button>
+            <span id="sv-msg" class="muted"></span>
+          </div>
+          <textarea id="sv-lines" rows="4" style="margin-top:6px;width:100%;max-width:520px"
+                    title="One code and its minutes of one-on-one treatment per line, e.g. 97110, 15"
+                    placeholder="97110, 15&#10;97530, 15&#10;97140, 15&#10;97112, 15"></textarea>
+          <div id="sv-out" style="margin-top:8px"></div>
+        </div>
+        <div class="validate-card" style="margin-top:14px">
+          <h3>Visit value in this market</h3>
+          <p class="muted">The same visit priced at every practice of one state and one
+            discipline, payer by payer: how many practices, the average (mean), the median and
+            the middle half (P25&ndash;P75). Uses the State, Discipline, As-of month and
+            Payer(s) above &mdash; State and Discipline are required. The practice is optional:
+            when one is picked, it is placed in each payer's spread. A practice counts for a
+            payer only when that payer prices every code of the visit.</p>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <button class="btn primary" id="vv-run">Show visit value in this market</button>
+            <button class="btn" id="vv-report" disabled>Open printable</button>
+            <button class="btn" id="vv-csv" disabled>Download CSV</button>
+            <span id="vv-msg" class="muted"></span>
+          </div>
+          <div id="vv-out" style="margin-top:8px"></div>
+        </div>
       </div>
     </div>
   </section>
@@ -754,9 +823,7 @@
           <select id="ld-threshold"><option value="25">at/below p25</option><option value="10">at/below p10</option><option value="40">at/below p40</option><option value="50">at/below median</option></select>
         </div>
         <div class="field"><label>Min. codes priced</label><input type="number" id="ld-mincodes" value="3" min="1" style="width:64px"></div>
-        <label class="toggle" title="keep only PT/OT/SLP providers & therapy practices (by NPPES taxonomy) — drops MDs/DOs/NPs. Needs NPI identification.">
-          <input type="checkbox" id="ld-therapy" checked> therapy practices only
-        </label>
+        <label class="toggle" style="text-transform:none" title="who your rates are compared with: OUTPATIENT REHAB CLINICS (an organization NPI registered only as a therapy clinic or therapist group, a PT/OT/SLP clinician mix, or therapists billing Medicare in private practice — and not at a CMS-listed hospital or nursing-home address), clinics by organization NPI taxonomy (that registration alone — 261QP2000X, 225100000X …), therapy practices (the clinician-mix test alone), or every practice the payer prices">Compare against <select id="ld-peer"><option value="clinics" selected>outpatient rehab clinics</option><option value="org">clinics by organization NPI taxonomy</option><option value="therapy">therapy practices</option><option value="all">all practices</option></select></label>
         <div class="field"><label>Exclude a practice <span class="muted" style="text-transform:none">(your client — TIN/entity)</span></label>
           <input type="text" id="ld-exclude" list="ld-subjects" placeholder="optional">
           <datalist id="ld-subjects"></datalist>
@@ -831,22 +898,22 @@
             NPPES deactivates for paperwork lapses and mergers too, so treat every row as a
             call to make, not a fact to print. Needs the NPPES monthly file loaded once.</p>
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-            <input type="text" id="cl-zip" placeholder="ZIP (optional)" style="width:122px">
-            <select id="cl-radius">
+            <input type="text" id="cz-zip" placeholder="ZIP (optional)" style="width:122px">
+            <select id="cz-radius">
               <option value="25">25 miles</option>
               <option value="50" selected>50 miles</option>
               <option value="100">100 miles</option>
             </select>
-            <input type="text" id="cl-state" placeholder="ST" style="width:44px" title="two-letter state filter (optional)">
-            <select id="cl-days" title="how far back to look">
+            <input type="text" id="cz-state" placeholder="ST" style="width:44px" title="two-letter state filter (optional)">
+            <select id="cz-days" title="how far back to look">
               <option value="180">last 6 months</option>
               <option value="365" selected>last year</option>
               <option value="730">last 2 years</option>
             </select>
-            <button class="btn primary" id="cl-run">Find closures</button>
-            <span id="cl-msg" class="muted"></span>
+            <button class="btn primary" id="cz-run">Find closures</button>
+            <span id="cz-msg" class="muted"></span>
           </div>
-          <div id="cl-out" style="margin-top:8px"></div>
+          <div id="cz-out" style="margin-top:8px"></div>
         </div>
 
         <div class="validate-card" style="margin-top:14px">
@@ -952,6 +1019,9 @@
           <datalist id="ch-subjects"></datalist>
         </div>
         <div class="field"><label>Payer(s) <span class="muted" style="text-transform:none">(optional)</span></label><div class="chips" id="ch-payer-chips"></div></div>
+        <div class="field"><label>State <span class="muted" style="text-transform:none">(optional — blank = every state, slower)</span></label>
+          <input type="text" id="ch-state" placeholder="MO" style="width:52px" list="ld-states">
+        </div>
         <div class="field"><label>Discipline</label>
           <select id="ch-disc"><option value="">any</option><option>PT</option><option>OT</option><option>SLP</option></select>
         </div>
@@ -961,7 +1031,7 @@
           <button class="btn" id="ch-csv" disabled>Download CSV</button>
         </div>
         <div style="margin-top:8px">
-          <button class="btn" id="ch-traj-run" title="Each payer's median-rate path across ALL loaded months — is a payer eroding rates over time?">Payer trajectory (all months)</button>
+          <button class="btn" id="ch-traj-run" title="Each payer's rate change across ALL loaded months, measured on the practices and codes it priced in both its first and last month — is a payer eroding rates over time? Uses the State above; every state takes longer on a big store.">Payer trajectory (all months)</button>
         </div>
       </div>
       <div class="bench-results">
@@ -977,7 +1047,18 @@
     <div class="view-head">
       <h2>Ingest status</h2>
       <span class="spacer"></span>
+      <button class="btn" id="btn-analytics" title="Watch the newly loaded files go into the numbers every screen reads">Analytics</button>
       <button class="btn" id="btn-scan">Rescan inbox</button>
+    </div>
+    <div id="analytics-panel" class="an-panel" style="display:none" aria-live="polite">
+      <div class="view-head an-head">
+        <h3>Analytics activity</h3>
+        <span class="spacer"></span>
+        <button class="btn" id="an-run" title="Add the waiting files at the next safe moment, even while downloads continue">Run now</button>
+        <button class="btn" id="an-pause" title="Hold every analytics update (for a laptop on battery). Loading continues; nothing new reaches the numbers until you resume.">Pause analytics</button>
+        <button class="btn" id="an-close">Close</button>
+      </div>
+      <div id="an-body"><p class="muted">loading…</p></div>
     </div>
     <div class="url-card">
       <h3>Paste file links — the app does the rest</h3>
@@ -994,6 +1075,7 @@
         <button class="btn" id="url-known-list" title="Show the list of payer sources this app has been tested against">Show tested sources</button>
         <button class="btn" id="url-clear-queued" title="Cancel everything waiting to download (kept as skipped — you can retry). Frees the parsers to catch up.">Clear queue</button>
         <button class="btn" id="url-stop-dl" title="Stop the downloads in progress right now so ingesting can catch up. Partial files are kept — retry resumes them.">Stop downloads</button>
+        <button class="btn" id="url-resume" title="Put back everything that Clear queue or Stop downloads set aside. Partial downloads continue where they stopped.">Resume stopped</button>
         <span id="url-msg" class="muted"></span>
       </div>
       <div id="known-wrap" style="display:none;margin-top:10px">
@@ -1013,8 +1095,13 @@
           is enough; the app expands it into every rate file inside.
         </div>
         <div class="tablewrap">
+          <div style="display:flex;gap:8px;align-items:center;margin:0 0 8px 0;flex-wrap:wrap">
+            <label>Your state(s): <input id="known-states" placeholder="e.g. MO KS" style="width:9em"></label>
+            <button class="btn" id="known-queue-states" title="Queue the auto-queueable sources for these states plus the national payers">Queue these states</button>
+            <span class="muted">National payers (UnitedHealthcare, Aetna, Cigna, TPAs…) are included with any state.</span>
+          </div>
           <table>
-            <thead><tr><th>Payer source</th><th>Type</th><th>Verified</th><th>Notes / how to load it</th></tr></thead>
+            <thead><tr><th>Payer source</th><th>States</th><th>Type</th><th>Verified</th><th>Notes / how to load it</th></tr></thead>
             <tbody id="known-body"></tbody>
           </table>
         </div>
@@ -1077,6 +1164,7 @@
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:6px">
         <input type="text" id="rm-subject" list="rm-subjects" placeholder="the practice…" style="width:240px">
         <datalist id="rm-subjects"></datalist>
+        <input type="text" id="rm-state" placeholder="state" style="width:52px" title="Only needed when the practice's name is used in more than one state: the state picks which practice the remit is from.">
         <label class="toggle" style="text-transform:none">These amounts are
           <select id="rm-basis" style="margin-left:4px" title="ALLOWED is the amount comparable to a published rate. PAYER-PAID excludes patient deductible/copay, so nearly every line would look short.">
             <option value="allowed">allowed amounts</option>
@@ -1105,7 +1193,7 @@
       </div>
       <div class="tablewrap" style="max-height:30vh;margin-top:10px;display:none" id="v-wrap">
         <table><thead><tr><th>Payer</th><th>TIN</th><th>NPI</th><th>Code</th><th>Modifiers</th>
-          <th class="num">Extracted</th><th class="num">Δ vs expected</th><th>Month</th><th>Source file</th></tr></thead>
+          <th>Type</th><th class="num">Extracted</th><th class="num">Δ vs expected</th><th>Month</th><th>Source file</th></tr></thead>
           <tbody id="v-body"></tbody></table>
       </div>
     </div>
@@ -1136,6 +1224,15 @@
 <aside id="drawer" aria-hidden="true"></aside>
 <div id="tooltip"></div>
 
+
+<div class="tabbar" role="navigation" aria-label="Main">
+  <button type="button" data-tab="overview"><svg class="icon"><use href="#i-overview"/></svg>Overview</button>
+  <button type="button" data-tab="myrates"><svg class="icon"><use href="#i-rates"/></svg>My rates</button>
+  <button type="button" data-tab="negotiate"><svg class="icon"><use href="#i-negotiate"/></svg>Negotiate</button>
+  <button type="button" data-tab="market"><svg class="icon"><use href="#i-market"/></svg>Market</button>
+  <button type="button" data-tab="more"><svg class="icon"><use href="#i-more"/></svg>More</button>
+</div>
+<script src="charts.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

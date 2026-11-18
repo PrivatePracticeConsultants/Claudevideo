@@ -1,0 +1,27 @@
+xss after explorer: 0
+find msg: 
+xss after search+drawer: 0
+find '<svg':  | xss: 0
+find "O'BRIEN":  | xss: 0
+find 'ÉQUIPE':  | xss: 0
+find '"><':  | xss: 0
+find '%': no practice matches | xss: 0
+find '_': 3 practices match — pick one from the list | xss: 0
+find '\\': no practice matches | xss: 0
+hash #benchmark?subject=%3Cimg%20src%3Dx%20onerror%3D%22window.__xss%3D%28w -> view: benchmark | xss: 0 | url: benchmark?subject=%3Cimg%20src%3Dx%20onerror%3D%22window.__xss%3D%28window.__xss%7C%7C0%29
+hash #benchmark?subject=%22%3E%3Cimg%20src%3Dx%20onerror%3Dalert(1)%3E&stat -> view: benchmark | xss: 0 | url: benchmark?subject=%22%3E%3Cimg%20src%3Dx%20onerror%3Dalert(1)%3E&state=%22%3E%3Cb%3E
+hash #"><img src=x onerror="window.__xss=99"> -> view: benchmark | xss: 0 | url: %22%3E%3Cimg%20src=x%20onerror=%22window.__xss=99%22%3E
+hash #%3Cimg%20src%3Dx%20onerror%3Dwindow.__xss%3D98%3E -> view: benchmark | xss: 0 | url: %3Cimg%20src%3Dx%20onerror%3Dwindow.__xss%3D98%3E
+hash #negotiate?subject=%E6%9D%B1%E4%BA%AC&payer=%3Cb%3E&state=mo -> view: negotiate | xss: 0 | url: negotiate?subject=%E6%9D%B1%E4%BA%AC&payer=%3Cb%3E&state=mo
+hash #medicare?subject=070000001 -> view: medicare | xss: 0 | url: medicare?subject=070000001
+hash #ratecard?subject=% -> view: ratecard | xss: 0 | url: ratecard?subject=%
+hash #changes?subject=430001&state=MO&x=%E0%A4%A -> view: changes | xss: 0 | url: changes?subject=430001&state=MO&x=%E0%A4%A
+benchmark Run with an SSN-pattern TIN -> url hash: benchmark?subject=070000001&state=%22%3E%3CB%3E
+benchmark out: Benchmark failed
+could not read '"><b>' as a state — use the two-letter code (for example MO) or the full name (Missouri)
+after Back: view = changes url: changes?subject=430001&state=MO&x=%E0%A4%A
+after Forward: view = leads url: leads
+--- ui01 console: ['error: Failed to load resource: the server responded with a status of 422 (Unprocessable Content)', 'error: Failed to load resource: the server responded with a status of 422 (Unprocessable Content)']
+--- ui01 pageerrors: []
+--- ui01 requestfailed: []
+--- ui01 http>=400: ['422 POST http://localhost:8791/api/benchmark/market', '422 POST http://localhost:8791/api/benchmark/market']

@@ -1,0 +1,83 @@
+--- /home/user/Claudevideo/mrfx/web/app.js	2026-11-10 06:06:13.221448616 +0000
++++ proto2/mrfx/web/app.js	2026-11-10 08:56:07.457619388 +0000
+@@ -105,6 +105,16 @@
+   const n = (_tickets[view] = (_tickets[view] || 0) + 1);
+   return () => _tickets[view] === n;
+ }
++// PROTO F2: one in-flight request per view. A newer one ABORTS the older in the
++// browser and tells the server which page view it belongs to, so the server
++// interrupts the superseded scan instead of finishing it for nobody.
++const VIEW_ID = Math.random().toString(36).slice(2) + Date.now().toString(36);
++const _viewCtl = {};
++function supersede(view) {
++  if (_viewCtl[view]) _viewCtl[view].abort();
++  const c = (_viewCtl[view] = new AbortController());
++  return { signal: c.signal, headers: { "X-Mrfx-View": `${VIEW_ID}:${view}` } };
++}
+ const postJson = (path, body) =>
+   api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+ 
+@@ -809,7 +819,7 @@
+   const q = filterQuery({ sort: state.sort.col, dir: state.sort.dir, page: state.page, page_size: state.pageSize });
+   const fresh = ticket("rates");
+   let data;
+-  try { data = await api(`/api/rates?${q}`); }
++  try { data = await api(`/api/rates?${q}`, supersede("rates")); }
+   catch (e) {
+     if (!fresh()) return;
+     stateEl.innerHTML = `<div class="empty"><h3>Could not load rates</h3>${esc(e.message)}</div>`; return;
+@@ -887,7 +897,7 @@
+   const fresh = ticket("summary");
+   const asked = filterQuery().toString();
+   try {
+-    const s = await api(`/api/summary?${asked}`);
++    const s = await api(`/api/summary?${asked}`, supersede("summary"));
+     if (!fresh()) return;
+     const stat = (k, v) => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`;
+     el.innerHTML =
+@@ -987,6 +997,8 @@
+   // fetch — server mid-restart, transient DB lock — must NOT abort this
+   // function before the export/pagination/sort listeners below are wired,
+   // which left a filterless, unpaginable Explorer until a manual reload.
++  // PROTO F5: both pickers at once (they were fetched one after the other)
++  const monthsP = api("/api/months").catch(() => null);
+   const payers = (await api("/api/payers").catch(() => null))?.payers ?? [];
+   const payerChips = $("#f-payer-chips");
+   payerChips.innerHTML = payers.length
+@@ -1016,7 +1028,7 @@
+     refreshFromFirstPage();
+   });
+ 
+-  const months = (await api("/api/months").catch(() => null))?.months ?? [];
++  const months = (await monthsP)?.months ?? [];
+   $("#f-month").innerHTML = `<option value="">all months</option>` +
+     months.map((m) => `<option>${esc(m)}</option>`).join("");
+   $("#f-month").addEventListener("change", (e) => { state.filters.month = e.target.value; refreshFromFirstPage(); });
+@@ -1034,7 +1046,9 @@
+   const bind = (id, key, ev = "change", transform = (v) => v) =>
+     $(id).addEventListener(ev, debounce((e) => {
+       state.filters[key] = transform(e.target.type === "checkbox" ? e.target.checked : e.target.value);
+-      refreshFromFirstPage();
++      // PROTO F1: a typed box already waited 300 ms for the typing to stop —
++      // do not queue a second 280 ms wait behind it
++      if (ev === "input") { state.page = 1; refresh(); } else refreshFromFirstPage();
+     }, ev === "input" ? 300 : 0));
+   bind("#f-modifier", "modifier");
+   bind("#f-mod-has", "mod_has", "input");
+@@ -4666,12 +4680,14 @@
+ 
+ (async function boot() {
+   state.catalog = await api("/api/catalog").catch(() => ({}));
+-  const stats = await api("/api/stats").catch(() => null);
++  // PROTO F5: the header counts load beside the table, not in front of it
++  const statsP = api("/api/stats").catch(() => null);
++  const stats = await api("/api/boot").catch(() => null);
+   if (stats?.default_grain && stats.default_grain !== "tin") {
+     state.grain = stats.default_grain;
+     $$("#f-grain button").forEach((b) => b.classList.toggle("on", b.dataset.g === state.grain));
+   }
+-  loadStats(stats || undefined);
++  statsP.then((s) => loadStats(s || undefined));
+   loadStateOptions();
+   // one failed boot fetch must not brick the page: without this guard an
+   // /api/payers hiccup at load left the Code and Files tabs never wired

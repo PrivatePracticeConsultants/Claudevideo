@@ -1,0 +1,4 @@
+prints Q1 but value is in the Q2 band of the printed P25/median/P75: others=[100.0, 105.44, 105.44] value=100.0 -> P25 100.0 median 102.72 P75 105.44, p17 Q1
+prints Q2 but value is in the Q3 band of the printed P25/median/P75: others=[100.0, 100.0, 105.44] value=100.0 -> P25 100.0 median 100.0 P75 101.36, p33 Q2
+prints Q2 but value is in the Q4 band of the printed P25/median/P75: others=[100.0, 100.0, 100.0, 105.44] value=100.0 -> P25 100.0 median 100.0 P75 100.0, p38 Q2
+prints Q3 but value is in the Q4 band of the printed P25/median/P75: others=[100.0, 100.0, 100.0] value=100.0 -> P25 100.0 median 100.0 P75 100.0, p50 Q3

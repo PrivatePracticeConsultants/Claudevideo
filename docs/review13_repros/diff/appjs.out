@@ -1,0 +1,130 @@
+##### APPJS
++  $("#vv-run").addEventListener("click", showVisitMarket);
++  $("#vv-report").addEventListener("click", () =>
++    openReportWith("/api/report/visitvalue", state.lastVisitMarketPayload));
++  $("#vv-csv").addEventListener("click", downloadVisitMarketCsv);
++}
++
++/* ---- visit value in this market (mrfx/visit_market.py) ------------------ */
++// The visit (preset or edited lines) the visit calculator shows.
++function visitBasket() {
++  const key = $("#sv-preset") && $("#sv-preset").value;
++  if (key) return { preset: key };
++  const lines = ($("#sv-lines") && $("#sv-lines").value.trim()) || "";
++  return lines ? { lines } : { preset: "ortho" };
++}
++
++// Confined to a State and a Discipline (both required); the practice is
++// optional — the market numbers are the same with or without one.
++function visitMarketPayload() {
++  const st = $("#rc-state").value.trim().toUpperCase();
++  const disc = $("#rc-disc").value;
++  if (!st) throw new Error("pick a State above — a visit's value is a market figure, and a market is one state");
++  if (!disc) throw new Error("pick a Discipline above (PT, OT or SLP) — a visit is priced on one discipline's rates");
++  const market = { month: $("#rc-month").value || "latest", state: st, discipline: disc,
++                   payers: $$("#rc-payer-chips .chip.on").map((c) => c.dataset.payer) };
++  const subject = $("#rc-subject").value.trim();
++  return { market, ...visitBasket(), ...(subject ? { subject } : {}) };
++}
++
++const signedMoney = (v) => (v == null ? "–" : (v > 0 ? "+" : v < 0 ? "-" : "±") + "$" + fmtMoney(Math.abs(v)));
++const signedPct1 = (v) => (v == null ? "–" : `${v < 0 ? "-" : "+"}${Math.abs(v).toFixed(1)}%`);
++
++async function showVisitMarket() {
++  const out = $("#vv-out");
++  state.lastVisitMarketPayload = null;
++  $("#vv-report").disabled = true;
++  $("#vv-csv").disabled = true;
++  let payload;
++  try { payload = visitMarketPayload(); }
++  catch (e) { $("#vv-msg").textContent = ""; out.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return; }
++  $("#vv-msg").textContent = "pricing the market…";
++  let d;
++  const isFresh = ticket("visit-market");
++  try { d = await postJson("/api/schedule/visit/market", payload); }
++  catch (e) {
++    if (!isFresh()) return;
++    $("#vv-msg").textContent = ""; out.innerHTML = `<div class="muted">${esc(e.message)}</div>`; return;
++  }
++  if (!isFresh()) return;
++  $("#vv-msg").textContent = "";
++  state.lastVisitMarketPayload = payload;
++  $("#vv-report").disabled = false;
++  $("#vv-csv").disabled = false;
++  out.innerHTML = renderVisitMarket(d);
++}
++
++function renderVisitMarket(d) {
++  const subj = !!d.subject;
++  const head = `<th>Payer</th><th class="num">Practices</th><th class="num">Average (mean)</th>
++    <th class="num">Median</th><th class="num">P25</th><th class="num">P75</th>
++    <th class="num" title="practice-payer pairs left out because the payer does not price every code of the visit">Partial visits left out</th>${
++    subj ? `<th class="num">This practice</th><th class="num" title="mid-rank among the payer's practices, this practice included">Percentile</th>
++    <th class="num">Quartile</th><th class="num">vs average</th><th class="num">vs median</th>` : ""}`;
++  const row = (r, all) => {
++    const s = r.subject;
++    let subjCells = "";
++    if (subj) {
++      if (!s) subjCells = `<td class="num muted" colspan="5">no complete visit with this payer</td>`;
++      else if (s.percentile == null) subjCells = `<td class="num">${money(s.value)}</td><td class="num muted" colspan="4">not ranked — too few practices</td>`;
++      else subjCells = `<td class="num"><b>${money(s.value)}</b></td>
++        <td class="num">p${s.percentile} <span class="sub">of ${fmtInt(s.ranked_among)}</span></td>
++        <td class="num">${esc(s.quartile)}</td>
++        <td class="num"><span class="${s.vs_mean > 0 ? "peer-up" : s.vs_mean < 0 ? "peer-down" : ""}">${signedMoney(s.vs_mean)}</span> <span class="sub">${signedPct1(s.vs_mean_pct)}</span></td>
++        <td class="num"><span class="${s.vs_median > 0 ? "peer-up" : s.vs_median < 0 ? "peer-down" : ""}">${signedMoney(s.vs_median)}</span> <span class="sub">${signedPct1(s.vs_median_pct)}</span></td>`;
++    }
++    const excl = r.incomplete_excluded == null ? "" : fmtInt(r.incomplete_excluded);
++    if (r.suppressed)
++      return `<tr${all ? ' class="best-row"' : ""}><td>${esc(r.payer)}</td><td class="muted" colspan="5">fewer than ${d.min_practices} practices — not shown</td><td class="num">${excl}</td>${subjCells}</tr>`;
++    return `<tr${all ? ' class="best-row"' : ""}><td>${all ? "<b>All payers</b>" : esc(r.payer)}</td>
++      <td class="num">${fmtInt(r.practices)}</td><td class="num">${money(r.mean)}</td>
++      <td class="num"><b>${money(r.median)}</b></td><td class="num">${money(r.p25)}</td>
++      <td class="num">${money(r.p75)}</td><td class="num">${excl}</td>${subjCells}</tr>`;
++  };
++  const body = d.rows.map((r) => row(r, false)).join("") + row(d.all_payers, true);
++  return `<div class="rc-summary">${esc(d.headline)}</div>
++    <div class="muted" style="margin:6px 0">${esc(d.state)} · ${esc(d.discipline)} · as of ${esc(d.as_of)}${d.as_of_rule ? ` (${esc(d.as_of_rule)})` : ""} ·
++      ${esc(d.label)} — ${esc(d.basket)} = <b>${d.units} units</b>${
++      d.payers_filter.length ? ` · payers: ${esc(d.payers_filter.join(", "))}` : ""}</div>
++    ${(d.flags || []).map((f) => `<div class="warn-text" style="margin-top:4px">${esc(f)}</div>`).join("")}
++    <div class="tablewrap" style="max-height:44vh;margin-top:8px"><table class="rc-table"><thead><tr>${head}</tr></thead>
++      <tbody>${body}</tbody></table></div>
++    <div class="muted" style="font-size:11.5px;margin-top:6px">${fmtInt(d.incomplete_excluded)} practice-payer pair(s) left out as partial visits${
++      d.suppressed_payers.length ? `; not shown (under ${d.min_practices} practices): ${esc(d.suppressed_payers.join(", "))}` : ""}.
++      ${esc(d.note)}${d.subject_note ? " " + esc(d.subject_note) : ""} Basis: ${esc(d.basis_note)}</div>`;
++}
++
++async function downloadVisitMarketCsv() {
++  if (!state.lastVisitMarketPayload) return;
++  try {
++    const r = await fetch("/api/schedule/visit/market.csv", {
++      method: "POST", headers: { "Content-Type": "application/json" },
++      body: JSON.stringify(state.lastVisitMarketPayload),
++    });
++    if (!r.ok) { alert("CSV export failed.\n\n" + await refusalText(r)); return; }
++    const a = document.createElement("a");
++    a.href = URL.createObjectURL(await r.blob());
++    a.download = "visit_value.csv";
++    a.click();
++    setTimeout(() => URL.revokeObjectURL(a.href), 60000);
++  } catch (e) { alert("CSV export failed: " + e.message); }
+-  return { subject, market };
++  // the printable card and its CSV carry "Visit value in this market" when
++  // its two required scopes are set (review 12 Group 3)
++  const vm = market.state && market.discipline ? { visit_market: true, ...visitBasket() } : {};
++  return { subject, market, ...vm };
+-  stateEl.innerHTML = d.total > d.files.length
++  // the one-time stored-row update still running behind the dashboard, and
++  // payer x month cells pooled from several files (review 12 items 2.9, 2.5)
++  const ru = d.rows_update;
++  const ruLine = ru && (ru.running || ru.pending)
++    ? `<div class="warn-text">Updating stored rows to this version's rules: ${fmtInt(ru.done || 0)} of ${fmtInt(ru.total || 0)} files — numbers from the files not yet updated can still change.</div>`
++    : "";
++  const pm = d.pooled_months || [];
++  const pmLine = pm.length
++    ? `<div class="muted" title="${esc(d.pooled_note || "")}">Pooled months: ${pm.slice(0, 4).map((r) =>
++        `${esc(r.payer)} ${esc(r.file_month || "")} has ${fmtInt(r.files)} files, ${fmtInt(r.practices_in_several)} practices priced in more than one (${fmtInt(r.lines_differing)} lines at different rates)`).join("; ")}${pm.length > 4 ? `; and ${fmtInt(pm.length - 4)} more` : ""} — their rates are pooled (median), not one file replacing another.</div>`
++    : "";
++  stateEl.innerHTML = ruLine + pmLine + (d.total > d.files.length
+-    : "";
++    : "");

@@ -40,6 +40,7 @@ from pathlib import Path
 from .catalog import CODE_CATALOG, code_info
 from .sniff import open_stream
 from .store import Store
+from .rounding import half_up
 
 log = logging.getLogger(__name__)
 
@@ -218,8 +219,7 @@ def floor_comparison(store: Store, market: dict | None = None, *,
                      payer: str | None = None) -> dict:
     """Commercial rates against the loaded Medicaid / WC schedules, per code."""
     from .benchmark import (BenchmarkError, _market_where, _rates_relation,
-                            month_label, normalize_market, resolve_plan_scope,
-                            resolve_subject_tins)
+                            month_label, normalize_market, resolve_plan_scope)
 
     st = floor_status(store)
     if not st["loaded"]:
@@ -245,7 +245,16 @@ def floor_comparison(store: Store, market: dict | None = None, *,
     where, params = _market_where(m, bool(m.get("include_assistant")),
                                   bool(m.get("include_non_dollar")))
     rel = _rates_relation(m)
-    subject_tins = resolve_subject_tins(store, subject) if subject else []
+    # the subject rule (subject_tins_for_market): a name used in two states
+    # is the practice in the market's state (review 10 item 2.9)
+    from .benchmark import subject_market, subject_tins_for_market
+    subject_tins = subject_tins_for_market(store, subject, m) if subject else []
+    # the subject's OWN rows: the peer-only filters (state, city, therapy-only)
+    # describe the market, never the client (the rate card's rule)
+    s_m = subject_market(m)
+    s_where, s_params = _market_where(s_m, bool(m.get("include_assistant")),
+                                      bool(m.get("include_non_dollar")))
+    s_rel = _rates_relation(s_m)
 
     with store.connect() as con:
         cur = con.execute(f"""
@@ -269,18 +278,30 @@ def floor_comparison(store: Store, market: dict | None = None, *,
                 WITH per_tin AS (
                     SELECT t.billing_code, t.tin_value,
                            median(t.negotiated_rate) AS rate
-                    FROM {rel} t LEFT JOIN tin_directory td USING (tin_value)
-                    WHERE {where} AND t.tin_value IN (SELECT unnest(?::VARCHAR[]))
+                    FROM {s_rel} t LEFT JOIN tin_directory td USING (tin_value)
+                    WHERE {s_where} AND t.tin_value IN (SELECT unnest(?::VARCHAR[]))
                     GROUP BY t.billing_code, t.tin_value
                 )
                 SELECT billing_code, round(median(rate), 2)
                 FROM per_tin GROUP BY billing_code
-            """, [*params, subject_tins])
+            """, [*s_params, subject_tins])
             subj = dict(scur.fetchall())
-        floors = con.execute(
-            "SELECT kind, code, rate, any_value(label) FROM floor_schedules "
-            "WHERE state = ? GROUP BY kind, code, rate ORDER BY code",
-            [scope_state]).fetchall()
+        # the NEWEST loaded year of each schedule kind, and that year's label:
+        # two years of one state's Medicaid schedule both came back, and the
+        # last row per code won (row order) under the last row's label
+        floors = con.execute("""
+            WITH newest AS (
+                SELECT kind, max(year) AS year FROM floor_schedules
+                WHERE state = ? GROUP BY kind
+            )
+            SELECT f.kind, f.code, median(f.rate) AS rate,
+                   min(f.label) AS label, f.year
+            FROM floor_schedules f JOIN newest n
+              ON n.kind = f.kind AND n.year IS NOT DISTINCT FROM f.year
+            WHERE f.state = ?
+            GROUP BY f.kind, f.code, f.year
+            ORDER BY f.code, f.kind
+        """, [scope_state, scope_state]).fetchall()
 
     if not floors:
         return {"loaded": False, "rows": [],
@@ -291,9 +312,11 @@ def floor_comparison(store: Store, market: dict | None = None, *,
 
     by_code: dict[str, dict] = {}
     labels: dict[str, str] = {}
-    for kind, code, rate, label in floors:
+    years: dict[str, str] = {}
+    for kind, code, rate, label, year in floors:
         by_code.setdefault(code, {})[kind] = rate
         labels[kind] = label
+        years[kind] = year
 
     rows = []
     for code in sorted(set(by_code) & set(commercial)):
@@ -308,25 +331,32 @@ def floor_comparison(store: Store, market: dict | None = None, *,
             "workers_comp": f.get("workers_comp"),
             "other": f.get("other"),
         }
+        raw = {}
         for kind in ("medicaid", "workers_comp", "other"):
             base = f.get(kind)
-            row[f"pct_of_{kind}"] = (
-                round(100.0 * c["commercial_median"] / base, 1) if base else None)
-            row[f"subject_pct_of_{kind}"] = (
-                round(100.0 * row["subject_rate"] / base, 1)
-                if base and row["subject_rate"] else None)
+            raw[kind] = 100.0 * c["commercial_median"] / base if base else None
+            raw["subject_" + kind] = (100.0 * row["subject_rate"] / base
+                                      if base and row["subject_rate"] else None)
+            row[f"pct_of_{kind}"] = half_up(raw[kind], 1) if raw[kind] is not None else None
+            row[f"subject_pct_of_{kind}"] = (half_up(raw["subject_" + kind], 1)
+                                             if raw["subject_" + kind] is not None else None)
+        row["_raw"] = raw
         rows.append(row)
 
+    # medians of the UNROUNDED percentages, rounded once (172.8 % where the
+    # rounded-then-medianed figure read 172.7 % — review 10 group 4)
     def _median(vals):
         v = sorted(x for x in vals if x is not None)
         if not v:
             return None
         mid = len(v) // 2
-        return round(v[mid] if len(v) % 2 else (v[mid - 1] + v[mid]) / 2, 1)
+        return half_up(v[mid] if len(v) % 2 else (v[mid - 1] + v[mid]) / 2, 1)
 
-    med_pct = _median(r["pct_of_medicaid"] for r in rows)
-    wc_pct = _median(r["pct_of_workers_comp"] for r in rows)
-    subj_med = _median(r["subject_pct_of_medicaid"] for r in rows)
+    med_pct = _median(r["_raw"]["medicaid"] for r in rows)
+    wc_pct = _median(r["_raw"]["workers_comp"] for r in rows)
+    subj_med = _median(r["_raw"]["subject_medicaid"] for r in rows)
+    for r in rows:
+        r.pop("_raw", None)
 
     parts = []
     if med_pct is not None:
@@ -334,14 +364,17 @@ def floor_comparison(store: Store, market: dict | None = None, *,
             f"Commercial rates here run at {med_pct:g}% of {scope_state} "
             "Medicaid" + (f" — this practice at {subj_med:g}%" if subj_med else ""))
     if wc_pct is not None:
-        parts.append(f"and {wc_pct:g}% of workers' comp")
-    headline = (". ".join(parts) + "." if parts else
+        parts.append(f"and {wc_pct:g}% of workers' comp" if parts else
+                     f"Commercial rates here run at {wc_pct:g}% of {scope_state} workers' comp")
+    # one sentence: "…at 148.2%. and 90.9% of…" (review 10 group 4)
+    headline = (", ".join(parts) + "." if parts else
                 f"No code is priced by both a payer and a {scope_state} schedule.")
 
     return {
         "loaded": True, "rows": rows, "count": len(rows), "state": scope_state,
         "as_of": month_label(m["month"]), "payer": payer, "subject": subject,
         "schedule_labels": labels,
+        "schedule_years": years,
         "median_pct_of_medicaid": med_pct,
         "median_pct_of_workers_comp": wc_pct,
         "subject_median_pct_of_medicaid": subj_med,

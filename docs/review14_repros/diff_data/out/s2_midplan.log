@@ -1,0 +1,35 @@
+== a_file_lands_for_done_payer: plan part-way 9/55, payers touched ['Alpha']
+   [after mutation, plan part-way] state=failed payers 0/4 files 8/9 rows 1811/1971 covered=[]
+   [plan finished] state=behind payers 4/4 files 8/9 rows 1811/1971 covered=['Alpha', 'Beta', "O'Neil Health", 'Zeta']
+   stale after plan: True | needs_full: None
+   catch-up: incremental
+   [after catch-up] state=current payers 4/4 files 9/9 rows 1971/1971 covered=['Alpha', 'Beta', "O'Neil Health", 'Zeta']
+   RESULT spine identical to fresh build: True (1885 vs 1885); directory identical: True
+== b_file_lands_for_pending_payer: plan part-way 9/55, payers touched ['Alpha']
+   [after mutation, plan part-way] state=failed payers 0/4 files 8/9 rows 1811/1871 covered=[]
+   [plan finished] state=behind payers 4/4 files 8/9 rows 1811/1871 covered=['Alpha', 'Beta', "O'Neil Health", 'Zeta']
+   stale after plan: True | needs_full: None
+   catch-up: incremental
+   [after catch-up] state=current payers 4/4 files 9/9 rows 1871/1871 covered=['Alpha', 'Beta', "O'Neil Health", 'Zeta']
+   RESULT spine identical to fresh build: True (1783 vs 1783); directory identical: True
+== c_forget_done_payer_file: plan part-way 9/55, payers touched ['Alpha']
+   [after mutation, plan part-way] state=failed payers 0/4 files 7/7 rows 1651/1651 covered=[]
+   [plan finished] state=behind payers 4/4 files 7/7 rows 1651/1651 covered=['Alpha', 'Beta', "O'Neil Health", 'Zeta']
+   stale after plan: True | needs_full: None
+   catch-up: incremental
+   [after catch-up] state=current payers 4/4 files 7/7 rows 1651/1651 covered=['Alpha', 'Beta', "O'Neil Health", 'Zeta']
+   RESULT spine identical to fresh build: True (1575 vs 1575); directory identical: True
+== d_unscopable_forget_while_needs_full_plan: plan part-way 9/55, payers touched ['Alpha']
+   [after mutation, plan part-way] state=failed payers 0/4 files 7/7 rows 1651/1651 covered=[]
+   [plan finished] state=current payers 4/4 files 7/7 rows 1651/1651 covered=['Alpha', 'Beta', "O'Neil Health", 'Zeta']
+   stale after plan: False | needs_full: None
+   [after catch-up] state=current payers 4/4 files 7/7 rows 1651/1651 covered=['Alpha', 'Beta', "O'Neil Health", 'Zeta']
+   RESULT spine identical to fresh build: False (1634 vs 1575); directory identical: True
+   extra rows in spine: 114 missing: 55 payers of extras: ['Alpha']
+== e_unscopable_forget_no_prior_flag: plan part-way 9/55, payers touched ['Alpha']
+   [after mutation, plan part-way] state=failed payers 0/4 files 7/7 rows 1651/1651 covered=[]
+   [plan finished] state=behind payers 4/4 files 7/7 rows 1651/1651 covered=['Alpha', 'Beta', "O'Neil Health", 'Zeta']
+   stale after plan: True | needs_full: 1
+   catch-up: incremental refused (a data removal could not be scoped — full rebuild required) -> full
+   [after catch-up] state=current payers 4/4 files 7/7 rows 1651/1651 covered=['Alpha', 'Beta', "O'Neil Health", 'Zeta']
+   RESULT spine identical to fresh build: True (1575 vs 1575); directory identical: True

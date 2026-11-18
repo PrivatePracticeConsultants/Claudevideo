@@ -1,0 +1,9 @@
+##### D
+8 GiB: pool 2 GB, parser workers 1 (x 2.0 GB), OS 3.0 -> planned 7 of 8.6 GB
+8 GB: pool 2 GB, parser workers 1 (x 2.0 GB), OS 3.0 -> planned 7 of 8.0 GB
+16 GiB: pool 6 GB, parser workers 4 (x 2.0 GB), OS 3.0 -> planned 17 of 17.2 GB
+16 GB: pool 6 GB, parser workers 3 (x 2.0 GB), OS 3.0 -> planned 15 of 16.0 GB
+32 GiB: pool 12 GB, parser workers 9 (x 2.0 GB), OS 3.0 -> planned 33 of 34.4 GB
+32 GB: pool 12 GB, parser workers 8 (x 2.0 GB), OS 3.0 -> planned 31 of 32.0 GB
+this box: 16.867414016 GB total, 14.19831296 GB avail -> 6
+['# after setting aside room for the parser workers (about 1 GB each), Windows', '# and your browser — about 4 GB on a 16 GB laptop, 12 GB on a 32 GB desktop.']

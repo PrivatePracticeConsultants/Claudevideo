@@ -95,7 +95,7 @@ def test_the_rate_card_carries_a_trend_column(cfg, store):
     html = render_rate_card(cfg, store, fs, payer_scorecard(fs))
     assert "<th class='num'>Trend</th>" in html
     assert "<svg" in html and 'class="spark"' in html
-    assert "is a gap, not a flat segment" in html
+    assert "follow the SAME contracts in every month" in html
 
 
 def test_a_one_month_store_draws_no_trend_and_still_renders(cfg, store):

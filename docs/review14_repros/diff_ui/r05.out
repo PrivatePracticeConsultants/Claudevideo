@@ -1,0 +1,5 @@
+(a) other connection sees enable_progress_bar = False progress_bar_time = 2000
+(b) token-less probes after token runs: {'clean': 200}
+(c) after 200 runs (+200 failing): sampler threads alive = 0 active threads delta = 0
+(c) 50 stops (DELETE code, run code): {(200, 409): 50} sampler threads alive = 0 active threads delta = 0
+(d) registry entries: 256 (cap 256 )

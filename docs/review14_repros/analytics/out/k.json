@@ -1,0 +1,439 @@
+{
+ "ready_s": 1.2,
+ "before": {
+  "t": 1794473642.850241,
+  "analytics": {
+   "state": "current",
+   "reason": "",
+   "pct": null,
+   "eta_text": "",
+   "covered_files": 45,
+   "done_files": 45,
+   "covered_payers": 15,
+   "loaded_payers": 15,
+   "covered_rows": 99000000,
+   "loaded_rows": 99000000,
+   "sentence": ""
+  },
+  "data_generation": 0,
+  "payers": [
+   "Payer 00",
+   "Payer 01",
+   "Payer 02",
+   "Payer 03",
+   "Payer 04",
+   "Payer 05",
+   "Payer 06",
+   "Payer 07",
+   "Payer 08",
+   "Payer 09",
+   "Payer 10",
+   "Payer 11",
+   "Payer 12",
+   "Payer 13",
+   "Payer 14"
+  ],
+  "covered": [
+   "Payer 00",
+   "Payer 01",
+   "Payer 02",
+   "Payer 03",
+   "Payer 04",
+   "Payer 05",
+   "Payer 06",
+   "Payer 07",
+   "Payer 08",
+   "Payer 09",
+   "Payer 10",
+   "Payer 11",
+   "Payer 12",
+   "Payer 13",
+   "Payer 14"
+  ],
+  "rates_total": 79027749,
+  "rates_by_payer": {
+   "Moda": 0
+  },
+  "code_payer_rank": {
+   "Payer 06": 66.07,
+   "Payer 00": 65.88499999999999,
+   "Payer 08": 65.8,
+   "Payer 04": 65.68,
+   "Payer 09": 65.62,
+   "Payer 03": 65.59,
+   "Payer 13": 65.58500000000001,
+   "Payer 01": 65.55,
+   "Payer 02": 65.545,
+   "Payer 10": 65.51,
+   "Payer 05": 65.49,
+   "Payer 14": 65.48,
+   "Payer 11": 65.47,
+   "Payer 07": 65.34,
+   "Payer 12": 65.28
+  },
+  "code_hist_n": 1182486,
+  "took": 9.03
+ },
+ "rss_idle_mb": 1463,
+ "drop_to_done_s": 5.0,
+ "drop_to_covered_s": 17.5,
+ "timeline": [
+  {
+   "dt": -0.0,
+   "state": "current",
+   "files": "45/45",
+   "payers": "15/15",
+   "sentence": "",
+   "err": null
+  },
+  {
+   "dt": 3.0,
+   "state": "building",
+   "files": "45/46",
+   "payers": "15/16",
+   "sentence": "Analytics cover 15 of 16 payers (45 of 46 files). Adding the newly loaded files to the analytics",
+   "err": null
+  },
+  {
+   "dt": 14.6,
+   "state": "current",
+   "files": "46/46",
+   "payers": "16/16",
+   "sentence": "",
+   "err": null
+  }
+ ],
+ "after": {
+  "t": 1794473671.4056025,
+  "analytics": {
+   "state": "current",
+   "reason": "",
+   "pct": null,
+   "eta_text": "",
+   "covered_files": 46,
+   "done_files": 46,
+   "covered_payers": 16,
+   "loaded_payers": 16,
+   "covered_rows": 99430768,
+   "loaded_rows": 99430768,
+   "sentence": ""
+  },
+  "data_generation": 1,
+  "payers": [
+   "Moda",
+   "Payer 00",
+   "Payer 01",
+   "Payer 02",
+   "Payer 03",
+   "Payer 04",
+   "Payer 05",
+   "Payer 06",
+   "Payer 07",
+   "Payer 08",
+   "Payer 09",
+   "Payer 10",
+   "Payer 11",
+   "Payer 12",
+   "Payer 13",
+   "Payer 14"
+  ],
+  "covered": [
+   "Moda",
+   "Payer 00",
+   "Payer 01",
+   "Payer 02",
+   "Payer 03",
+   "Payer 04",
+   "Payer 05",
+   "Payer 06",
+   "Payer 07",
+   "Payer 08",
+   "Payer 09",
+   "Payer 10",
+   "Payer 11",
+   "Payer 12",
+   "Payer 13",
+   "Payer 14"
+  ],
+  "rates_total": 79110295,
+  "rates_by_payer": {
+   "Moda": 82546
+  },
+  "code_payer_rank": {
+   "Payer 06": 66.07,
+   "Payer 00": 65.88499999999999,
+   "Payer 08": 65.8,
+   "Payer 04": 65.68,
+   "Payer 09": 65.62,
+   "Payer 03": 65.59,
+   "Payer 13": 65.58500000000001,
+   "Payer 01": 65.55,
+   "Payer 02": 65.545,
+   "Payer 10": 65.51,
+   "Payer 05": 65.49,
+   "Payer 14": 65.48,
+   "Payer 11": 65.47,
+   "Payer 07": 65.34,
+   "Payer 12": 65.28,
+   "Moda": 26.17
+  },
+  "code_hist_n": 1184241,
+  "took": 3.4
+ },
+ "rss_peak_main_mb": 2010,
+ "rss_peak_total_mb": 2010,
+ "events": [
+  [
+   2.84,
+   "incr_enter",
+   null,
+   null
+  ],
+  [
+   2.93,
+   "delta_enter",
+   null,
+   null
+  ],
+  [
+   2.94,
+   "sql",
+   "BEGIN TRANSACTION",
+   0.0
+  ],
+  [
+   2.94,
+   "sql",
+   "DELETE FROM rates_by_tin_tbl WHERE payer IN ('Moda')",
+   0.0
+  ],
+  [
+   4.14,
+   "sql",
+   "INSERT INTO rates_by_tin_tbl BY NAME WITH spine AS ( SELECT payer, tin_value, billing_code, min(tin_type) AS tin_type, tin_is_really_npi, mi",
+   1.204
+  ],
+  [
+   4.14,
+   "sql",
+   "INSERT OR REPLACE INTO meta VALUES ('spine_token', ?)",
+   0.002
+  ],
+  [
+   4.15,
+   "sql",
+   "COMMIT",
+   0.008
+  ],
+  [
+   4.15,
+   "sql",
+   "BEGIN TRANSACTION",
+   0.0
+  ],
+  [
+   4.17,
+   "sql",
+   "DELETE FROM tin_directory_tbl WHERE tin_value IN (SELECT tin_value FROM __delta_tins)",
+   0.017
+  ],
+  [
+   14.45,
+   "sql",
+   "INSERT INTO tin_directory_tbl BY NAME WITH tin_npis AS ( SELECT DISTINCT tin_value, npi FROM rates WHERE tin_value IS NOT NULL AND NOT tin_i",
+   10.282
+  ],
+  [
+   14.46,
+   "sql",
+   "COMMIT",
+   0.01
+  ],
+  [
+   14.46,
+   "delta_exit",
+   null,
+   null
+  ],
+  [
+   14.47,
+   "incr_exit",
+   null,
+   11.627739191055298
+  ]
+ ],
+ "log": [
+  "08:53:57 INFO    mrfx.store: analytics memory budget: 6 GB (5.6 GiB, as DuckDB reports it) \u2014 chosen automatically from this machine's RAM; raise duckdb_memory_gb in config/mrfx.yaml if rebuilds run out",
+  "08:54:14 INFO    mrfx.store: analytics update: 1 new file(s), 0 queued slice(s) \u2014 recomputing 1 payer slice(s) instead of the whole store",
+  "08:54:26 INFO    mrfx.store: analytics update finished in 12s (payer slice, not a full rebuild)"
+ ],
+ "hash_with_moda": {
+  "files": [
+   46,
+   46,
+   99430768
+  ],
+  "meta": {
+   "spine_token": "ff5cd3eeb4e0f141",
+   "rollup_schema_version": "2",
+   "rollup_covered_through": "2026-11-12 08:54:14.671257",
+   "rollup_covered_names": "[\"moda_ModaTXPriceTrans_20261101.json.gz\"]",
+   "directory_names_through": "2026-11-01 00:00:00",
+   "directory_schema_version": "6"
+  },
+  "rates_by_tin_tbl": "set:79161348:700130113947170112732343040:5346982716212178268",
+  "tin_directory_tbl": "set:195781:1805133109197828422911912:3134570495324598370",
+  "payers": [
+   [
+    "Moda",
+    133599
+   ],
+   [
+    "Payer 00",
+    5269140
+   ],
+   [
+    "Payer 01",
+    5268604
+   ],
+   [
+    "Payer 02",
+    5269050
+   ],
+   [
+    "Payer 03",
+    5267341
+   ],
+   [
+    "Payer 04",
+    5270065
+   ],
+   [
+    "Payer 05",
+    5267579
+   ],
+   [
+    "Payer 06",
+    5268439
+   ],
+   [
+    "Payer 07",
+    5266667
+   ],
+   [
+    "Payer 08",
+    5268854
+   ],
+   [
+    "Payer 09",
+    5269980
+   ],
+   [
+    "Payer 10",
+    5268926
+   ],
+   [
+    "Payer 11",
+    5268253
+   ],
+   [
+    "Payer 12",
+    5268185
+   ],
+   [
+    "Payer 13",
+    5268245
+   ],
+   [
+    "Payer 14",
+    5268421
+   ]
+  ],
+  "hash_s": 0.4
+ },
+ "forget": {
+  "rc": 0,
+  "out": "moda_ModaTXPriceTrans_20261101.json.gz: removed 430,768 rows, freed 0.9 MB\n08:54:36 INFO    mrfx.store: analytics memory budget: 6 GB (5.6 GiB, as DuckDB reports it) \u2014 chosen automatically from this machine's RAM; raise duckdb_memory_gb in config/mrfx.yaml if rebuilds run out\n08:54:37 INFO    mrfx.store: analytics update: 0 new file(s), 1 queued slice(s) \u2014 recomputing 1 payer slice(s) instead of the whole store\n08:54:44 INFO    mrfx.store: analytics update finished in 7s (payer slice, not a full rebuild)\n08:54:44 INFO    mrfx.ingest: forgot moda_ModaTXPriceTrans_20261101.json.gz: 430768 rows and 0.9 MB removed\n",
+  "s": 8.9
+ },
+ "hash_after_forget": {
+  "files": [
+   45,
+   45,
+   99000000
+  ],
+  "meta": {
+   "spine_token": "b14bac2fcd29b08d",
+   "rollup_schema_version": "2",
+   "rollup_covered_through": "2026-11-12 08:54:14.671257",
+   "rollup_covered_names": "[\"moda_ModaTXPriceTrans_20261101.json.gz\"]",
+   "directory_names_through": "2026-11-01 00:00:00",
+   "directory_schema_version": "6"
+  },
+  "rates_by_tin_tbl": "set:79027749:699191508509275952709874553:3119853143512578565",
+  "tin_directory_tbl": "set:194000:1788841819110324513618135:14497193866928991297",
+  "payers": [
+   [
+    "Payer 00",
+    5269140
+   ],
+   [
+    "Payer 01",
+    5268604
+   ],
+   [
+    "Payer 02",
+    5269050
+   ],
+   [
+    "Payer 03",
+    5267341
+   ],
+   [
+    "Payer 04",
+    5270065
+   ],
+   [
+    "Payer 05",
+    5267579
+   ],
+   [
+    "Payer 06",
+    5268439
+   ],
+   [
+    "Payer 07",
+    5266667
+   ],
+   [
+    "Payer 08",
+    5268854
+   ],
+   [
+    "Payer 09",
+    5269980
+   ],
+   [
+    "Payer 10",
+    5268926
+   ],
+   [
+    "Payer 11",
+    5268253
+   ],
+   [
+    "Payer 12",
+    5268185
+   ],
+   [
+    "Payer 13",
+    5268245
+   ],
+   [
+    "Payer 14",
+    5268421
+   ]
+  ],
+  "hash_s": 0.4
+ }
+}

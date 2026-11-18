@@ -1,0 +1,16 @@
+old code: /tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad/audit14/diff_data/old/mrfx/__init__.py
+new code: /home/user/Claudevideo/mrfx/__init__.py
+IDENTICAL outreach tin {} 42 lines
+IDENTICAL outreach tin {"state": "MO"} 28 lines
+IDENTICAL outreach tin {"state": "KS", "discipline": "pt"} 15 lines
+IDENTICAL outreach tin {"cpt": "97110,97162"} 42 lines
+IDENTICAL outreach tin {"payer": "Beta"} 26 lines
+IDENTICAL outreach entity {} 12 lines
+IDENTICAL outreach entity {"state": "MO"} 9 lines
+IDENTICAL outreach entity {"state": "KS", "discipline": "pt"} 5 lines
+IDENTICAL outreach entity {"cpt": "97110,97162"} 12 lines
+IDENTICAL outreach entity {"payer": "Beta"} 12 lines
+IDENTICAL overview None 
+IDENTICAL overview MO 
+IDENTICAL overview KS 
+IDENTICAL overview TX 

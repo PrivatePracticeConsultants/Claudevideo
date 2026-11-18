@@ -34,9 +34,11 @@ HONESTY:
 from __future__ import annotations
 
 import datetime as dt
+import math
 import logging
 
 from .store import Store
+from .rounding import half_up, signed_pct
 
 log = logging.getLogger(__name__)
 
@@ -84,7 +86,15 @@ def load_index(store: Store) -> dict:
     loaded, user values winning for the same year (they are newer, or a
     deliberate switch to a different basket)."""
     values = dict(DEFAULT_VALUES)
-    name, source = DEFAULT_INDEX, DEFAULT_INDEX_SOURCE
+    # every year carries the name of the index it came from: a user value
+    # entered under another name ("MEI") must never be divided by a shipped
+    # CPI-U value (round 7 P0.5 — that read a flat payer as "+90% in real
+    # terms"), and one row's name must never relabel the whole series
+    names = {y: DEFAULT_INDEX for y in values}
+    # and its own source: one user row's source must not become every
+    # year's (audit 8 P1-8 — a saved MEI 2025 relabelled the CPI-U 2023->2024
+    # deflator "CMS Medicare Economic Index 2025; extended locally")
+    sources = {y: DEFAULT_INDEX_SOURCE for y in values}
     user: dict[int, float] = {}
     try:
         with store.connect() as con:
@@ -98,14 +108,17 @@ def load_index(store: Store) -> dict:
             user[int(y)] = float(v)
         except (TypeError, ValueError):
             continue
-        if nm:
-            name = str(nm)
-        if src:
-            source = str(src)
+        names[int(y)] = str(nm).strip() if nm and str(nm).strip() else DEFAULT_INDEX
+        sources[int(y)] = str(src).strip() if src and str(src).strip() else "entered by you"
     values.update(user)
+    distinct = sorted(set(names.values()))
+    name = distinct[0] if len(distinct) == 1 else " / ".join(distinct)
+    srcs = list(dict.fromkeys(sources[y] for y in sorted(sources)))
     return {
         "index_name": name,
-        "source": source if not user else f"{source}; extended locally",
+        "names": names,
+        "sources": sources,
+        "source": "; ".join(srcs),
         "values": values,
         "years": sorted(values),
         "first_year": min(values) if values else None,
@@ -128,6 +141,8 @@ def save_index_values(store: Store, rows: list[tuple], *, index_name: str | None
                 f"each row must be a year and a number, got {r!r}")
         if not 1900 <= y <= 2200:
             raise InflationError(f"{y} is not a plausible year")
+        if not math.isfinite(v):
+            raise InflationError(f"an index value must be a real number, got {v} for {y}")
         if v <= 0:
             raise InflationError(
                 f"an index value must be positive, got {v} for {y}")
@@ -140,6 +155,9 @@ def save_index_values(store: Store, rows: list[tuple], *, index_name: str | None
             "INSERT OR REPLACE INTO inflation_index "
             "(year, value, index_name, source, added_at) VALUES (?, ?, ?, ?, ?)",
             payload)
+    # the cached trajectory reads this table: after adding a year it kept
+    # "No real-terms figures" until the next rollup (review 10 group 4)
+    store.note_user_edit()
     return len(payload)
 
 
@@ -168,12 +186,26 @@ def deflator(index: dict, from_month: str | None, to_month: str | None,
         return {"factor": None, "basis": None,
                 "reason": "a real-terms figure needs two readable YYYY-MM months"}
     vals = index.get("values") or {}
+    names = index.get("names") or {}
+    n0, n1 = names.get(y0), names.get(y1)
+    if y0 in vals and y1 in vals and n0 and n1 and n0 != n1:
+        return {
+            "factor": None, "basis": None, "from_year": y0, "to_year": y1,
+            "reason": (
+                f"{y0} is {n0} and {y1} is {n1} — two different price indexes "
+                f"cannot be divided into one another. Load a full {n1} series "
+                f"(every year from {y0}), or the {n0} value for {y1}."),
+        }
     if y0 in vals and y1 in vals and vals[y0]:
+        srcs = index.get("sources") or {}
+        s0, s1 = srcs.get(y0), srcs.get(y1)
         return {
             "factor": vals[y1] / vals[y0],
             "basis": "index",
-            "index_name": index.get("index_name"),
-            "source": index.get("source"),
+            "index_name": n1 or index.get("index_name"),
+            # the two endpoint years' own sources — not whatever was saved last
+            "source": (s0 if s0 == s1 else "; ".join(x for x in (s0, s1) if x))
+                      or index.get("source"),
             "from_year": y0, "to_year": y1,
             "from_value": vals[y0], "to_value": vals[y1],
             "reason": None,
@@ -212,7 +244,7 @@ def real_change_pct(nominal_pct: float | None, defl: dict) -> float | None:
     """
     if nominal_pct is None or not defl or not defl.get("factor"):
         return None
-    return round(100.0 * ((1.0 + nominal_pct / 100.0) / defl["factor"] - 1.0), 1)
+    return half_up(100.0 * ((1.0 + nominal_pct / 100.0) / defl["factor"] - 1.0), 1)
 
 
 def erosion_line(payer: str, nominal_pct: float | None, real_pct: float | None,
@@ -221,16 +253,16 @@ def erosion_line(payer: str, nominal_pct: float | None, real_pct: float | None,
     if real_pct is None:
         return ""
     span = f"{first_month} to {last_month}"
-    nom = f"{nominal_pct:+.1f}%" if nominal_pct is not None else "unchanged"
+    nom = signed_pct(nominal_pct) if nominal_pct is not None else "unchanged"
     basis = (f"{defl.get('index_name')}" if defl.get("basis") == "index"
              else f"an assumed {defl.get('assumed_pct_per_year'):g}%/yr")
     if real_pct < 0 and (nominal_pct or 0) >= 0:
-        return (f"{payer}: {nom} in dollars over {span}, but {real_pct:+.1f}% in "
+        return (f"{payer}: {nom} in dollars over {span}, but {signed_pct(real_pct)} in "
                 f"real terms — flat pay is a pay cut once costs rise ({basis}).")
     if real_pct < 0:
-        return (f"{payer}: {nom} in dollars over {span}, and {real_pct:+.1f}% "
+        return (f"{payer}: {nom} in dollars over {span}, and {signed_pct(real_pct)} "
                 f"after inflation ({basis}) — the cut is deeper than it looks.")
-    return (f"{payer}: {nom} in dollars over {span}, {real_pct:+.1f}% in real "
+    return (f"{payer}: {nom} in dollars over {span}, {signed_pct(real_pct)} in real "
             f"terms ({basis}) — this payer kept ahead of costs.")
 
 

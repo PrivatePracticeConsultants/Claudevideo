@@ -1,0 +1,11 @@
+##### C
+after first drain: [(1, 'done', 'toc'), (2, 'done', 'in_network'), (3, 'done', 'in_network'), (4, 'done', 'in_network')]
+cleared: [3]
+   (1, 'skipped', 'canceled', 'cleared from the queue')
+   (2, 'done', 'in_network', None)
+   (3, 'skipped', 'canceled', 'cleared from the queue')
+   (4, 'skipped', 'canceled', 'cleared from the queue')
+file months: [('2026-05',), ('2026-06',)]
+child requests after the clear (probes only?): [('/c2.json.gz', 200, None), ('/c0.json.gz', 200, None), ('/c2.json.gz', 206, 'bytes=0-0'), ('/c0.json.gz', 206, 'bytes=0-0'), ('/c1.json.gz', 206, 'bytes=0-0'), ('/c0.json.gz', 200, None)]
+after a second drain: [(1, 'skipped', 'canceled'), (2, 'done', 'in_network'), (3, 'skipped', 'canceled'), (4, 'skipped', 'canceled')]
+RESULT: PROBLEM

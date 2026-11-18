@@ -1,0 +1,5 @@
+exports folder before: []
+DELETE during Compressing: (200, b'{"stopped":true}') pct was 95
+stages seen: [('Checking the filters and the disk space', 'running'), ('Writing the rows to a file', 'running'), ('Writing the methodology', 'running'), ('Compressing', 'running')]
+export answered: 409 b'{"detail":"stopped"}'
+exports folder after: [('mrfx-export-gwtvyykt.zip', 1949956)]

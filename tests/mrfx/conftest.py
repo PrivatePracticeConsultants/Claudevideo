@@ -9,6 +9,12 @@ from mrfx.store import Store
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
+# Starlette's TestClient addresses requests to "testserver"; the dashboard
+# only answers requests addressed to this machine (mrfx.api.TRUSTED_HOSTS).
+import mrfx.api as _api  # noqa: E402
+
+_api.TRUSTED_HOSTS.add("testserver")
+
 
 @pytest.fixture
 def cfg(tmp_path) -> MrfxConfig:
@@ -21,6 +27,9 @@ def cfg(tmp_path) -> MrfxConfig:
         entity_map_path=tmp_path / "entity_map.yaml",
         payer_name_map={"Testco Health": "Testco"},
         confirm_over_gb=5.0,
+        # never a ~900 MB CMS download from a test that runs serve (0.8.5)
+        cms_dac="off",
+        cms_reference="off",
     )
     c.ensure_dirs()
     return c

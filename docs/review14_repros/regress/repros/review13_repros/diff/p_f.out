@@ -1,0 +1,9 @@
+##### F
+first drain: [(1, 'done', 'toc', 0), (2, 'done', 'in_network', 3), (3, 'done', 'in_network', 4), (4, 'done', 'in_network', 5)]
+   (1, 'done', 'toc', 0, 'http://127.0.0.1:35457/idx.json')
+   (2, 'done', 'in_network', 9, 'http://127.0.0.1:35457/c0.json.gz?sig=S2')
+   (3, 'done', 'in_network', 4, 'http://127.0.0.1:35457/c1.json.gz?sig=S2')
+   (4, 'done', 'in_network', 5, 'http://127.0.0.1:35457/c2.json.gz?sig=S1')
+requests: [('/idx.json', 200, None), ('/c0.json.gz?sig=S2', 206, 'bytes=0-0'), ('/c1.json.gz?sig=S2', 206, 'bytes=0-0'), ('/c0.json.gz?sig=S2', 200, None)]
+rates by payer/month: [('P0', '2026-06', 9), ('P1', '2026-05', 4), ('P2', '2026-05', 5)]
+RESULT: held

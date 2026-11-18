@@ -33,9 +33,10 @@ import logging
 import re
 
 from .benchmark import (BenchmarkError, _market_where, _rates_relation,
-                        normalize_market, resolve_subject_tins)
+                        normalize_market)
 from .parser import clean_code
 from .store import Store
+from .rounding import half_up
 
 log = logging.getLogger(__name__)
 
@@ -153,20 +154,33 @@ def check_underpayments(store: Store, subject: str, text: str,
     subject = str(subject or "").strip()
     if not subject:
         raise BenchmarkError("pick the practice whose remit this is")
-    tins = resolve_subject_tins(store, subject)
     market = normalize_market(market or {"month": "latest"})
+    # the subject rule (subject_tins_for_market): a name used in two states
+    # is the practice in the market's state (review 10 item 2.9)
+    from .benchmark import subject_tins_for_market
+    tins = subject_tins_for_market(store, subject, market)
     lines, problems = parse_remit(text)
 
-    where, params = _market_where(market, False, False)
-    rel = _rates_relation(market)
+    # the practice's OWN published rate — the rate card's rule: state, city
+    # and therapy-only describe a peer market, never the client (a state here
+    # also referenced the practice directory this query never joined: a
+    # binder error, HTTP 500), and the entity rate is the median of its member
+    # TINs' own medians (invariant 5), not a median over every pooled row
+    own = {k: v for k, v in market.items() if k not in ("state", "city", "therapy_only")}
+    where, params = _market_where(own, False, False)
+    rel = _rates_relation(own, "tin_value IN (SELECT unnest(?::VARCHAR[]))")
     with store.connect() as con:
         cur = con.execute(f"""
-            SELECT t.payer, t.billing_code, median(t.negotiated_rate) AS rate,
-                   count(*) AS n
-            FROM {rel} t
-            WHERE {where} AND t.tin_value IN (SELECT unnest(?::VARCHAR[]))
-            GROUP BY 1, 2
-        """, [*params, tins])
+            WITH per_tin AS (
+                SELECT t.payer, t.billing_code, t.tin_value,
+                       median(t.negotiated_rate) AS rate, count(*) AS n
+                FROM {rel} t
+                WHERE {where} AND t.tin_value IN (SELECT unnest(?::VARCHAR[]))
+                GROUP BY 1, 2, 3
+            )
+            SELECT payer, billing_code, round(median(rate), 2) AS rate, sum(n) AS n
+            FROM per_tin GROUP BY 1, 2 ORDER BY 1, 2
+        """, [tins, *params, tins])
         published: dict[tuple, float] = {}
         by_code: dict[str, list[float]] = {}
         real_name: dict[str, str] = {}   # lowercase key -> the payer's real name
@@ -207,13 +221,13 @@ def check_underpayments(store: Store, subject: str, text: str,
                    " (and the code is priced by more than one payer, so the "
                    "payer column is needed to pick one)"))})
             continue
-        expected = round(rate * (ln["units"] or 1.0), 2)
-        short = round(expected - ln["amount"], 2)
+        expected = half_up(rate * (ln["units"] or 1.0), 2)
+        short = half_up(expected - ln["amount"], 2)
         # report the payer's REAL name, not the lowercased match key
         row = {**ln, "matched_payer": real_name.get(matched_payer, matched_payer),
-               "published_rate": round(rate, 2),
+               "published_rate": half_up(rate, 2),
                "expected": expected, "shortfall": short,
-               "pct_short": round(100.0 * short / expected, 1) if expected else None}
+               "pct_short": half_up(100.0 * short / expected, 1) if expected else None}
         if short > tolerance:
             total_short += short
             flagged.append(row)
@@ -227,7 +241,7 @@ def check_underpayments(store: Store, subject: str, text: str,
         "summary": {
             "lines_read": len(lines), "flagged": len(flagged),
             "ok": len(matched), "unmatched": len(unmatched),
-            "total_shortfall": round(total_short, 2),
+            "total_shortfall": half_up(total_short, 2),
             "basis_note": (
                 "You told the app these amounts are the ALLOWED amount."
                 if basis == "allowed" else

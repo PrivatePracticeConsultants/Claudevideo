@@ -1,0 +1,4 @@
+after link A failed: content claims held = {'92856b6a83733ca87243f073a6b925e724e6bfea5d73416fb41ef2c0d8495dff': '0e029f3e_a.json.gz'}
+queue: [('http://127.0.0.1:43577/a.json.gz', 'failed', 'in_network', 'ingest crashed: simulated transient failure (disk briefly unavailable)'), ('http://127.0.0.1:43577/b.json.gz', 'skipped', 'duplicate', 'the same content as 0e029f3e_a.json.gz, which is being loaded right now — will retry automatically from the kept download if that one fails')]
+rate rows: 0 (the document = 60)
+inbox copy: scan_inbox returned within 20 s: False None

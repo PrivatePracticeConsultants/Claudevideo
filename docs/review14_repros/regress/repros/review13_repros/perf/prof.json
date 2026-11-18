@@ -1,0 +1,1806 @@
+{
+ "stats": {
+  "url": "/api/stats",
+  "payload": null,
+  "runs": [
+   {
+    "run": "cold",
+    "status": 200,
+    "bytes": 252,
+    "total_s": 1.692,
+    "n_statements": 14,
+    "sql_total_s": 1.637,
+    "top_sql": [
+     [
+      0.54,
+      "SELECT count(DISTINCT tin_value), count(DISTINCT payer) FROM rates_by_tin_tbl"
+     ],
+     [
+      0.536,
+      "SELECT count(DISTINCT npi) FROM (SELECT npi FROM rate_npi_set)"
+     ],
+     [
+      0.458,
+      "SELECT count(*), count(*) FILTER (WHERE org_name IS NOT NULL) FROM npi_directory WHERE npi IN (SELECT npi FROM (SELECT npi FROM rate_npi_set))"
+     ],
+     [
+      0.042,
+      "SELECT filename, status, ref_groups_skipped, error, coalesce(TRY_CAST(json_extract_string(qa, '$.missing_ref_ids') AS BIGINT), 0) AS missing_ref_ids FROM files "
+     ],
+     [
+      0.028,
+      "SELECT count(*) FROM rates"
+     ],
+     [
+      0.016,
+      "SELECT part, sig FROM rate_npi_parts"
+     ],
+     [
+      0.007,
+      "SELECT count(*) FROM files WHERE status = 'done'"
+     ],
+     [
+      0.003,
+      "SELECT filename, finished_at::VARCHAR FROM files WHERE status = 'done' AND rows_emitted > 0 AND finished_at::VARCHAR >= ?"
+     ]
+    ],
+    "top_funcs": [
+     "        1    0.000    0.000    1.685    1.685 /home/user/Claudevideo/mrfx/api.py:1216(wrapper)",
+     "        1    0.000    0.000    1.685    1.685 /home/user/Claudevideo/mrfx/api.py:4425(stats)",
+     "        1    0.000    0.000    1.685    1.685 /home/user/Claudevideo/mrfx/api.py:809(grain_of)",
+     "        1    1.684    1.684    1.684    1.684 /home/user/Claudevideo/mrfx/store.py:5364(enrichment_progress)",
+     "        1    0.588    0.588    0.634    0.634 /home/user/Claudevideo/mrfx/api.py:4653(_dicts)",
+     "        1    0.580    0.580    0.580    0.580 /home/user/Claudevideo/mrfx/store.py:5312(store_stats)",
+     "     16/4    0.000    0.000    0.034    0.008 {built-in method builtins.next}"
+    ]
+   },
+   {
+    "run": "warm",
+    "status": 200,
+    "bytes": 252,
+    "total_s": 0.01,
+    "n_statements": 3,
+    "sql_total_s": 0.003,
+    "top_sql": [
+     [
+      0.001,
+      "SELECT count(*) FROM files WHERE status = 'done'"
+     ],
+     [
+      0.001,
+      "SELECT filename, status, ref_groups_skipped, error, coalesce(TRY_CAST(json_extract_string(qa, '$.missing_ref_ids') AS BIGINT), 0) AS missing_ref_ids FROM files "
+     ],
+     [
+      0.0,
+      "SELECT tin_value, entity_name FROM entity_map"
+     ]
+    ],
+    "top_funcs": [
+     "    16/12    0.000    0.000    0.010    0.001 {built-in method builtins.next}",
+     "        1    0.000    0.000    0.004    0.004 /home/user/Claudevideo/mrfx/api.py:1216(wrapper)",
+     "        1    0.000    0.000    0.004    0.004 /home/user/Claudevideo/mrfx/api.py:4425(stats)"
+    ]
+   }
+  ]
+ },
+ "overview": {
+  "url": "/api/overview",
+  "payload": null,
+  "runs": [
+   {
+    "run": "cold",
+    "status": 200,
+    "bytes": 3284,
+    "total_s": 12.82,
+    "n_statements": 7,
+    "sql_total_s": 12.785,
+    "top_sql": [
+     [
+      7.001,
+      "WITH per_tin AS ( SELECT t.payer, t.billing_code, t.tin_value, median(t.negotiated_rate) AS rate FROM __overview t WHERE TRUE GROUP BY t.payer, t.billing_code, "
+     ],
+     [
+      2.664,
+      "CREATE OR REPLACE TEMP TABLE __overview AS SELECT t.payer, t.billing_code, t.tin_value, t.discipline, t.negotiated_rate FROM (SELECT * FROM rates_by_tin t0 WHER"
+     ],
+     [
+      2.164,
+      "WITH per_tin AS ( SELECT t.billing_code, t.tin_value, median(t.negotiated_rate) AS rate FROM __overview t WHERE TRUE GROUP BY t.billing_code, t.tin_value) SELEC"
+     ],
+     [
+      0.603,
+      "SELECT count(DISTINCT t.payer) AS payers, count(DISTINCT t.billing_code) AS codes, count(DISTINCT t.tin_value) AS practices FROM __overview t WHERE TRUE"
+     ],
+     [
+      0.317,
+      "WITH per_tin AS ( SELECT CASE t.billing_code WHEN '97162' THEN 'pt' WHEN '97166' THEN 'ot' ELSE 'slp' END AS discipline, t.tin_value, median(t.negotiated_rate) "
+     ],
+     [
+      0.019,
+      "SELECT DISTINCT s FROM ( SELECT unnest(states) AS s FROM tin_directory WHERE states IS NOT NULL AND len(states) > 0 UNION SELECT state AS s FROM npi_directory W"
+     ],
+     [
+      0.017,
+      "DROP TABLE IF EXISTS __overview"
+     ]
+    ],
+    "top_funcs": [
+     "    16/12    0.000    0.000   12.819    1.068 {built-in method builtins.next}",
+     "        1    0.000    0.000   12.811   12.811 /home/user/Claudevideo/mrfx/api.py:4323(overview)",
+     "        1    0.000    0.000   12.810   12.810 /home/user/Claudevideo/mrfx/overview.py:35(market_overview)",
+     "        1   12.772   12.772   12.810   12.810 /home/user/Claudevideo/mrfx/store.py:5556(available_states)",
+     "        1    0.020    0.020    0.020    0.020 /home/user/Claudevideo/mrfx/store.py:5580(_compute_states)"
+    ]
+   },
+   {
+    "run": "warm",
+    "status": 200,
+    "bytes": 3284,
+    "total_s": 0.008,
+    "n_statements": 0,
+    "sql_total_s": 0,
+    "top_sql": [],
+    "top_funcs": [
+     "    16/12    0.000    0.000    0.008    0.001 {built-in method builtins.next}"
+    ]
+   }
+  ]
+ },
+ "quality_posture": {
+  "url": "/api/quality/posture",
+  "payload": {
+   "market": {
+    "month": "latest"
+   }
+  },
+  "runs": [
+   {
+    "run": "cold",
+    "status": 200,
+    "bytes": 5702,
+    "total_s": 6.956,
+    "n_statements": 1,
+    "sql_total_s": 6.93,
+    "top_sql": [
+     [
+      6.93,
+      "WITH rows AS ( SELECT t.payer, t.billing_code, t.tin_value, lower(trim(coalesce(t.negotiated_type, ''))) AS ntype, median(t.negotiated_rate) AS rate FROM (SELEC"
+     ]
+    ],
+    "top_funcs": [
+     "    16/12    0.000    0.000    6.956    0.580 {built-in method builtins.next}",
+     "        1    0.000    0.000    6.945    6.945 /home/user/Claudevideo/mrfx/api.py:3452(api_quality_posture)",
+     "        1    0.000    0.000    6.945    6.945 /home/user/Claudevideo/mrfx/store.py:5980(wrapper)"
+    ]
+   },
+   {
+    "run": "warm",
+    "status": 200,
+    "bytes": 5702,
+    "total_s": 0.008,
+    "n_statements": 0,
+    "sql_total_s": 0,
+    "top_sql": [],
+    "top_funcs": [
+     "    16/12    0.000    0.000    0.008    0.001 {built-in method builtins.next}"
+    ]
+   }
+  ]
+ },
+ "quality_types": {
+  "url": "/api/quality/types",
+  "payload": {
+   "market": {
+    "month": "latest"
+   }
+  },
+  "runs": [
+   {
+    "run": "cold",
+    "status": 200,
+    "bytes": 1653,
+    "total_s": 4.464,
+    "n_statements": 2,
+    "sql_total_s": 4.454,
+    "top_sql": [
+     [
+      3.215,
+      "SELECT coalesce(nullif(trim(lower(t.negotiated_type)), ''), '(unstated)') AS rate_type, count(*) AS n_rows, count(DISTINCT t.tin_value) AS n_practices, count(DI"
+     ],
+     [
+      1.239,
+      "SELECT t.payer, count(*) AS n_rows, sum(CASE WHEN lower(trim(t.negotiated_type)) IN ('negotiated', 'fee schedule', 'fee_schedule') THEN 1 ELSE 0 END) AS n_contr"
+     ]
+    ],
+    "top_funcs": [
+     "    16/12    0.000    0.000    4.463    0.372 {built-in method builtins.next}",
+     "        1    0.000    0.000    4.457    4.457 /home/user/Claudevideo/mrfx/api.py:3441(api_quality_types)",
+     "        1    0.000    0.000    4.456    4.456 /home/user/Claudevideo/mrfx/store.py:5980(wrapper)",
+     "        1    0.000    0.000    4.456    4.456 /home/user/Claudevideo/mrfx/store.py:4930(cached)"
+    ]
+   },
+   {
+    "run": "warm",
+    "status": 200,
+    "bytes": 1653,
+    "total_s": 0.007,
+    "n_statements": 0,
+    "sql_total_s": 0,
+    "top_sql": [],
+    "top_funcs": [
+     "    16/12    0.000    0.000    0.007    0.001 {built-in method builtins.next}"
+    ]
+   }
+  ]
+ },
+ "summary_tin_month": {
+  "url": "/api/summary?grain=tin&month=2026-09&dollar_only=1",
+  "payload": null,
+  "runs": [
+   {
+    "run": "cold",
+    "status": 200,
+    "bytes": 3510,
+    "total_s": 0.019,
+    "n_statements": 7,
+    "sql_total_s": 0.007,
+    "top_sql": [
+     [
+      0.001,
+      "SELECT value FROM meta WHERE key = ?"
+     ],
+     [
+      0.001,
+      "SELECT key, value FROM meta WHERE key IN ('spine_token', 'rollup_covered_through', 'rollup_covered_names', 'rollup_pending_payers', 'rollup_needs_full', 'rollup"
+     ],
+     [
+      0.001,
+      "SELECT filename, finished_at::VARCHAR FROM files WHERE status = 'done' AND rows_emitted > 0 AND finished_at::VARCHAR >= ?"
+     ],
+     [
+      0.001,
+      "SELECT value FROM meta WHERE key = ?"
+     ],
+     [
+      0.001,
+      "SELECT value FROM meta WHERE key = ?"
+     ],
+     [
+      0.001,
+      "SELECT value FROM meta WHERE key = ?"
+     ],
+     [
+      0.001,
+      "SELECT state, locality, source, code, non_facility_rate FROM mpfs WHERE isfinite(non_facility_rate) AND non_facility_rate > 0"
+     ]
+    ],
+    "top_funcs": [
+     "    16/12    0.000    0.000    0.019    0.002 {built-in method builtins.next}",
+     "        4    0.004    0.001    0.011    0.003 /home/user/Claudevideo/mrfx/store.py:1994(_meta_get)",
+     "        1    0.000    0.000    0.011    0.011 /home/user/Claudevideo/mrfx/api.py:1871(summary)",
+     "        1    0.000    0.000    0.011    0.011 /home/user/Claudevideo/mrfx/api.py:1993(_with_anchor)",
+     "        1    0.000    0.000    0.010    0.010 /home/user/Claudevideo/mrfx/api.py:1841(_strip_disk_get)",
+     "        1    0.000    0.000    0.010    0.010 /home/user/Claudevideo/mrfx/api.py:1832(_strip_disk_file)",
+     "        1    0.007    0.007    0.007    0.007 /home/user/Claudevideo/mrfx/store.py:2022(rollups_stale)"
+    ]
+   },
+   {
+    "run": "warm",
+    "status": 200,
+    "bytes": 3510,
+    "total_s": 0.008,
+    "n_statements": 1,
+    "sql_total_s": 0.001,
+    "top_sql": [
+     [
+      0.001,
+      "SELECT state, locality, source, code, non_facility_rate FROM mpfs WHERE isfinite(non_facility_rate) AND non_facility_rate > 0"
+     ]
+    ],
+    "top_funcs": [
+     "    16/12    0.000    0.000    0.008    0.001 {built-in method builtins.next}"
+    ]
+   }
+  ]
+ },
+ "entity_drawer_entity": {
+  "url": "/api/entity/entity/PRACTICE%2018%20%C2%B7%20OR",
+  "payload": null,
+  "runs": [
+   {
+    "run": "cold",
+    "status": 200,
+    "bytes": 441003,
+    "total_s": 14.164,
+    "n_statements": 9,
+    "sql_total_s": 13.993,
+    "top_sql": [
+     [
+      5.491,
+      "SELECT * FROM ( SELECT display_name, unit_id, CASE WHEN len(tins) > 0 THEN array_to_string(tins, '; ') END AS tin_value, is_mapped_entity, tin_is_really_npi, le"
+     ],
+     [
+      2.764,
+      "SELECT DISTINCT tin_value FROM (SELECT s.*, coalesce( s2.entity_name, CASE WHEN NOT s.name_is_org OR s.display_name LIKE 'TIN %' THEN s.tin_value ELSE s.display"
+     ],
+     [
+      2.757,
+      "SELECT 1 FROM (SELECT s.*, coalesce( s2.entity_name, CASE WHEN NOT s.name_is_org OR s.display_name LIKE 'TIN %' THEN s.tin_value ELSE s.display_name || coalesce"
+     ],
+     [
+      2.326,
+      "SELECT billing_code, payer, round(median(negotiated_rate), 2) AS median_rate FROM (SELECT * FROM ( SELECT display_name, unit_id, CASE WHEN len(tins) > 0 THEN ar"
+     ],
+     [
+      0.641,
+      "SELECT DISTINCT r.npi, n.org_name, n.entity_type, n.city, n.state, n.taxonomy_desc FROM rates r LEFT JOIN npi_directory n USING (npi) WHERE r.tin_value IN (?, ?"
+     ],
+     [
+      0.012,
+      "SELECT * FROM tin_directory WHERE tin_value IN (?, ?) ORDER BY npi_count DESC NULLS LAST, tin_value"
+     ],
+     [
+      0.001,
+      "SELECT any_value(source_label), any_value(data_year), dataset_id FROM referral_pairs GROUP BY dataset_id ORDER BY any_value(data_year) DESC, dataset_id"
+     ],
+     [
+      0.001,
+      "SELECT tin_value, url FROM org_websites WHERE url IS NOT NULL AND url <> ''"
+     ]
+    ],
+    "top_funcs": [
+     "        4   11.027    2.757   44.962   11.240 /home/user/Claudevideo/mrfx/api.py:4653(_dicts)",
+     "    18/14    0.000    0.000   14.164    1.012 {built-in method builtins.next}",
+     "        1    0.000    0.000   14.013   14.013 /home/user/Claudevideo/mrfx/api.py:2015(entity_detail)",
+     "        1    0.000    0.000   14.008   14.008 /home/user/Claudevideo/mrfx/api.py:2132(_medicare_glance)",
+     "        1    0.001    0.001   14.002   14.002 /home/user/Claudevideo/mrfx/store.py:5728(org_websites)",
+     "        1    2.757    2.757    2.758    2.758 /home/user/Claudevideo/mrfx/api.py:256(_resolve_entity_key)"
+    ]
+   },
+   {
+    "run": "warm",
+    "status": 200,
+    "bytes": 441003,
+    "total_s": 13.896,
+    "n_statements": 9,
+    "sql_total_s": 13.736,
+    "top_sql": [
+     [
+      5.17,
+      "SELECT * FROM ( SELECT display_name, unit_id, CASE WHEN len(tins) > 0 THEN array_to_string(tins, '; ') END AS tin_value, is_mapped_entity, tin_is_really_npi, le"
+     ],
+     [
+      2.771,
+      "SELECT 1 FROM (SELECT s.*, coalesce( s2.entity_name, CASE WHEN NOT s.name_is_org OR s.display_name LIKE 'TIN %' THEN s.tin_value ELSE s.display_name || coalesce"
+     ],
+     [
+      2.761,
+      "SELECT DISTINCT tin_value FROM (SELECT s.*, coalesce( s2.entity_name, CASE WHEN NOT s.name_is_org OR s.display_name LIKE 'TIN %' THEN s.tin_value ELSE s.display"
+     ],
+     [
+      2.412,
+      "SELECT billing_code, payer, round(median(negotiated_rate), 2) AS median_rate FROM (SELECT * FROM ( SELECT display_name, unit_id, CASE WHEN len(tins) > 0 THEN ar"
+     ],
+     [
+      0.603,
+      "SELECT DISTINCT r.npi, n.org_name, n.entity_type, n.city, n.state, n.taxonomy_desc FROM rates r LEFT JOIN npi_directory n USING (npi) WHERE r.tin_value IN (?, ?"
+     ],
+     [
+      0.017,
+      "SELECT * FROM tin_directory WHERE tin_value IN (?, ?) ORDER BY npi_count DESC NULLS LAST, tin_value"
+     ],
+     [
+      0.001,
+      "SELECT any_value(source_label), any_value(data_year), dataset_id FROM referral_pairs GROUP BY dataset_id ORDER BY any_value(data_year) DESC, dataset_id"
+     ],
+     [
+      0.001,
+      "SELECT tin_value, url FROM org_websites WHERE url IS NOT NULL AND url <> ''"
+     ]
+    ],
+    "top_funcs": [
+     "        4   10.716    2.679   43.746   10.937 /home/user/Claudevideo/mrfx/api.py:4653(_dicts)",
+     "    17/13    0.000    0.000   13.896    1.069 {built-in method builtins.next}",
+     "        1    0.000    0.000   13.750   13.750 /home/user/Claudevideo/mrfx/api.py:2015(entity_detail)",
+     "        1    0.000    0.000   13.749   13.749 /home/user/Claudevideo/mrfx/api.py:2132(_medicare_glance)",
+     "        1    0.001    0.001   13.744   13.744 /home/user/Claudevideo/mrfx/store.py:5728(org_websites)",
+     "        1    2.772    2.772    2.772    2.772 /home/user/Claudevideo/mrfx/api.py:256(_resolve_entity_key)"
+    ]
+   }
+  ]
+ },
+ "validate": {
+  "url": "/api/validate",
+  "payload": {
+   "id": "100049428",
+   "code": "97110"
+  },
+  "runs": [
+   {
+    "run": "cold",
+    "status": 200,
+    "bytes": 7982,
+    "total_s": 2.363,
+    "n_statements": 1,
+    "sql_total_s": 2.352,
+    "top_sql": [
+     [
+      2.352,
+      "SELECT payer, tin_value, npi, billing_code, coalesce(array_to_string(billing_code_modifier, '|'), '') AS modifiers, negotiated_rate, negotiated_type, billing_cl"
+     ]
+    ],
+    "top_funcs": [
+     "    16/12    0.000    0.000    2.362    0.197 {built-in method builtins.next}",
+     "        1    0.000    0.000    2.353    2.353 /home/user/Claudevideo/mrfx/api.py:2328(validate)",
+     "        1    0.001    0.001    2.353    2.353 /home/user/Claudevideo/mrfx/api.py:4653(_dicts)"
+    ]
+   },
+   {
+    "run": "warm",
+    "status": 200,
+    "bytes": 7982,
+    "total_s": 2.085,
+    "n_statements": 1,
+    "sql_total_s": 2.075,
+    "top_sql": [
+     [
+      2.075,
+      "SELECT payer, tin_value, npi, billing_code, coalesce(array_to_string(billing_code_modifier, '|'), '') AS modifiers, negotiated_rate, negotiated_type, billing_cl"
+     ]
+    ],
+    "top_funcs": [
+     "    16/12    0.000    0.000    2.085    0.174 {built-in method builtins.next}",
+     "        1    0.000    0.000    2.076    2.076 /home/user/Claudevideo/mrfx/api.py:2328(validate)",
+     "        1    0.001    0.001    2.076    2.076 /home/user/Claudevideo/mrfx/api.py:4653(_dicts)"
+    ]
+   }
+  ]
+ },
+ "territory_local": {
+  "url": "/api/territory/local",
+  "payload": {
+   "code": "97110",
+   "market": {
+    "month": "latest",
+    "state": "MO"
+   },
+   "state": "MO"
+  },
+  "runs": [
+   {
+    "run": "cold",
+    "status": 200,
+    "bytes": 3101,
+    "total_s": 5.537,
+    "n_statements": 3,
+    "sql_total_s": 5.525,
+    "top_sql": [
+     [
+      3.177,
+      "WITH base AS ( SELECT t.tin_value, median(t.negotiated_rate) AS rate FROM (SELECT * FROM rates_by_tin t0 WHERE t0.is_latest) t LEFT JOIN tin_directory td USING "
+     ],
+     [
+      2.3,
+      "WITH base AS ( SELECT t.tin_value, median(t.negotiated_rate) AS rate FROM (SELECT * FROM rates_by_tin t0 WHERE t0.is_latest) t LEFT JOIN tin_directory td USING "
+     ],
+     [
+      0.048,
+      "WITH base AS ( SELECT t.tin_value, median(t.negotiated_rate) AS rate FROM (SELECT * FROM rates_by_tin t0 WHERE t0.is_latest) t LEFT JOIN tin_directory td USING "
+     ]
+    ],
+    "top_funcs": [
+     "    16/12    0.000    0.000    5.536    0.461 {built-in method builtins.next}",
+     "        1    0.000    0.000    5.529    5.529 /home/user/Claudevideo/mrfx/api.py:3381(api_territory_local)",
+     "        1    5.528    5.528    5.529    5.529 /home/user/Claudevideo/mrfx/territory.py:85(local_rate_map)"
+    ]
+   },
+   {
+    "run": "warm",
+    "status": 200,
+    "bytes": 3101,
+    "total_s": 5.068,
+    "n_statements": 3,
+    "sql_total_s": 5.057,
+    "top_sql": [
+     [
+      2.68,
+      "WITH base AS ( SELECT t.tin_value, median(t.negotiated_rate) AS rate FROM (SELECT * FROM rates_by_tin t0 WHERE t0.is_latest) t LEFT JOIN tin_directory td USING "
+     ],
+     [
+      2.318,
+      "WITH base AS ( SELECT t.tin_value, median(t.negotiated_rate) AS rate FROM (SELECT * FROM rates_by_tin t0 WHERE t0.is_latest) t LEFT JOIN tin_directory td USING "
+     ],
+     [
+      0.059,
+      "WITH base AS ( SELECT t.tin_value, median(t.negotiated_rate) AS rate FROM (SELECT * FROM rates_by_tin t0 WHERE t0.is_latest) t LEFT JOIN tin_directory td USING "
+     ]
+    ],
+    "top_funcs": [
+     "    16/12    0.000    0.000    5.067    0.422 {built-in method builtins.next}",
+     "        1    0.000    0.000    5.060    5.060 /home/user/Claudevideo/mrfx/api.py:3381(api_territory_local)",
+     "        1    5.060    5.060    5.060    5.060 /home/user/Claudevideo/mrfx/territory.py:85(local_rate_map)"
+    ]
+   }
+  ]
+ },
+ "changes_national": {
+  "url": "/api/changes",
+  "payload": {
+   "market": {
+    "month": "2026-10",
+    "payers": []
+   }
+  },
+  "runs": [
+   {
+    "run": "cold",
+    "status": 200,
+    "bytes": 1773714,
+    "total_s": 17.544,
+    "n_statements": 3,
+    "sql_total_s": 16.59,
+    "top_sql": [
+     [
+      15.863,
+      "WITH pairs AS (SELECT unnest(?::VARCHAR[]) AS payer, unnest(?::VARCHAR[]) AS m_new, unnest(?::VARCHAR[]) AS m_prev), cur AS ( SELECT t.payer, t.tin_value, t.bil"
+     ],
+     [
+      0.676,
+      "WITH pm AS ( SELECT DISTINCT payer, file_month FROM rates_by_tin WHERE file_month IS NOT NULL AND payer IS NOT NULL AND file_month <= ? ), ranked AS ( SELECT pa"
+     ],
+     [
+      0.051,
+      "SELECT DISTINCT file_month FROM rates_by_tin WHERE file_month IS NOT NULL ORDER BY file_month DESC"
+     ]
+    ],
+    "top_funcs": [
+     "    16/12    0.000    0.000   17.541    1.462 {built-in method builtins.next}",
+     "        1    0.000    0.000   16.964   16.964 /home/user/Claudevideo/mrfx/api.py:4157(changes)",
+     "      2/1    0.000    0.000   16.964   16.964 /home/user/Claudevideo/mrfx/store.py:5980(wrapper)",
+     "      2/1    0.000    0.000   16.964   16.964 /home/user/Claudevideo/mrfx/store.py:4930(cached)",
+     "      2/1    0.000    0.000   16.686   16.686 /home/user/Claudevideo/mrfx/store.py:5985(<lambda>)",
+     "        1    0.000    0.000   16.686   16.686 /home/user/Claudevideo/mrfx/monitor.py:79(compute_rate_changes)",
+     "        1   15.934   15.934   16.685   16.685 /home/user/Claudevideo/mrfx/monitor.py:217(_diff)"
+    ]
+   },
+   {
+    "run": "warm",
+    "status": 200,
+    "bytes": 1773714,
+    "total_s": 0.84,
+    "n_statements": 0,
+    "sql_total_s": 0,
+    "top_sql": [],
+    "top_funcs": [
+     "    16/12    0.000    0.000    0.837    0.070 {built-in method builtins.next}"
+    ]
+   }
+  ]
+ },
+ "trajectory_national": {
+  "url": "/api/trajectory",
+  "payload": {
+   "market": {
+    "payers": [],
+    "allow_national": true
+   }
+  },
+  "runs": [
+   {
+    "run": "cold",
+    "status": 200,
+    "bytes": 12164,
+    "total_s": 27.018,
+    "n_statements": 3,
+    "sql_total_s": 26.539,
+    "top_sql": [
+     [
+      26.478,
+      "WITH base AS MATERIALIZED ( SELECT t.payer, t.billing_code, t.file_month, t.tin_value, median(t.negotiated_rate) AS rate FROM rates_by_tin t LEFT JOIN tin_direc"
+     ],
+     [
+      0.059,
+      "SELECT DISTINCT file_month FROM rates_by_tin WHERE file_month IS NOT NULL ORDER BY file_month DESC"
+     ],
+     [
+      0.002,
+      "SELECT year, value, index_name, source FROM inflation_index ORDER BY year"
+     ]
+    ],
+    "top_funcs": [
+     "    35/31    0.000    0.000   27.017    0.872 {built-in method builtins.next}",
+     "        1    0.000    0.000   27.003   27.003 /home/user/Claudevideo/mrfx/api.py:4238(trajectory_ep)",
+     "        1    0.000    0.000   27.003   27.003 /home/user/Claudevideo/mrfx/store.py:5980(wrapper)",
+     "        1    0.000    0.000   27.003   27.003 /home/user/Claudevideo/mrfx/store.py:4930(cached)",
+     "        1    0.000    0.000   27.001   27.001 /home/user/Claudevideo/mrfx/store.py:5985(<lambda>)"
+    ]
+   },
+   {
+    "run": "warm",
+    "status": 200,
+    "bytes": 12164,
+    "total_s": 0.022,
+    "n_statements": 0,
+    "sql_total_s": 0,
+    "top_sql": [],
+    "top_funcs": [
+     "    16/12    0.000    0.000    0.022    0.002 {built-in method builtins.next}"
+    ]
+   }
+  ]
+ },
+ "leads_national": {
+  "url": "/api/leads",
+  "payload": {
+   "market": {
+    "month": "latest",
+    "payers": [],
+    "therapy_only": true
+   },
+   "threshold_percentile": 25,
+   "min_codes": 3
+  },
+  "runs": [
+   {
+    "run": "cold",
+    "status": 200,
+    "bytes": 36313,
+    "total_s": 8.301,
+    "n_statements": 7,
+    "sql_total_s": 8.129,
+    "top_sql": [
+     [
+      4.564,
+      "WITH base AS (SELECT * FROM _lead_base), ranked AS ( -- MID-RANK among the other practices (MIDRANK_PCT): the cheapest of -- a thin market still sits at 0, so t"
+     ],
+     [
+      1.471,
+      "WITH tp AS ( SELECT t.tin_value, t.payer, t.billing_code, median(t.negotiated_rate) AS rate FROM (SELECT * FROM rates_by_tin t0 WHERE t0.is_latest) t LEFT JOIN "
+     ],
+     [
+      1.016,
+      "CREATE OR REPLACE TEMP TABLE _lead_om AS WITH _o AS ( SELECT billing_code, tin_value, rate, row_number() OVER (PARTITION BY billing_code ORDER BY rate, tin_valu"
+     ],
+     [
+      0.716,
+      "WITH pm AS (SELECT payer, max(file_month) AS newest FROM rates_by_tin GROUP BY payer) SELECT t.tin_value, t.payer, max(t.file_month) AS seen, any_value(pm.newes"
+     ],
+     [
+      0.35,
+      "CREATE OR REPLACE TEMP TABLE _lead_base AS SELECT t.billing_code, t.tin_value, t.rate FROM read_parquet('/tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e"
+     ],
+     [
+      0.011,
+      "SELECT key, value FROM meta WHERE key IN ('spine_token', 'rollup_covered_through', 'rollup_covered_names', 'rollup_pending_payers', 'rollup_needs_full', 'rollup"
+     ],
+     [
+      0.001,
+      "SELECT tin_value, url FROM org_websites WHERE url IS NOT NULL AND url <> ''"
+     ]
+    ],
+    "top_funcs": [
+     "    17/13    0.000    0.000    8.300    0.638 {built-in method builtins.next}",
+     "        1    0.000    0.000    8.272    8.272 /home/user/Claudevideo/mrfx/api.py:4124(leads)",
+     "        1    0.000    0.000    8.272    8.272 /home/user/Claudevideo/mrfx/store.py:5980(wrapper)",
+     "        1    0.000    0.000    8.271    8.271 /home/user/Claudevideo/mrfx/store.py:4930(cached)",
+     "        1    0.000    0.000    8.260    8.260 /home/user/Claudevideo/mrfx/store.py:5985(<lambda>)",
+     "        1    0.001    0.001    8.259    8.259 /home/user/Claudevideo/mrfx/leads.py:138(compute_leads)",
+     "        1    8.258    8.258    8.258    8.258 /home/user/Claudevideo/mrfx/store.py:5728(org_websites)"
+    ]
+   },
+   {
+    "run": "warm",
+    "status": 200,
+    "bytes": 36313,
+    "total_s": 0.027,
+    "n_statements": 0,
+    "sql_total_s": 0,
+    "top_sql": [],
+    "top_funcs": [
+     "    16/12    0.000    0.000    0.026    0.002 {built-in method builtins.next}"
+    ]
+   }
+  ]
+ },
+ "leaderboard_national": {
+  "url": "/api/leaderboard",
+  "payload": {
+   "market": {
+    "month": "latest",
+    "payers": [],
+    "therapy_only": true
+   },
+   "min_codes": 3,
+   "sort": "median",
+   "limit": 50
+  },
+  "runs": [
+   {
+    "run": "cold",
+    "status": 200,
+    "bytes": 12138,
+    "total_s": 5.525,
+    "n_statements": 2,
+    "sql_total_s": 5.445,
+    "top_sql": [
+     [
+      5.444,
+      "WITH base AS (SELECT t.billing_code, t.tin_value, t.rate FROM read_parquet('/tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad"
+     ],
+     [
+      0.001,
+      "SELECT tin_value, url FROM org_websites WHERE url IS NOT NULL AND url <> ''"
+     ]
+    ],
+    "top_funcs": [
+     "    16/12    0.000    0.000    5.524    0.460 {built-in method builtins.next}",
+     "        1    0.000    0.000    5.511    5.511 /home/user/Claudevideo/mrfx/api.py:4227(leaderboard_ep)",
+     "        1    0.000    0.000    5.511    5.511 /home/user/Claudevideo/mrfx/store.py:5980(wrapper)",
+     "        1    0.000    0.000    5.511    5.511 /home/user/Claudevideo/mrfx/store.py:4930(cached)"
+    ]
+   },
+   {
+    "run": "warm",
+    "status": 200,
+    "bytes": 12138,
+    "total_s": 0.014,
+    "n_statements": 0,
+    "sql_total_s": 0,
+    "top_sql": [],
+    "top_funcs": [
+     "    16/12    0.000    0.000    0.014    0.001 {built-in method builtins.next}"
+    ]
+   }
+  ]
+ },
+ "report_market": {
+  "url": "/api/report/market",
+  "payload": {
+   "state": "MO",
+   "code": "97110",
+   "zip": null,
+   "market": {
+    "month": "latest",
+    "therapy_only": false
+   }
+  },
+  "runs": [
+   {
+    "run": "cold",
+    "status": 200,
+    "bytes": 12269,
+    "total_s": 7.276,
+    "n_statements": 8,
+    "sql_total_s": 7.25,
+    "top_sql": [
+     [
+      2.847,
+      "WITH base AS ( SELECT t.tin_value, median(t.negotiated_rate) AS rate FROM (SELECT * FROM rates_by_tin t0 WHERE t0.is_latest) t LEFT JOIN tin_directory td USING "
+     ],
+     [
+      2.335,
+      "WITH base AS ( SELECT t.tin_value, median(t.negotiated_rate) AS rate FROM (SELECT * FROM rates_by_tin t0 WHERE t0.is_latest) t LEFT JOIN tin_directory td USING "
+     ],
+     [
+      1.077,
+      "WITH rows AS ( SELECT t.payer, t.billing_code, t.tin_value, lower(trim(coalesce(t.negotiated_type, ''))) AS ntype, median(t.negotiated_rate) AS rate FROM (SELEC"
+     ],
+     [
+      0.928,
+      "WITH base AS ( SELECT t.payer, t.tin_value, t.billing_code, median(t.negotiated_rate) AS rate FROM (SELECT * FROM rates_by_tin t0 WHERE t0.is_latest) t LEFT JOI"
+     ],
+     [
+      0.057,
+      "WITH base AS ( SELECT t.tin_value, median(t.negotiated_rate) AS rate FROM (SELECT * FROM rates_by_tin t0 WHERE t0.is_latest) t LEFT JOIN tin_directory td USING "
+     ],
+     [
+      0.002,
+      "SELECT count(*), count(DISTINCT payer) FROM files WHERE status = 'done' AND file_type = 'in_network'"
+     ],
+     [
+      0.002,
+      "SELECT filename, payer, last_updated_on FROM files WHERE status = 'done' AND file_type = 'in_network' ORDER BY filename"
+     ],
+     [
+      0.001,
+      "SELECT max(file_month) FROM files WHERE status = 'done' AND file_type = 'in_network'"
+     ]
+    ],
+    "top_funcs": [
+     "        5    0.000    0.000   18.687    3.737 /home/user/Claudevideo/mrfx/dossier.py:381(section)",
+     "    20/16    0.000    0.000    7.276    0.455 {built-in method builtins.next}",
+     "        1    0.000    0.000    7.268    7.268 /home/user/Claudevideo/mrfx/api.py:3260(api_market_report)",
+     "        1    7.267    7.267    7.268    7.268 /home/user/Claudevideo/mrfx/dossier.py:360(build_market_report)",
+     "        1    0.000    0.000    6.178    6.178 /home/user/Claudevideo/mrfx/dossier.py:410(_concentration)",
+     "        1    0.000    0.000    5.246    5.246 /home/user/Claudevideo/mrfx/dossier.py:392(_cities)",
+     "        1    5.244    5.244    5.244    5.244 /home/user/Claudevideo/mrfx/territory.py:85(local_rate_map)",
+     "        2    0.000    0.000    2.012    1.006 /home/user/Claudevideo/mrfx/store.py:5980(wrapper)",
+     "        2    0.000    0.000    2.012    1.006 /home/user/Claudevideo/mrfx/store.py:4930(cached)"
+    ]
+   },
+   {
+    "run": "warm",
+    "status": 200,
+    "bytes": 12269,
+    "total_s": 5.219,
+    "n_statements": 5,
+    "sql_total_s": 5.206,
+    "top_sql": [
+     [
+      2.779,
+      "WITH base AS ( SELECT t.tin_value, median(t.negotiated_rate) AS rate FROM (SELECT * FROM rates_by_tin t0 WHERE t0.is_latest) t LEFT JOIN tin_directory td USING "
+     ],
+     [
+      2.376,
+      "WITH base AS ( SELECT t.tin_value, median(t.negotiated_rate) AS rate FROM (SELECT * FROM rates_by_tin t0 WHERE t0.is_latest) t LEFT JOIN tin_directory td USING "
+     ],
+     [
+      0.049,
+      "WITH base AS ( SELECT t.tin_value, median(t.negotiated_rate) AS rate FROM (SELECT * FROM rates_by_tin t0 WHERE t0.is_latest) t LEFT JOIN tin_directory td USING "
+     ],
+     [
+      0.002,
+      "SELECT filename, payer, last_updated_on FROM files WHERE status = 'done' AND file_type = 'in_network' ORDER BY filename"
+     ],
+     [
+      0.001,
+      "SELECT max(file_month) FROM files WHERE status = 'done' AND file_type = 'in_network'"
+     ]
+    ],
+    "top_funcs": [
+     "    16/12    0.000    0.000    5.219    0.435 {built-in method builtins.next}",
+     "        1    0.000    0.000    5.213    5.213 /home/user/Claudevideo/mrfx/api.py:3260(api_market_report)",
+     "        1    5.212    5.212    5.213    5.213 /home/user/Claudevideo/mrfx/dossier.py:360(build_market_report)",
+     "        5    0.000    0.000    5.209    1.042 /home/user/Claudevideo/mrfx/dossier.py:381(section)",
+     "        1    0.000    0.000    5.207    5.207 /home/user/Claudevideo/mrfx/dossier.py:392(_cities)",
+     "        1    5.207    5.207    5.207    5.207 /home/user/Claudevideo/mrfx/territory.py:85(local_rate_map)"
+    ]
+   }
+  ]
+ },
+ "market_sizing": {
+  "url": "/api/market/sizing",
+  "payload": {
+   "zip": "63101",
+   "radius_miles": 25
+  },
+  "runs": [
+   {
+    "run": "cold",
+    "status": 200,
+    "bytes": 763,
+    "total_s": 6.607,
+    "n_statements": 5,
+    "sql_total_s": 6.596,
+    "top_sql": [
+     [
+      6.551,
+      "WITH pairs AS ( SELECT DISTINCT tin_value, npi FROM rates WHERE tin_value IS NOT NULL AND NOT tin_is_really_npi ), p AS ( SELECT pr.tin_value AS tin, mode(lpad("
+     ],
+     [
+      0.037,
+      "CREATE OR REPLACE TEMP TABLE _zcta AS SELECT lpad(zip, 5, '0') AS zip, lat, lon FROM read_csv('/home/user/Claudevideo/config/zcta-centroids.csv', header = true,"
+     ],
+     [
+      0.005,
+      "SELECT z.zip FROM _zcta z WHERE 2 * 3958.8 * asin(sqrt(pow(sin(radians((z.lat - 38.6314) / 2)), 2) + cos(radians(38.6314)) * cos(radians(z.lat)) * pow(sin(radia"
+     ],
+     [
+      0.002,
+      "SELECT count(*) FROM information_schema.tables WHERE table_name = 'zip_demographics'"
+     ],
+     [
+      0.002,
+      "SELECT lat, lon FROM _zcta WHERE zip = ?"
+     ]
+    ],
+    "top_funcs": [
+     "    17/13    0.000    0.000    6.606    0.508 {built-in method builtins.next}",
+     "        1    0.000    0.000    6.601    6.601 /home/user/Claudevideo/mrfx/api.py:3101(api_market_sizing)",
+     "        1    6.599    6.599    6.599    6.599 /home/user/Claudevideo/mrfx/demographics.py:347(market_sizing)",
+     "        1    0.000    0.000    0.038    0.038 /home/user/Claudevideo/mrfx/medicare.py:685(load_centroids)"
+    ]
+   },
+   {
+    "run": "warm",
+    "status": 200,
+    "bytes": 763,
+    "total_s": 8.437,
+    "n_statements": 5,
+    "sql_total_s": 8.42,
+    "top_sql": [
+     [
+      8.368,
+      "WITH pairs AS ( SELECT DISTINCT tin_value, npi FROM rates WHERE tin_value IS NOT NULL AND NOT tin_is_really_npi ), p AS ( SELECT pr.tin_value AS tin, mode(lpad("
+     ],
+     [
+      0.043,
+      "CREATE OR REPLACE TEMP TABLE _zcta AS SELECT lpad(zip, 5, '0') AS zip, lat, lon FROM read_csv('/home/user/Claudevideo/config/zcta-centroids.csv', header = true,"
+     ],
+     [
+      0.006,
+      "SELECT z.zip FROM _zcta z WHERE 2 * 3958.8 * asin(sqrt(pow(sin(radians((z.lat - 38.6314) / 2)), 2) + cos(radians(38.6314)) * cos(radians(z.lat)) * pow(sin(radia"
+     ],
+     [
+      0.002,
+      "SELECT count(*) FROM information_schema.tables WHERE table_name = 'zip_demographics'"
+     ],
+     [
+      0.002,
+      "SELECT lat, lon FROM _zcta WHERE zip = ?"
+     ]
+    ],
+    "top_funcs": [
+     "    16/12    0.000    0.000    8.436    0.703 {built-in method builtins.next}",
+     "        1    0.000    0.000    8.430    8.430 /home/user/Claudevideo/mrfx/api.py:3101(api_market_sizing)",
+     "        1    8.429    8.429    8.429    8.429 /home/user/Claudevideo/mrfx/demographics.py:347(market_sizing)",
+     "        1    0.000    0.000    0.043    0.043 /home/user/Claudevideo/mrfx/medicare.py:685(load_centroids)"
+    ]
+   }
+  ]
+ },
+ "clients_digest": {
+  "url": "/api/clients/digest",
+  "payload": null,
+  "runs": [
+   {
+    "run": "cold",
+    "status": 200,
+    "bytes": 2856,
+    "total_s": 7.689,
+    "n_statements": 20,
+    "sql_total_s": 7.651,
+    "top_sql": [
+     [
+      2.682,
+      "WITH pairs AS (SELECT unnest(?::VARCHAR[]) AS payer, unnest(?::VARCHAR[]) AS m_new, unnest(?::VARCHAR[]) AS m_prev), cur AS ( SELECT t.payer, t.tin_value, t.bil"
+     ],
+     [
+      2.048,
+      "SELECT DISTINCT npi FROM rates WHERE tin_value IN (SELECT unnest(?::VARCHAR[])) AND npi IS NOT NULL"
+     ],
+     [
+      1.128,
+      "SELECT DISTINCT t.tin_value, t.billing_code FROM (SELECT * FROM rates_by_tin t0 WHERE t0.is_latest) t LEFT JOIN tin_directory td USING (tin_value) WHERE t.tin_v"
+     ],
+     [
+      0.704,
+      "WITH base AS (SELECT t.billing_code, t.tin_value, t.rate FROM read_parquet('/tmp/claude-0/-home-user-Claudevideo/4633d594-0139-5f8e-a935-ae9c76b72000/scratchpad"
+     ],
+     [
+      0.432,
+      "WITH pm AS ( SELECT DISTINCT payer, file_month FROM rates_by_tin WHERE file_month IS NOT NULL AND payer IS NOT NULL ), ranked AS ( SELECT payer, file_month, row"
+     ],
+     [
+      0.345,
+      "WITH pm AS ( SELECT DISTINCT payer, file_month FROM rates_by_tin WHERE file_month IS NOT NULL AND payer IS NOT NULL ), ranked AS ( SELECT payer, file_month, row"
+     ],
+     [
+      0.271,
+      "SELECT DISTINCT payer FROM rates_by_tin WHERE is_latest AND tin_value IN (SELECT unnest(?::VARCHAR[]))"
+     ],
+     [
+      0.012,
+      "SELECT first(display_name ORDER BY npi_count DESC NULLS LAST, tin_value) FROM tin_directory WHERE display_name IS NOT NULL AND tin_value IN (SELECT unnest(?::VA"
+     ]
+    ],
+    "top_funcs": [
+     "      3/2    0.000    0.000    8.126    4.063 /home/user/Claudevideo/mrfx/store.py:5980(wrapper)",
+     "      3/2    0.000    0.000    8.126    4.063 /home/user/Claudevideo/mrfx/store.py:4930(cached)",
+     "      3/2    0.000    0.000    8.122    4.061 /home/user/Claudevideo/mrfx/store.py:5985(<lambda>)",
+     "        1    0.000    0.000    7.683    7.683 /home/user/Claudevideo/mrfx/api.py:3677(clients_digest)",
+     "        1    0.000    0.000    7.683    7.683 /home/user/Claudevideo/mrfx/clients.py:83(client_digest)",
+     "        1    0.000    0.000    7.683    7.683 /home/user/Claudevideo/mrfx/clients.py:112(_build_digest)",
+     "        1    4.642    4.642    7.678    7.678 /home/user/Claudevideo/mrfx/monitor.py:79(compute_rate_changes)",
+     "        1    0.012    0.012    4.370    4.370 /home/user/Claudevideo/mrfx/clients.py:210(subject_display_name)",
+     "        1    4.356    4.356    4.357    4.357 /home/user/Claudevideo/mrfx/benchmark.py:662(mapped_entity_name)",
+     "        1    0.000    0.000    3.036    3.036 /home/user/Claudevideo/mrfx/monitor.py:190(_latest_changes)",
+     "        1    3.036    3.036    3.036    3.036 /home/user/Claudevideo/mrfx/monitor.py:217(_diff)",
+     "        3    0.000    0.000    2.317    0.772 /home/user/Claudevideo/mrfx/benchmark.py:715(resolve_subject_tins)",
+     "        3    0.014    0.005    2.317    0.772 /home/user/Claudevideo/mrfx/benchmark.py:729(_resolve_subject_tins)",
+     "        1    2.300    2.300    2.302    2.302 /home/user/Claudevideo/mrfx/benchmark.py:1427(contract_gaps_book)"
+    ]
+   },
+   {
+    "run": "warm",
+    "status": 200,
+    "bytes": 2856,
+    "total_s": 0.011,
+    "n_statements": 5,
+    "sql_total_s": 0.004,
+    "top_sql": [
+     [
+      0.001,
+      "SELECT subject FROM client_watchlist ORDER BY lower(subject)"
+     ],
+     [
+      0.001,
+      "SELECT any_value(source_label), any_value(data_year), count(*), dataset_id FROM referral_pairs GROUP BY dataset_id ORDER BY any_value(data_year), dataset_id"
+     ],
+     [
+      0.0,
+      "SELECT dataset_id FROM referral_pairs LIMIT 0"
+     ],
+     [
+      0.0,
+      "SELECT count(*), any_value(release), max(loaded_at) FROM medicare_orf"
+     ],
+     [
+      0.0,
+      "SELECT prev_release, release, added, removed, partb_lost, partb_gained FROM medicare_orf_changes LIMIT 1"
+     ]
+    ],
+    "top_funcs": [
+     "    16/12    0.000    0.000    0.011    0.001 {built-in method builtins.next}",
+     "        1    0.000    0.000    0.005    0.005 /home/user/Claudevideo/mrfx/api.py:3677(clients_digest)",
+     "        1    0.000    0.000    0.005    0.005 /home/user/Claudevideo/mrfx/clients.py:83(client_digest)",
+     "        1    0.003    0.003    0.005    0.005 /home/user/Claudevideo/mrfx/medicare.py:451(medicare_status)"
+    ]
+   }
+  ]
+ },
+ "contracts_new_to_network": {
+  "url": "/api/contracts/new-to-network",
+  "payload": {
+   "market": {
+    "month": "latest"
+   },
+   "zip": null,
+   "radius_miles": null,
+   "therapy_only": false
+  },
+  "runs": [
+   {
+    "run": "cold",
+    "status": 200,
+    "bytes": 1796,
+    "total_s": 6.492,
+    "n_statements": 1,
+    "sql_total_s": 6.415,
+    "top_sql": [
+     [
+      6.415,
+      "WITH pairs AS (SELECT unnest(?::VARCHAR[]) AS payer, unnest(?::VARCHAR[]) AS m_now, unnest(?::VARCHAR[]) AS m_prev), b AS ( SELECT t.payer, t.tin_value, t.billi"
+     ]
+    ],
+    "top_funcs": [
+     "    16/12    0.000    0.000    6.491    0.541 {built-in method builtins.next}",
+     "        1    0.000    0.000    6.483    6.483 /home/user/Claudevideo/mrfx/api.py:3026(api_new_to_network)",
+     "        1    6.482    6.482    6.483    6.483 /home/user/Claudevideo/mrfx/contracts.py:151(new_to_network)"
+    ]
+   },
+   {
+    "run": "warm",
+    "status": 200,
+    "bytes": 1796,
+    "total_s": 10.559,
+    "n_statements": 1,
+    "sql_total_s": 10.409,
+    "top_sql": [
+     [
+      10.409,
+      "WITH pairs AS (SELECT unnest(?::VARCHAR[]) AS payer, unnest(?::VARCHAR[]) AS m_now, unnest(?::VARCHAR[]) AS m_prev), b AS ( SELECT t.payer, t.tin_value, t.billi"
+     ]
+    ],
+    "top_funcs": [
+     "    16/12    0.000    0.000   10.558    0.880 {built-in method builtins.next}",
+     "        1    0.000    0.000   10.550   10.550 /home/user/Claudevideo/mrfx/api.py:3026(api_new_to_network)",
+     "        1   10.550   10.550   10.550   10.550 /home/user/Claudevideo/mrfx/contracts.py:151(new_to_network)"
+    ]
+   }
+  ]
+ },
+ "schedule_fee": {
+  "url": "/api/schedule/fee",
+  "payload": {
+   "subject": "100049428",
+   "market": {
+    "month": "latest",
+    "payers": [],
+    "billing_class": "professional",
+    "state": "MO",
+    "discipline": "PT"
+   },
+   "visit_market": true,
+   "preset": "ortho"
+  },
+  "runs": [
+   {
+    "run": "cold",
+    "status": 200,
+    "bytes": 8833,
+    "total_s": 0.485,
+    "n_statements": 7,
+    "sql_total_s": 0.465,
+    "top_sql": [
+     [
+      0.232,
+      "WITH subject_tins AS (SELECT unnest(?::VARCHAR[]) AS tin), per_tin AS ( SELECT t.payer, t.billing_code, t.tin_value, median(t.negotiated_rate) AS rate FROM (SEL"
+     ],
+     [
+      0.216,
+      "WITH subject_tins AS (SELECT unnest(?::VARCHAR[]) AS tin), per_tin AS (SELECT t.payer, t.billing_code, t.tin_value, t.rate FROM read_parquet('/tmp/claude-0/-hom"
+     ],
+     [
+      0.007,
+      "SELECT key, value FROM meta WHERE key IN ('spine_token', 'rollup_covered_through', 'rollup_covered_names', 'rollup_pending_payers', 'rollup_needs_full', 'rollup"
+     ],
+     [
+      0.007,
+      "SELECT tin_value FROM tin_directory WHERE lower(display_name) = lower(?)"
+     ],
+     [
+      0.001,
+      "SELECT tin_value FROM tin_directory WHERE display_name = ?"
+     ],
+     [
+      0.001,
+      "SELECT tin_value, entity_name FROM entity_map"
+     ],
+     [
+      0.001,
+      "SELECT state, locality, source, code, non_facility_rate FROM mpfs WHERE isfinite(non_facility_rate) AND non_facility_rate > 0"
+     ]
+    ],
+    "top_funcs": [
+     "    17/13    0.000    0.000    0.485    0.037 {built-in method builtins.next}",
+     "        1    0.000    0.000    0.473    0.473 /home/user/Claudevideo/mrfx/api.py:4016(schedule_fee)",
+     "        1    0.472    0.472    0.473    0.473 /home/user/Claudevideo/mrfx/schedule.py:59(compute_fee_schedule)",
+     "        1    0.000    0.000    0.256    0.256 /home/user/Claudevideo/mrfx/benchmark.py:602(practice_base_sql)",
+     "        1    0.246    0.246    0.246    0.246 /home/user/Claudevideo/mrfx/store.py:5815(medicare_anchor)",
+     "        1    0.000    0.000    0.010    0.010 /home/user/Claudevideo/mrfx/benchmark.py:673(subject_tins_for_market)",
+     "        1    0.000    0.000    0.010    0.010 /home/user/Claudevideo/mrfx/benchmark.py:715(resolve_subject_tins)",
+     "        1    0.010    0.010    0.010    0.010 /home/user/Claudevideo/mrfx/benchmark.py:729(_resolve_subject_tins)"
+    ]
+   },
+   {
+    "run": "warm",
+    "status": 200,
+    "bytes": 8833,
+    "total_s": 0.428,
+    "n_statements": 6,
+    "sql_total_s": 0.412,
+    "top_sql": [
+     [
+      0.228,
+      "WITH subject_tins AS (SELECT unnest(?::VARCHAR[]) AS tin), per_tin AS (SELECT t.payer, t.billing_code, t.tin_value, t.rate FROM read_parquet('/tmp/claude-0/-hom"
+     ],
+     [
+      0.169,
+      "WITH subject_tins AS (SELECT unnest(?::VARCHAR[]) AS tin), per_tin AS ( SELECT t.payer, t.billing_code, t.tin_value, median(t.negotiated_rate) AS rate FROM (SEL"
+     ],
+     [
+      0.007,
+      "SELECT tin_value FROM tin_directory WHERE lower(display_name) = lower(?)"
+     ],
+     [
+      0.006,
+      "SELECT tin_value FROM tin_directory WHERE display_name = ?"
+     ],
+     [
+      0.001,
+      "SELECT state, locality, source, code, non_facility_rate FROM mpfs WHERE isfinite(non_facility_rate) AND non_facility_rate > 0"
+     ],
+     [
+      0.001,
+      "SELECT tin_value, entity_name FROM entity_map"
+     ]
+    ],
+    "top_funcs": [
+     "    16/12    0.000    0.000    0.428    0.036 {built-in method builtins.next}",
+     "        1    0.000    0.000    0.419    0.419 /home/user/Claudevideo/mrfx/api.py:4016(schedule_fee)",
+     "        1    0.418    0.418    0.418    0.418 /home/user/Claudevideo/mrfx/schedule.py:59(compute_fee_schedule)",
+     "        1    0.187    0.187    0.187    0.187 /home/user/Claudevideo/mrfx/store.py:5815(medicare_anchor)",
+     "        1    0.000    0.000    0.015    0.015 /home/user/Claudevideo/mrfx/benchmark.py:673(subject_tins_for_market)",
+     "        1    0.000    0.000    0.015    0.015 /home/user/Claudevideo/mrfx/benchmark.py:715(resolve_subject_tins)",
+     "        1    0.015    0.015    0.015    0.015 /home/user/Claudevideo/mrfx/benchmark.py:729(_resolve_subject_tins)"
+    ]
+   }
+  ]
+ },
+ "outreach_zip_tin_MO": {
+  "url": "/api/export/outreach.zip?grain=tin&latest=1&dollar_only=1&state=MO",
+  "payload": null,
+  "runs": [
+   {
+    "run": "cold",
+    "status": 200,
+    "bytes": 1546068,
+    "total_s": 16.451,
+    "n_statements": 17,
+    "sql_total_s": 8.577,
+    "top_sql": [
+     [
+      5.289,
+      "WITH tin_npi AS ( SELECT DISTINCT r.tin_value, r.npi FROM rates r JOIN _scope s USING (tin_value) WHERE r.tin_value IS NOT NULL AND NOT r.tin_is_really_npi UNIO"
+     ],
+     [
+      1.958,
+      "SELECT unit_id, min(display_name) AS display_name, string_agg(DISTINCT tin_value, '; ' ORDER BY tin_value) AS tins, max(npi_count) AS npi_count, string_agg(DIST"
+     ],
+     [
+      0.974,
+      "CREATE OR REPLACE TEMP TABLE _outreach_units_7c28f8c480 AS SELECT DISTINCT unit_id, tin_value FROM (WITH base AS ( WITH k AS NOT MATERIALIZED (SELECT * FROM rat"
+     ],
+     [
+      0.266,
+      "CREATE OR REPLACE TEMP TABLE _outreach_rates_7c28f8c480 AS SELECT u.unit_id, p.billing_code, median(p.rate) AS rate FROM (SELECT t.billing_code, t.tin_value, t."
+     ],
+     [
+      0.033,
+      "SELECT unit_id, billing_code, rate FROM _outreach_rates_7c28f8c480 WHERE billing_code IN (SELECT unnest(?::VARCHAR[])) ORDER BY billing_code, unit_id"
+     ],
+     [
+      0.024,
+      "SELECT billing_code, count(*) AS n FROM _outreach_rates_7c28f8c480 GROUP BY billing_code ORDER BY n DESC, billing_code"
+     ],
+     [
+      0.013,
+      "SELECT td.tin_value, td.entity_kind, td.primary_discipline FROM tin_directory td JOIN _scope s USING (tin_value)"
+     ],
+     [
+      0.007,
+      "DROP TABLE IF EXISTS _outreach_rates_7c28f8c480"
+     ]
+    ],
+    "top_funcs": [
+     "        1    0.041    0.041   16.424   16.424 /home/user/Claudevideo/mrfx/api.py:3839(export_outreach_zip)",
+     "        1    0.000    0.000   16.073   16.073 /home/user/Claudevideo/mrfx/api.py:3806(_outreach_parts)",
+     "        1    0.013    0.013   16.073   16.073 /home/user/Claudevideo/mrfx/api.py:1130(outreach_methodology)",
+     "        1    0.942    0.942   14.747   14.747 /home/user/Claudevideo/mrfx/outreach.py:119(build_outreach_rows)",
+     "        1    8.964    8.964    9.630    9.630 /home/user/Claudevideo/mrfx/store.py:5728(org_websites)",
+     "        1    7.534    7.534    7.534    7.534 /home/user/Claudevideo/mrfx/outreach.py:86(_tin_meta)",
+     "        1    7.501    7.501    7.501    7.501 /home/user/Claudevideo/mrfx/outreach.py:50(_geo_by_tin)",
+     "   955542    2.371    0.000    3.265    0.000 /home/user/Claudevideo/mrfx/rounding.py:33(half_up)",
+     "        1    0.261    0.261    1.312    1.312 /home/user/Claudevideo/mrfx/outreach.py:280(outreach_csv)",
+     "    32358    0.094    0.000    0.650    0.000 {built-in method builtins.sorted}",
+     "4848626/4848624    0.593    0.000    0.593    0.000 {built-in method builtins.isinstance}",
+     "   159267    0.057    0.000    0.556    0.000 /home/user/Claudevideo/mrfx/outreach.py:214(<genexpr>)"
+    ]
+   },
+   {
+    "run": "warm",
+    "status": 200,
+    "bytes": 1546068,
+    "total_s": 15.334,
+    "n_statements": 16,
+    "sql_total_s": 7.797,
+    "top_sql": [
+     [
+      4.863,
+      "WITH tin_npi AS ( SELECT DISTINCT r.tin_value, r.npi FROM rates r JOIN _scope s USING (tin_value) WHERE r.tin_value IS NOT NULL AND NOT r.tin_is_really_npi UNIO"
+     ],
+     [
+      1.675,
+      "SELECT unit_id, min(display_name) AS display_name, string_agg(DISTINCT tin_value, '; ' ORDER BY tin_value) AS tins, max(npi_count) AS npi_count, string_agg(DIST"
+     ],
+     [
+      0.919,
+      "CREATE OR REPLACE TEMP TABLE _outreach_units_c549f70425 AS SELECT DISTINCT unit_id, tin_value FROM (WITH base AS ( WITH k AS NOT MATERIALIZED (SELECT * FROM rat"
+     ],
+     [
+      0.264,
+      "CREATE OR REPLACE TEMP TABLE _outreach_rates_c549f70425 AS SELECT u.unit_id, p.billing_code, median(p.rate) AS rate FROM (SELECT t.billing_code, t.tin_value, t."
+     ],
+     [
+      0.03,
+      "SELECT unit_id, billing_code, rate FROM _outreach_rates_c549f70425 WHERE billing_code IN (SELECT unnest(?::VARCHAR[])) ORDER BY billing_code, unit_id"
+     ],
+     [
+      0.019,
+      "SELECT billing_code, count(*) AS n FROM _outreach_rates_c549f70425 GROUP BY billing_code ORDER BY n DESC, billing_code"
+     ],
+     [
+      0.015,
+      "SELECT td.tin_value, td.entity_kind, td.primary_discipline FROM tin_directory td JOIN _scope s USING (tin_value)"
+     ],
+     [
+      0.002,
+      "SELECT filename, payer, file_month FROM files WHERE status = 'done' AND file_type = 'in_network' ORDER BY filename"
+     ]
+    ],
+    "top_funcs": [
+     "        1    0.029    0.029   15.313   15.313 /home/user/Claudevideo/mrfx/api.py:3839(export_outreach_zip)",
+     "        1    0.000    0.000   14.994   14.994 /home/user/Claudevideo/mrfx/api.py:3806(_outreach_parts)",
+     "        1    0.014    0.014   14.994   14.994 /home/user/Claudevideo/mrfx/api.py:1130(outreach_methodology)",
+     "        1    0.920    0.920   13.674   13.674 /home/user/Claudevideo/mrfx/outreach.py:119(build_outreach_rows)",
+     "        1    8.012    8.012    8.671    8.671 /home/user/Claudevideo/mrfx/store.py:5728(org_websites)",
+     "        1    6.649    6.649    6.650    6.650 /home/user/Claudevideo/mrfx/outreach.py:86(_tin_meta)",
+     "        1    6.617    6.617    6.617    6.617 /home/user/Claudevideo/mrfx/outreach.py:50(_geo_by_tin)",
+     "   955542    2.340    0.000    3.227    0.000 /home/user/Claudevideo/mrfx/rounding.py:33(half_up)",
+     "        1    0.258    0.258    1.306    1.306 /home/user/Claudevideo/mrfx/outreach.py:280(outreach_csv)",
+     "    32356    0.087    0.000    0.649    0.000 {built-in method builtins.sorted}",
+     "4841091/4841089    0.588    0.000    0.588    0.000 {built-in method builtins.isinstance}",
+     "   159267    0.058    0.000    0.562    0.000 /home/user/Claudevideo/mrfx/outreach.py:214(<genexpr>)"
+    ]
+   }
+  ]
+ },
+ "outreach_csv_entity_MO": {
+  "url": "/api/export/outreach.csv?grain=entity&latest=1&dollar_only=1&state=MO",
+  "payload": null,
+  "runs": [
+   {
+    "run": "cold",
+    "status": 200,
+    "bytes": 4249029,
+    "total_s": 19.221,
+    "n_statements": 16,
+    "sql_total_s": 14.751,
+    "top_sql": [
+     [
+      5.304,
+      "SELECT unit_id, min(display_name) AS display_name, string_agg(DISTINCT tin_value, '; ' ORDER BY tin_value) AS tins, max(npi_count) AS npi_count, string_agg(DIST"
+     ],
+     [
+      5.012,
+      "WITH tin_npi AS ( SELECT DISTINCT r.tin_value, r.npi FROM rates r JOIN _scope s USING (tin_value) WHERE r.tin_value IS NOT NULL AND NOT r.tin_is_really_npi UNIO"
+     ],
+     [
+      4.092,
+      "CREATE OR REPLACE TEMP TABLE _outreach_units_82772d81cc AS SELECT DISTINCT unit_id, tin_value FROM (SELECT * FROM ( SELECT display_name, unit_id, CASE WHEN len("
+     ],
+     [
+      0.273,
+      "CREATE OR REPLACE TEMP TABLE _outreach_rates_82772d81cc AS SELECT u.unit_id, p.billing_code, median(p.rate) AS rate FROM (SELECT t.billing_code, t.tin_value, t."
+     ],
+     [
+      0.036,
+      "SELECT unit_id, billing_code, rate FROM _outreach_rates_82772d81cc WHERE billing_code IN (SELECT unnest(?::VARCHAR[])) ORDER BY billing_code, unit_id"
+     ],
+     [
+      0.013,
+      "SELECT td.tin_value, td.entity_kind, td.primary_discipline FROM tin_directory td JOIN _scope s USING (tin_value)"
+     ],
+     [
+      0.011,
+      "SELECT billing_code, count(*) AS n FROM _outreach_rates_82772d81cc GROUP BY billing_code ORDER BY n DESC, billing_code"
+     ],
+     [
+      0.002,
+      "SELECT filename, payer, file_month FROM files WHERE status = 'done' AND file_type = 'in_network' ORDER BY filename"
+     ]
+    ],
+    "top_funcs": [
+     "        1    0.018    0.018   19.181   19.181 /home/user/Claudevideo/mrfx/api.py:3823(export_outreach)",
+     "        1    0.000    0.000   19.156   19.156 /home/user/Claudevideo/mrfx/api.py:3806(_outreach_parts)",
+     "        1    0.010    0.010   19.156   19.156 /home/user/Claudevideo/mrfx/api.py:1130(outreach_methodology)",
+     "        1    0.575    0.575   18.383   18.383 /home/user/Claudevideo/mrfx/outreach.py:119(build_outreach_rows)",
+     "        1   14.936   14.936   15.306   15.306 /home/user/Claudevideo/mrfx/store.py:5728(org_websites)",
+     "        1   10.428   10.428   10.429   10.429 /home/user/Claudevideo/mrfx/outreach.py:86(_tin_meta)",
+     "        1   10.399   10.399   10.399   10.399 /home/user/Claudevideo/mrfx/outreach.py:50(_geo_by_tin)",
+     "   554952    1.446    0.000    1.977    0.000 /home/user/Claudevideo/mrfx/rounding.py:33(half_up)",
+     "        1    0.154    0.154    0.763    0.763 /home/user/Claudevideo/mrfx/outreach.py:280(outreach_csv)",
+     "    18522    0.054    0.000    0.366    0.000 {built-in method builtins.sorted}",
+     "2809894/2809892    0.350    0.000    0.350    0.000 {built-in method builtins.isinstance}",
+     "    92502    0.032    0.000    0.313    0.000 /home/user/Claudevideo/mrfx/outreach.py:214(<genexpr>)"
+    ]
+   },
+   {
+    "run": "warm",
+    "status": 200,
+    "bytes": 4249029,
+    "total_s": 19.594,
+    "n_statements": 16,
+    "sql_total_s": 14.872,
+    "top_sql": [
+     [
+      5.466,
+      "SELECT unit_id, min(display_name) AS display_name, string_agg(DISTINCT tin_value, '; ' ORDER BY tin_value) AS tins, max(npi_count) AS npi_count, string_agg(DIST"
+     ],
+     [
+      5.02,
+      "WITH tin_npi AS ( SELECT DISTINCT r.tin_value, r.npi FROM rates r JOIN _scope s USING (tin_value) WHERE r.tin_value IS NOT NULL AND NOT r.tin_is_really_npi UNIO"
+     ],
+     [
+      4.04,
+      "CREATE OR REPLACE TEMP TABLE _outreach_units_f61d469d88 AS SELECT DISTINCT unit_id, tin_value FROM (SELECT * FROM ( SELECT display_name, unit_id, CASE WHEN len("
+     ],
+     [
+      0.284,
+      "CREATE OR REPLACE TEMP TABLE _outreach_rates_f61d469d88 AS SELECT u.unit_id, p.billing_code, median(p.rate) AS rate FROM (SELECT t.billing_code, t.tin_value, t."
+     ],
+     [
+      0.028,
+      "SELECT unit_id, billing_code, rate FROM _outreach_rates_f61d469d88 WHERE billing_code IN (SELECT unnest(?::VARCHAR[])) ORDER BY billing_code, unit_id"
+     ],
+     [
+      0.014,
+      "SELECT td.tin_value, td.entity_kind, td.primary_discipline FROM tin_directory td JOIN _scope s USING (tin_value)"
+     ],
+     [
+      0.011,
+      "SELECT billing_code, count(*) AS n FROM _outreach_rates_f61d469d88 GROUP BY billing_code ORDER BY n DESC, billing_code"
+     ],
+     [
+      0.002,
+      "SELECT filename, payer, file_month FROM files WHERE status = 'done' AND file_type = 'in_network' ORDER BY filename"
+     ]
+    ],
+    "top_funcs": [
+     "        1    0.018    0.018   19.533   19.533 /home/user/Claudevideo/mrfx/api.py:3823(export_outreach)",
+     "        1    0.000    0.000   19.509   19.509 /home/user/Claudevideo/mrfx/api.py:3806(_outreach_parts)",
+     "        1    0.010    0.010   19.509   19.509 /home/user/Claudevideo/mrfx/api.py:1130(outreach_methodology)",
+     "        1    0.612    0.612   18.696   18.696 /home/user/Claudevideo/mrfx/outreach.py:119(build_outreach_rows)",
+     "        1   15.100   15.100   15.483   15.483 /home/user/Claudevideo/mrfx/store.py:5728(org_websites)",
+     "        1   10.642   10.642   10.644   10.644 /home/user/Claudevideo/mrfx/outreach.py:86(_tin_meta)",
+     "        1   10.613   10.613   10.613   10.613 /home/user/Claudevideo/mrfx/outreach.py:50(_geo_by_tin)",
+     "   554952    1.494    0.000    2.044    0.000 /home/user/Claudevideo/mrfx/rounding.py:33(half_up)",
+     "        1    0.172    0.172    0.803    0.803 /home/user/Claudevideo/mrfx/outreach.py:280(outreach_csv)",
+     "    18522    0.058    0.000    0.380    0.000 {built-in method builtins.sorted}",
+     "2809867/2809865    0.366    0.000    0.366    0.000 {built-in method builtins.isinstance}",
+     "    92502    0.033    0.000    0.321    0.000 /home/user/Claudevideo/mrfx/outreach.py:214(<genexpr>)"
+    ]
+   }
+  ]
+ },
+ "export_csv_all_latest": {
+  "url": "/api/export.csv?grain=tin&latest=1&dollar_only=1",
+  "payload": null,
+  "runs": [
+   {
+    "run": "cold",
+    "status": 507,
+    "bytes": 524,
+    "total_s": 10.67,
+    "n_statements": 8,
+    "sql_total_s": 10.516,
+    "top_sql": [
+     [
+      10.461,
+      "SELECT count(*) FROM ( SELECT CASE WHEN regexp_matches(CAST(payer AS VARCHAR), '^[=+\\-@\\t\\r]') THEN chr(39) || CAST(payer AS VARCHAR) ELSE CAST(payer AS VARCHAR"
+     ],
+     [
+      0.041,
+      "SELECT count(*) FROM rates"
+     ],
+     [
+      0.005,
+      "SELECT value FROM meta WHERE key = ?"
+     ],
+     [
+      0.003,
+      "SELECT count(*) FROM information_schema.tables WHERE table_name = 'rates_by_tin_tbl'"
+     ],
+     [
+      0.002,
+      "SELECT filename, finished_at::VARCHAR FROM files WHERE status = 'done' AND rows_emitted > 0 AND finished_at::VARCHAR >= ?"
+     ],
+     [
+      0.001,
+      "SELECT value FROM meta WHERE key = ?"
+     ],
+     [
+      0.001,
+      "SELECT value FROM meta WHERE key = ?"
+     ],
+     [
+      0.001,
+      "SELECT value FROM meta WHERE key = ?"
+     ]
+    ],
+    "top_funcs": [
+     "    18/14    0.000    0.000   10.670    0.762 {built-in method builtins.next}",
+     "        1    0.000    0.000   10.665   10.665 /home/user/Claudevideo/mrfx/api.py:2815(export_csv)",
+     "        1   10.664   10.664   10.665   10.665 /home/user/Claudevideo/mrfx/api.py:2749(_export_payload)",
+     "        1    0.061    0.061    0.061    0.061 /home/user/Claudevideo/mrfx/store.py:5312(store_stats)",
+     "        4    0.010    0.002    0.028    0.007 /home/user/Claudevideo/mrfx/store.py:1994(_meta_get)",
+     "        1    0.013    0.013    0.013    0.013 /home/user/Claudevideo/mrfx/store.py:2022(rollups_stale)",
+     "        1    0.000    0.000    0.007    0.007 /home/user/Claudevideo/mrfx/store.py:3933(_read_pending_payers)"
+    ]
+   },
+   {
+    "run": "warm",
+    "status": 507,
+    "bytes": 524,
+    "total_s": 11.292,
+    "n_statements": 1,
+    "sql_total_s": 11.199,
+    "top_sql": [
+     [
+      11.199,
+      "SELECT count(*) FROM ( SELECT CASE WHEN regexp_matches(CAST(payer AS VARCHAR), '^[=+\\-@\\t\\r]') THEN chr(39) || CAST(payer AS VARCHAR) ELSE CAST(payer AS VARCHAR"
+     ]
+    ],
+    "top_funcs": [
+     "    17/13    0.000    0.000   11.291    0.869 {built-in method builtins.next}",
+     "        1    0.000    0.000   11.279   11.279 /home/user/Claudevideo/mrfx/api.py:2815(export_csv)",
+     "        1   11.279   11.279   11.279   11.279 /home/user/Claudevideo/mrfx/api.py:2749(_export_payload)"
+    ]
+   }
+  ]
+ },
+ "rates_npi_payer_code": {
+  "url": "/api/rates?grain=npi&latest=1&dollar_only=1&payer=Payer%2003&cpt=97110&page=1&page_size=100",
+  "payload": null,
+  "runs": [
+   {
+    "run": "cold",
+    "status": 200,
+    "bytes": 67704,
+    "total_s": 1.784,
+    "n_statements": 2,
+    "sql_total_s": 1.749,
+    "top_sql": [
+     [
+      1.177,
+      "SELECT * FROM (WITH base AS ( SELECT coalesce(n.org_name, 'NPI ' || d.npi) AS display_name, d.npi AS unit_id, d.tin_value, FALSE AS is_mapped_entity, d.tin_is_r"
+     ],
+     [
+      0.572,
+      "SELECT count(*) FROM (SELECT * FROM (WITH base AS ( SELECT coalesce(n.org_name, 'NPI ' || d.npi) AS display_name, d.npi AS unit_id, d.tin_value, FALSE AS is_map"
+     ]
+    ],
+    "top_funcs": [
+     "    18/14    0.000    0.000    1.783    0.127 {built-in method builtins.next}",
+     "        1    0.001    0.001    1.754    1.754 /home/user/Claudevideo/mrfx/api.py:1754(rates)",
+     "        1    0.572    0.572    1.752    1.752 /home/user/Claudevideo/mrfx/api.py:1655(_filtered_count)"
+    ]
+   },
+   {
+    "run": "warm",
+    "status": 200,
+    "bytes": 67704,
+    "total_s": 1.063,
+    "n_statements": 1,
+    "sql_total_s": 1.029,
+    "top_sql": [
+     [
+      1.029,
+      "SELECT * FROM (WITH base AS ( SELECT coalesce(n.org_name, 'NPI ' || d.npi) AS display_name, d.npi AS unit_id, d.tin_value, FALSE AS is_mapped_entity, d.tin_is_r"
+     ]
+    ],
+    "top_funcs": [
+     "    18/14    0.000    0.000    1.063    0.076 {built-in method builtins.next}",
+     "        1    0.000    0.000    1.032    1.032 /home/user/Claudevideo/mrfx/api.py:1754(rates)",
+     "        1    0.002    0.002    1.032    1.032 /home/user/Claudevideo/mrfx/api.py:4653(_dicts)"
+    ]
+   }
+  ]
+ },
+ "report_pitch": {
+  "url": "/api/report/pitch",
+  "payload": {
+   "subject": "100049428",
+   "market": {
+    "month": "latest",
+    "payers": [],
+    "billing_class": "professional",
+    "target_percentile": 50,
+    "therapy_only": true,
+    "state": "MO"
+   },
+   "volumes": {
+    "97110": 3000,
+    "97140": 1500,
+    "97530": 800
+   }
+  },
+  "runs": [
+   {
+    "run": "cold",
+    "status": 200,
+    "bytes": 32002,
+    "total_s": 5.363,
+    "n_statements": 17,
+    "sql_total_s": 5.328,
+    "top_sql": [
+     [
+      3.344,
+      "WITH base AS MATERIALIZED ( SELECT t.payer, t.billing_code, t.file_month, t.tin_value, median(t.negotiated_rate) AS rate FROM rates_by_tin t LEFT JOIN tin_direc"
+     ],
+     [
+      0.694,
+      "SELECT payer, file_month, count(DISTINCT tin_value) FILTER (WHERE source_count > 1), count(*) FILTER (WHERE source_count > 1), count(*) FILTER (WHERE source_cou"
+     ],
+     [
+      0.644,
+      "SELECT payer, max(file_month) FROM rates_by_tin WHERE payer IS NOT NULL GROUP BY payer"
+     ],
+     [
+      0.288,
+      "SELECT t.billing_code, t.file_month, t.payer, t.tin_value, median(t.negotiated_rate) AS rate FROM rates_by_tin t LEFT JOIN tin_directory td USING (tin_value) WH"
+     ],
+     [
+      0.267,
+      "WITH subject_tins AS (SELECT unnest(?::VARCHAR[]) AS tin), base AS (SELECT t.billing_code, t.tin_value, t.rate FROM read_parquet('/tmp/claude-0/-home-user-Claud"
+     ],
+     [
+      0.069,
+      "SELECT DISTINCT file_month FROM rates_by_tin WHERE file_month IS NOT NULL ORDER BY file_month DESC"
+     ],
+     [
+      0.007,
+      "SELECT tin_value FROM tin_directory WHERE lower(display_name) = lower(?)"
+     ],
+     [
+      0.006,
+      "SELECT tin_value FROM tin_directory WHERE lower(display_name) = lower(?)"
+     ]
+    ],
+    "top_funcs": [
+     "        3    0.002    0.001    6.991    2.330 /home/user/Claudevideo/mrfx/store.py:5980(wrapper)",
+     "        3    0.000    0.000    6.707    2.236 /home/user/Claudevideo/mrfx/store.py:4930(cached)",
+     "        1    0.000    0.000    5.360    5.360 /home/user/Claudevideo/mrfx/api.py:3936(pitch_report)",
+     "        1    0.000    0.000    5.360    5.360 /home/user/Claudevideo/mrfx/benchmark.py:2164(render_pitch_report)",
+     "        1    0.000    0.000    5.359    5.359 /home/user/Claudevideo/mrfx/benchmark.py:2091(_erosion_block)",
+     "        3    0.000    0.000    4.770    1.590 /home/user/Claudevideo/mrfx/store.py:5985(<lambda>)",
+     "        1    0.000    0.000    3.424    3.424 /home/user/Claudevideo/mrfx/monitor.py:378(compute_payer_trajectory)",
+     "        1    3.423    3.423    3.423    3.423 /home/user/Claudevideo/mrfx/inflation.py:84(load_index)",
+     "        1    0.289    0.289    1.931    1.931 /home/user/Claudevideo/mrfx/spark.py:144(series_by_code)",
+     "        2    0.000    0.000    1.651    0.825 /home/user/Claudevideo/mrfx/benchmark.py:673(subject_tins_for_market)",
+     "        2    0.000    0.000    1.651    0.825 /home/user/Claudevideo/mrfx/benchmark.py:715(resolve_subject_tins)",
+     "        2    0.018    0.009    1.651    0.825 /home/user/Claudevideo/mrfx/benchmark.py:729(_resolve_subject_tins)",
+     "        1    0.000    0.000    1.631    1.631 /home/user/Claudevideo/mrfx/benchmark.py:2040(methodology_footer)",
+     "        1    0.000    0.000    1.631    1.631 /home/user/Claudevideo/mrfx/benchmark.py:2029(_pooled_lines)"
+    ]
+   },
+   {
+    "run": "warm",
+    "status": 200,
+    "bytes": 32002,
+    "total_s": 0.633,
+    "n_statements": 10,
+    "sql_total_s": 0.614,
+    "top_sql": [
+     [
+      0.298,
+      "SELECT t.billing_code, t.file_month, t.payer, t.tin_value, median(t.negotiated_rate) AS rate FROM rates_by_tin t LEFT JOIN tin_directory td USING (tin_value) WH"
+     ],
+     [
+      0.29,
+      "WITH subject_tins AS (SELECT unnest(?::VARCHAR[]) AS tin), base AS (SELECT t.billing_code, t.tin_value, t.rate FROM read_parquet('/tmp/claude-0/-home-user-Claud"
+     ],
+     [
+      0.012,
+      "SELECT tin_value FROM tin_directory WHERE lower(display_name) = lower(?)"
+     ],
+     [
+      0.009,
+      "SELECT tin_value FROM tin_directory WHERE lower(display_name) = lower(?)"
+     ],
+     [
+      0.001,
+      "SELECT filename, payer, last_updated_on FROM files WHERE status = 'done' AND file_type = 'in_network' ORDER BY filename"
+     ],
+     [
+      0.001,
+      "SELECT tin_value FROM tin_directory WHERE display_name = ?"
+     ],
+     [
+      0.001,
+      "SELECT tin_value FROM tin_directory WHERE display_name = ?"
+     ],
+     [
+      0.001,
+      "SELECT state, locality, source, code, non_facility_rate FROM mpfs WHERE isfinite(non_facility_rate) AND non_facility_rate > 0"
+     ]
+    ],
+    "top_funcs": [
+     "    16/12    0.000    0.000    0.633    0.053 {built-in method builtins.next}",
+     "        1    0.000    0.000    0.630    0.630 /home/user/Claudevideo/mrfx/api.py:3936(pitch_report)",
+     "        1    0.000    0.000    0.630    0.630 /home/user/Claudevideo/mrfx/benchmark.py:2164(render_pitch_report)",
+     "        1    0.299    0.299    0.625    0.625 /home/user/Claudevideo/mrfx/spark.py:144(series_by_code)",
+     "        2    0.000    0.000    0.339    0.169 /home/user/Claudevideo/mrfx/benchmark.py:673(subject_tins_for_market)",
+     "        2    0.000    0.000    0.339    0.169 /home/user/Claudevideo/mrfx/benchmark.py:715(resolve_subject_tins)",
+     "        2    0.025    0.013    0.339    0.169 /home/user/Claudevideo/mrfx/benchmark.py:729(_resolve_subject_tins)",
+     "        1    0.000    0.000    0.310    0.310 /home/user/Claudevideo/mrfx/benchmark.py:885(compute_benchmark)",
+     "        1    0.307    0.307    0.307    0.307 /home/user/Claudevideo/mrfx/store.py:5815(medicare_anchor)"
+    ]
+   }
+  ]
+ },
+ "outreach_zip_tin_ALL": {
+  "url": "/api/export/outreach.zip?grain=tin&latest=1&dollar_only=1",
+  "payload": null,
+  "runs": [
+   {
+    "run": "cold",
+    "status": 200,
+    "bytes": 18549684,
+    "total_s": 127.777,
+    "n_statements": 11,
+    "sql_total_s": 22.557,
+    "top_sql": [
+     [
+      11.642,
+      "WITH tin_npi AS ( SELECT DISTINCT r.tin_value, r.npi FROM rates r JOIN _scope s USING (tin_value) WHERE r.tin_value IS NOT NULL AND NOT r.tin_is_really_npi UNIO"
+     ],
+     [
+      6.864,
+      "SELECT unit_id, min(display_name) AS display_name, string_agg(DISTINCT tin_value, '; ' ORDER BY tin_value) AS tins, max(npi_count) AS npi_count, string_agg(DIST"
+     ],
+     [
+      2.024,
+      "CREATE OR REPLACE TEMP TABLE _outreach_units_b78183e3c3 AS SELECT DISTINCT unit_id, tin_value FROM (WITH base AS (SELECT coalesce(em.entity_name, td.display_nam"
+     ],
+     [
+      1.585,
+      "CREATE OR REPLACE TEMP TABLE _outreach_rates_b78183e3c3 AS SELECT u.unit_id, p.billing_code, median(p.rate) AS rate FROM (SELECT t.billing_code, t.tin_value, t."
+     ],
+     [
+      0.304,
+      "SELECT unit_id, billing_code, rate FROM _outreach_rates_b78183e3c3 WHERE billing_code IN (SELECT unnest(?::VARCHAR[])) ORDER BY billing_code, unit_id"
+     ],
+     [
+      0.076,
+      "SELECT billing_code, count(*) AS n FROM _outreach_rates_b78183e3c3 GROUP BY billing_code ORDER BY n DESC, billing_code"
+     ],
+     [
+      0.051,
+      "SELECT td.tin_value, td.entity_kind, td.primary_discipline FROM tin_directory td JOIN _scope s USING (tin_value)"
+     ],
+     [
+      0.008,
+      "DROP TABLE IF EXISTS _outreach_rates_b78183e3c3"
+     ]
+    ],
+    "top_funcs": [
+     "        1    0.465    0.465  127.626  127.626 /home/user/Claudevideo/mrfx/api.py:3839(export_outreach_zip)",
+     "        1    0.000    0.000  123.763  123.763 /home/user/Claudevideo/mrfx/api.py:3806(_outreach_parts)",
+     "        1    0.169    0.169  123.763  123.763 /home/user/Claudevideo/mrfx/api.py:1130(outreach_methodology)",
+     "        1   11.455   11.455  107.074  107.074 /home/user/Claudevideo/mrfx/outreach.py:119(build_outreach_rows)",
+     "        1   31.224   31.224   41.031   41.031 /home/user/Claudevideo/mrfx/store.py:5728(org_websites)",
+     " 11461266   29.134    0.000   40.157    0.000 /home/user/Claudevideo/mrfx/rounding.py:33(half_up)",
+     "        1   24.874   24.874   24.875   24.875 /home/user/Claudevideo/mrfx/outreach.py:86(_tin_meta)",
+     "        1   24.602   24.602   24.602   24.602 /home/user/Claudevideo/mrfx/outreach.py:50(_geo_by_tin)",
+     "        1    3.362    3.362   16.518   16.518 /home/user/Claudevideo/mrfx/outreach.py:280(outreach_csv)",
+     "   388022    1.556    0.000    9.692    0.000 {built-in method builtins.sorted}"
+    ]
+   },
+   {
+    "run": "warm",
+    "status": 200,
+    "bytes": 18549684,
+    "total_s": 121.377,
+    "n_statements": 11,
+    "sql_total_s": 17.045,
+    "top_sql": [
+     [
+      8.634,
+      "WITH tin_npi AS ( SELECT DISTINCT r.tin_value, r.npi FROM rates r JOIN _scope s USING (tin_value) WHERE r.tin_value IS NOT NULL AND NOT r.tin_is_really_npi UNIO"
+     ],
+     [
+      5.085,
+      "SELECT unit_id, min(display_name) AS display_name, string_agg(DISTINCT tin_value, '; ' ORDER BY tin_value) AS tins, max(npi_count) AS npi_count, string_agg(DIST"
+     ],
+     [
+      1.558,
+      "CREATE OR REPLACE TEMP TABLE _outreach_units_9b7ba5b8db AS SELECT DISTINCT unit_id, tin_value FROM (WITH base AS (SELECT coalesce(em.entity_name, td.display_nam"
+     ],
+     [
+      1.444,
+      "CREATE OR REPLACE TEMP TABLE _outreach_rates_9b7ba5b8db AS SELECT u.unit_id, p.billing_code, median(p.rate) AS rate FROM (SELECT t.billing_code, t.tin_value, t."
+     ],
+     [
+      0.21,
+      "SELECT unit_id, billing_code, rate FROM _outreach_rates_9b7ba5b8db WHERE billing_code IN (SELECT unnest(?::VARCHAR[])) ORDER BY billing_code, unit_id"
+     ],
+     [
+      0.061,
+      "SELECT billing_code, count(*) AS n FROM _outreach_rates_9b7ba5b8db GROUP BY billing_code ORDER BY n DESC, billing_code"
+     ],
+     [
+      0.046,
+      "SELECT td.tin_value, td.entity_kind, td.primary_discipline FROM tin_directory td JOIN _scope s USING (tin_value)"
+     ],
+     [
+      0.003,
+      "DROP TABLE IF EXISTS _outreach_rates_9b7ba5b8db"
+     ]
+    ],
+    "top_funcs": [
+     "        1    0.419    0.419  121.188  121.188 /home/user/Claudevideo/mrfx/api.py:3839(export_outreach_zip)",
+     "        1    0.000    0.000  117.358  117.358 /home/user/Claudevideo/mrfx/api.py:3806(_outreach_parts)",
+     "        1    0.179    0.179  117.358  117.358 /home/user/Claudevideo/mrfx/api.py:1130(outreach_methodology)",
+     "        1   11.598   11.598  101.155  101.155 /home/user/Claudevideo/mrfx/outreach.py:119(build_outreach_rows)",
+     " 11461266   28.698    0.000   39.422    0.000 /home/user/Claudevideo/mrfx/rounding.py:33(half_up)",
+     "        1   25.797   25.797   33.526   33.526 /home/user/Claudevideo/mrfx/store.py:5728(org_websites)",
+     "        1   20.521   20.521   20.521   20.521 /home/user/Claudevideo/mrfx/outreach.py:86(_tin_meta)",
+     "        1   20.267   20.267   20.267   20.267 /home/user/Claudevideo/mrfx/outreach.py:50(_geo_by_tin)",
+     "        1    3.307    3.307   16.023   16.023 /home/user/Claudevideo/mrfx/outreach.py:280(outreach_csv)"
+    ]
+   }
+  ]
+ }
+}

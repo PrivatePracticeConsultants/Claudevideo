@@ -1,0 +1,52 @@
+[STOP] explorer  #btn-export        5.2s {"stop_clicked": true, "bars_left": [], "anchor_disabled_after": false, "dialogs": ["The export was not built.\n\nstopped"], "new_tabs": 0}
+[STOP] explorer  #btn-export-zip    5.0s {"stop_clicked": true, "bars_left": [], "anchor_disabled_after": false, "dialogs": ["The export was not built.\n\nstopped"], "new_tabs": 0}
+[STOP] explorer  #btn-outreach      5.0s {"stop_clicked": true, "bars_left": [], "anchor_disabled_after": false, "dialogs": ["The export was not built.\n\nstopped"], "new_tabs": 0}
+[STOP] overview  #ov-refresh        1.3s {"disabled_before": true}
+[STOP] benchmark #b-run             4.9s {"stop_clicked": true, "bars_left": ["Market overview \u00b7 Reading this market's rows (1 of 5) \u00b7 about 0 %Stop"], "anchor_disabled_after": false, "dialogs": [], "new_tabs": 0}
+[STOP] benchmark #b-gaps-run        4.6s {"stop_clicked": true, "bars_left": [], "anchor_disabled_after": false, "dialogs": [], "new_tabs": 0}
+[STOP] benchmark #b-report          1.3s {"disabled_before": true}
+[STOP] benchmark #b-report-pdf      1.3s {"disabled_before": true}
+[STOP] ratecard  #rc-run            4.9s {"stop_clicked": true, "bars_left": [], "anchor_disabled_after": false, "dialogs": [], "new_tabs": 0}
+[STOP] ratecard  #rc-report         1.3s {"disabled_before": true}
+[STOP] ratecard  #rc-csv            1.3s {"disabled_before": true}
+[STOP] ratecard  #rc-bundle         1.3s {"disabled_before": true}
+[STOP] ratecard  #vv-run            7.9s {"stop_clicked": false, "bars_left": [], "anchor_disabled_after": false, "dialogs": [], "new_tabs": 0}
+[STOP] negotiate #ng-run            7.9s {"stop_clicked": false, "bars_left": [], "anchor_disabled_after": false, "dialogs": [], "new_tabs": 0}
+[STOP] clients   #cl-refresh        1.3s {"disabled_before": true}
+[STOP] leads     #ld-run            4.6s {"stop_clicked": true, "bars_left": ["Client digest \u00b7 Pairing each payer's months (1 of 3) \u00b7 about 0 %Stop"], "anchor_disabled_after": false, "dialogs": [], "new_tabs": 0}
+[STOP] leads     #ld-board-run      4.5s {"stop_clicked": true, "bars_left": ["Client digest \u00b7 Pairing each payer's months (1 of 3) \u00b7 about 0 %Stop"], "anchor_disabled_after": false, "dialogs": [], "new_tabs": 0}
+[STOP] leads     #ds-run            5.2s {"stop_clicked": true, "bars_left": ["Client digest \u00b7 Pairing each payer's months (1 of 3) \u00b7 about 0 %Stop"], "anchor_disabled_after": false, "dialogs": [], "new_tabs": 0}
+[STOP] leads     #mr-run            5.2s {"stop_clicked": true, "bars_left": ["Client digest \u00b7 Pairing each payer's months (1 of 3) \u00b7 about 0 %Stop"], "anchor_disabled_after": false, "dialogs": [], "new_tabs": 0}
+[STOP] changes   #ch-run            4.6s {"stop_clicked": true, "bars_left": ["Client digest \u00b7 Pairing each payer's months (1 of 3) \u00b7 about 0 %Stop"], "anchor_disabled_after": false, "dialogs": [], "new_tabs": 0}
+[STOP] changes   #ch-traj-run       4.5s {"stop_clicked": true, "bars_left": ["Client digest \u00b7 Pairing each payer's months (1 of 3) \u00b7 about 0 %Stop"], "anchor_disabled_after": false, "dialogs": [], "new_tabs": 0}
+[STOP] roster    #ro-run            4.6s {"stop_clicked": true, "bars_left": ["Client digest \u00b7 Pairing each payer's months (1 of 3) \u00b7 about 0 %Stop"], "anchor_disabled_after": false, "dialogs": [], "new_tabs": 0}
+[STOP] roster    #ro-csv            1.3s {"disabled_before": true}
+[STOP] medicare  #md-run            4.9s {"stop_clicked": true, "bars_left": ["Client digest \u00b7 Pairing each payer's months (1 of 3) \u00b7 about 0 %Stop"], "anchor_disabled_after": false, "dialogs": [], "new_tabs": 0}
+[FINISH] explorer  #btn-export       13.1s {"bars_left": [], "anchor_disabled_after": false, "dialogs": [], "new_tabs": 0}
+[FINISH] explorer  #btn-export-zip   13.6s {"bars_left": [], "anchor_disabled_after": false, "dialogs": [], "new_tabs": 0}
+[FINISH] explorer  #btn-outreach     23.6s {"bars_left": [], "anchor_disabled_after": false, "dialogs": [], "new_tabs": 0}
+[FINISH] overview  #ov-refresh        2.3s {"bars_left": [], "anchor_disabled_after": false, "dialogs": [], "new_tabs": 0}
+[FINISH] benchmark #b-run             9.5s {"bars_left": [], "anchor_disabled_after": false, "dialogs": [], "new_tabs": 0}
+[FINISH] benchmark #b-gaps-run       10.0s {"bars_left": [], "anchor_disabled_after": false, "dialogs": [], "new_tabs": 0}
+[FINISH] benchmark #b-report         27.0s {"bars_left": [], "anchor_disabled_after": false, "dialogs": [], "new_tabs": 1, "tab_text": ["MRF EXPLORER\nNegotiated-rate benchmark \u2014 430000010\nAs of latest available (newest file per contract) \u00b7 auto market (all "]}
+[FINISH] benchmark #b-report-pdf     18.9s {"bars_left": [], "anchor_disabled_after": false, "dialogs": [], "new_tabs": 0}
+[FINISH] ratecard  #rc-run            7.0s {"bars_left": [], "anchor_disabled_after": false, "dialogs": [], "new_tabs": 0}
+[FINISH] ratecard  #rc-report        15.2s {"bars_left": [], "anchor_disabled_after": false, "dialogs": [], "new_tabs": 1, "tab_text": ["MRF EXPLORER\nRate card \u2014 430000010\nYour negotiated rates by payer, as of latest available (newest file per contract). Be"]}
+[FINISH] ratecard  #rc-csv            2.1s {"bars_left": [], "anchor_disabled_after": false, "dialogs": [], "new_tabs": 0}
+[FINISH] ratecard  #rc-bundle         1.9s {"bars_left": [], "anchor_disabled_after": false, "dialogs": [], "new_tabs": 0}
+[FINISH] ratecard  #vv-run            1.8s {"bars_left": [], "anchor_disabled_after": false, "dialogs": [], "new_tabs": 0}
+[FINISH] negotiate #ng-run            1.9s {"bars_left": [], "anchor_disabled_after": false, "dialogs": [], "new_tabs": 0}
+[FINISH] clients   #cl-refresh        1.3s {"disabled_before": true}
+[FINISH] leads     #ld-run            4.5s {"bars_left": [], "anchor_disabled_after": false, "dialogs": [], "new_tabs": 0}
+[FINISH] leads     #ld-board-run      4.5s {"bars_left": [], "anchor_disabled_after": false, "dialogs": [], "new_tabs": 0}
+[FINISH] leads     #ds-run           47.6s {"bars_left": ["Prospect dossier \u00b7 The market around them (10 of 11) \u00b7 at least 90 %\nStop"], "anchor_disabled_after": true, "dialogs": [], "new_tabs": 1, "tab_text": ["Prospect dossier \u00b7 The market around them (10 of 11) \u00b7 at least 90 %"]}
+[FINISH] leads     #mr-run            8.6s {"bars_left": [], "anchor_disabled_after": false, "dialogs": [], "new_tabs": 1, "tab_text": ["MRF EXPLORER\nTherapy market report \u2014 MO\nWhat 97110 pays across MO\n\n1 city market(s) in MO.\n\nCITY\tMEDIAN\tVS STATE\tPRACTIC"]}
+[FINISH] changes   #ch-run            5.6s {"bars_left": [], "anchor_disabled_after": false, "dialogs": [], "new_tabs": 0}
+[FINISH] changes   #ch-traj-run       5.4s {"bars_left": [], "anchor_disabled_after": false, "dialogs": [], "new_tabs": 0}
+[FINISH] roster    #ro-run            4.4s {"bars_left": [], "anchor_disabled_after": false, "dialogs": [], "new_tabs": 0}
+[FINISH] roster    #ro-csv            2.4s {"bars_left": [], "anchor_disabled_after": false, "dialogs": [], "new_tabs": 0}
+[FINISH] medicare  #md-run           12.2s {"bars_left": [], "anchor_disabled_after": false, "dialogs": [], "new_tabs": 0}
+--- ui03 console: ['error: Failed to load resource: the server responded with a status of 409 (Conflict)', 'error: Failed to load resource: the server responded with a status of 409 (Conflict)', 'error: Failed to load resource: the server responded with a status of 409 (Conflict)', 'error: Failed to load resource: the server responded with a status of 409 (Conflict)', 'error: Failed to load resource: the server responded with a status of 409 (Conflict)', 'error: Failed to load resource: the server responded with a status of 409 (Conflict)', 'error: Failed to load resource: the server responded with a status of 409 (Conflict)', 'error: Failed to load resource: the server responded with a status of 409 (Conflict)', 'error: Failed to load resource: the server responded with a status of 409 (Conflict)', 'error: Failed to load resource: the server responded with a status of 409 (Conflict)', 'error: Failed to load resource: the server responded with a status of 409 (Conflict)', 'error: Failed to load resource: the server responded with a status of 409 (Conflict)', 'error: Failed to load resource: the server responded with a status of 409 (Conflict)', 'error: Failed to load resource: the server responded with a status of 409 (Conflict)']
+--- ui03 pageerrors: []
+--- ui03 requestfailed: ['GET http://localhost:8792/api/export.csv?grain=tin&latest=1&dollar_only=1&sort=negotiated_rate&dir=desc&view=explorer&progre net::ERR_ABORTED', 'GET http://localhost:8792/api/export.zip?grain=tin&latest=1&dollar_only=1&sort=negotiated_rate&dir=desc&view=explorer&progre net::ERR_ABORTED', 'GET http://localhost:8792/api/export/outreach.zip?grain=tin&latest=1&dollar_only=1&progress=76cc7b96210f4aea987fc9c775d4e54c net::ERR_ABORTED']
+--- ui03 http>=400: ['409 GET http://localhost:8792/api/export.csv?grain=tin&latest=1&dollar_only=1&sort=negotiated_rate&dir=desc&view=explorer&progress=1a0f31a50ce7435ab', '409 GET http://localhost:8792/api/export.zip?grain=tin&latest=1&dollar_only=1&sort=negotiated_rate&dir=desc&view=explorer&progress=4cb5db3b9efc4c829', '409 GET http://localhost:8792/api/export/outreach.zip?grain=tin&latest=1&dollar_only=1&progress=26903ef7e3d24ac2940802d07030a4ab', '409 POST http://localhost:8792/api/benchmark/market', '409 POST http://localhost:8792/api/contract-gaps', '409 POST http://localhost:8792/api/schedule/fee', '409 POST http://localhost:8792/api/leads', '409 POST http://localhost:8792/api/leaderboard', '409 POST http://localhost:8792/api/report/dossier', '409 POST http://localhost:8792/api/report/market', '409 POST http://localhost:8792/api/changes', '409 POST http://localhost:8792/api/trajectory', '409 POST http://localhost:8792/api/roster', '409 POST http://localhost:8792/api/medicare/org']

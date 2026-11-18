@@ -1,0 +1,63 @@
+verdict  want  got   label
+ok       TWO   TWO   identity param beside a signature  [round 11 2.10]
+ok       TWO   TWO   short ?token=<file-id> beside sig  [round 11 2.10]
+DIFFERS  TWO   ONE   LONG ?token=<file-id> (>=20 chars) beside sig  [token value >= 20 chars reads as a signature part]
+ok       TWO   TWO   ?st=NY vs ?st=CA beside sig
+ok       ONE   ONE   ?st=<date> vs other date beside sig (real SAS start)  [SAS start is volatile: SAME file]
+ok       TWO   TWO   ?policy=A vs B unsigned
+ok       TWO   TWO   ?x-amz-meta-file=1 vs 2  [round 11 2.10]
+ok       TWO   TWO   path case differs (S3 keys are case-sensitive)  [two keys by design]
+ok       ONE   ONE   ?expires=<file-id>? unsigned 'expires' is ALWAYS dropped  [same file re-signed: correct]
+ok       ONE   ONE   different files told apart ONLY by an always-dropped name  [would collapse — a payer naming files in ?expires= is not a real shape]
+ok       ONE   ONE   different files told apart only by ?Signature= (no other param)  [would collapse — not a real shape]
+ok       ONE   ONE   query param ORDER
+ok       ONE   ONE   repeated param a=1&a=2 vs a=2&a=1
+ok       TWO   TWO   repeated param a=1&a=2 vs a=1
+ok       TWO   TWO   http vs https  [two rows; the content checks decide]
+ok       ONE   ONE   HOST case
+ok       TWO   TWO   default port :443  [two rows]
+ok       TWO   TWO   trailing slash on a directory-style URL  [two rows]
+ok       TWO   TWO   percent-encoded vs literal space  [two rows]
+ok       TWO   TWO   percent-encoded vs literal safe char (%2D vs -)  [two rows]
+ok       TWO   TWO   upper vs lower-case percent escape  [two rows]
+ok       ONE   ONE   empty query ? vs none
+ok       ONE   ONE   fragment #x
+ok       ONE   ONE   S3 presigned re-signed next day
+ok       ONE   ONE   Azure SAS re-signed next day
+ok       ONE   ONE   CloudFront signed re-signed
+DIFFERS  ONE   TWO   GOOGLE CLOUD STORAGE V4 signed, re-signed next day  [x-goog-* is in no list]
+DIFFERS  ONE   TWO   Akamai / generic ?token=<JWT>  [a JWT token with no sig param: is it stripped?]
+DIFFERS  ONE   TWO   Akamai __token__
+ok       TWO   TWO   CDN host alias (two hosts, same file)  [two rows; content checks decide]
+ok       TWO   TWO   response-content-disposition differs  [two rows]
+
+-- _normalize_url
+  'cdn.payer.com/mrf/r.json.gz'            -> 'https://cdn.payer.com/mrf/r.json.gz'
+  '//cdn.payer.com/x'                      -> 'https://cdn.payer.com/x'
+  'HTTPS://CDN.payer.com/x'                -> 'HTTPS://CDN.payer.com/x'
+  'rates.json'                             -> None
+  'http://'                                -> None
+  'https:///x'                             -> None
+  ' https://a.com/x'                       -> None
+
+-- keys the user may not expect
+  https://cdn.payer.com/mrf/r.json.gz?token=eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjF9.sig1
+    -> https://cdn.payer.com/mrf/r.json.gz?token=eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjF9.sig1
+  https://cdn.payer.com/mrf/dl?token=in-network-rates-01-of-10&sig=aaaa
+    -> https://cdn.payer.com/mrf/dl
+  https://cdn.payer.com/mrf/r.json.gz?X-Goog-Signature=aaa&X-Goog-Date=20260101T000000Z
+    -> https://cdn.payer.com/mrf/r.json.gz?X-Goog-Date=20260101T000000Z&X-Goog-Signature=aaa
+
+DIFFERS from the stated expectation: 4
+  LONG ?token=<file-id> (>=20 chars) beside sig
+    https://cdn.payer.com/mrf/dl
+    https://cdn.payer.com/mrf/dl
+  GOOGLE CLOUD STORAGE V4 signed, re-signed next day
+    https://cdn.payer.com/mrf/r.json.gz?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=svc%2F20260101%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20260101T000000Z&X-Goog-Expires=3600&X-Goog-Signature=aaa&X-Goog-SignedHeaders=host
+    https://cdn.payer.com/mrf/r.json.gz?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=svc%2F20260102%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20260102T000000Z&X-Goog-Expires=3600&X-Goog-Signature=bbb&X-Goog-SignedHeaders=host
+  Akamai / generic ?token=<JWT>
+    https://cdn.payer.com/mrf/r.json.gz?token=eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjF9.sig1
+    https://cdn.payer.com/mrf/r.json.gz?token=eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjJ9.sig2
+  Akamai __token__
+    https://cdn.payer.com/mrf/r.json.gz?__token__=exp%3D1~hmac%3Da
+    https://cdn.payer.com/mrf/r.json.gz?__token__=exp%3D2~hmac%3Db

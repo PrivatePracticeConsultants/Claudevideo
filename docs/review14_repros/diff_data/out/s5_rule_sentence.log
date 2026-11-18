@@ -1,0 +1,10 @@
+200 /api/report/pitch                      rule printed: True
+200 /api/report/ratecard                   rule printed: False
+200 /api/schedule/fee.csv                  rule printed: False
+200 /api/report/market                     rule printed: False
+200 /api/leads.csv                         rule printed: False
+422 /api/report/visitvalue                 rule printed: False
+422 /api/schedule/visit/market.csv         rule printed: False
+200 /api/report/dossier                    rule printed: False
+200 /api/export.zip?grain=tin&state=MO     rule printed: False
+200 /api/export/outreach.zip?state=MO      rule printed: True
