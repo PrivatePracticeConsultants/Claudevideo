@@ -4581,6 +4581,37 @@ class Store:
                             "WHERE status = 'skipped' AND kind = 'canceled'")
         return n
 
+    def skip_download(self, url_id: int, minutes: float = 10.0) -> bool:
+        """The user's "skip" on ONE downloading row (0.9.1): its download stops
+        now (the downloader thread aborts through is_download_canceled, the
+        .part is kept), its slot goes to the next file, and the row rests for
+        `minutes`, then rejoins BEHIND every file waiting (its retries tier
+        goes up one: the claim order is retries, then id) and resumes from its
+        kept bytes; "try now" brings it back at once. Unlike a park it is not
+        woken early when the line is empty — a skip that came straight back
+        read as a button that did nothing (live check). False when the row
+        is not downloading (it just finished or was never started)."""
+        with self.write_lock, self.connect() as con:
+            r = con.execute("SELECT status FROM url_queue WHERE id = ?", [url_id]).fetchone()
+            if not r or r[0] != "downloading":
+                return False
+            # signal the thread BEFORE the commit (cancel_all_downloading's rule)
+            with self._cancel_lock:
+                self._canceled_downloads.add(url_id)
+            mins = max(0.0, float(minutes))
+            con.execute(
+                "UPDATE url_queue SET status = 'paused', error = ?, "
+                "retry_after = ? + to_seconds(CAST(? AS DOUBLE)), "
+                # 0: wake_parked_urls (the empty-line wake) leaves it resting;
+                # wake_paused_urls brings it back when retry_after comes
+                "park_count = 0, retries = coalesce(retries, 0) + 1, waiting_on = NULL "
+                "WHERE id = ?",
+                [f"skipped by you — the bytes so far are kept; it goes back in line in "
+                 f"{mins:g} min, behind the files waiting now (press 'try now' to bring "
+                 "it back sooner)", _utcnow(), mins * 60.0, url_id])
+            con.execute("DELETE FROM inflight_fingerprints WHERE url_id = ?", [url_id])
+        return True
+
     def is_download_canceled(self, url_id: int) -> bool:
         with self._cancel_lock:
             return url_id in self._canceled_downloads

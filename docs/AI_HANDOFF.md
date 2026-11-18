@@ -972,6 +972,33 @@ Pinned by `tests/mrfx/test_review14.py` (every Group 1-3 case fails on
   paste is durable (`meta('pending_paste')`, `resume_pending_paste`). A
   hospital of an already-loaded name from another file is refused.
 
+### 0.9.1 additions (Nov 18, 2026) — trickling servers park; per-row skip
+
+- **Trickle bug (field: BCBS AZ / healthsparq, "0 / 2774 MB, no data for
+  10846s", never parked).** `_body_chunks` read with `iter_raw(chunk_size=
+  64 KB)`; httpx's chunker hands a piece over only when 64 KB have gathered,
+  so a server sending a few bytes inside every read timeout yielded nothing
+  and NONE of the per-chunk checks ran (park 240 s, stall 600 s, the 3 h
+  cap, cancel). Now each network read is yielded (`chunk_size=None`). A
+  silent server was always fine (the read timeout ends the read; the loop
+  top parks). The segmented monitor now needs >= 1 MB across segments within
+  the park window (it counted any byte as progress), then falls back to one
+  connection, which parks.
+- **Skip** (`POST /api/urls/{id}/skip`, the Files tab's "skip" on a
+  downloading row): `Store.skip_download` flags the thread through the
+  cancel set (the fetch path already steps aside without overwriting the
+  status), pauses the row for `download_park_minutes` with `park_count = 0`
+  (the empty-line wake `wake_parked_urls` leaves it resting — a skip that
+  came straight back looked like a dead button in the live check) and
+  `retries + 1`, so after `wake_paused_urls` it is claimed BEHIND the files
+  that were waiting. `_StopWatch` shuts a streaming
+  response's socket when the cancel check fires, so a read blocked on a
+  silent server returns at once instead of after `download_timeout_seconds`
+  (single connection and every segment).
+- Pinned by `tests/mrfx/test_download_park.py` (trickle x3 — fail on 0.9.0;
+  skip on a silent / mid-file / trickling server and on segments, each < 5 s,
+  bytes kept, next file first; refusal; endpoint).
+
 ### 0.9.0 additions (Nov 16, 2026) — 2-5 B rates
 
 Method: hard-linked copies of the 99 M store (`scratchpad/scalex/make.py`:

@@ -1055,6 +1055,23 @@ Downloads and files:
 - **"fee for service" / "fee_schedule"** spelled differently by a payer no
   longer drop rates.
 
+## What changed in version 0.9.1
+
+- **A download stuck at "0 MB" now steps aside by itself.** Some payer
+  servers keep the connection open but send only a few bytes now and then
+  (seen on Blue Cross Blue Shield of Arizona's files: "no data for 10846s").
+  The app did not notice those, so the file held its download slot for hours
+  and never parked or paused. Now, after 4 minutes with under 1 MB arriving,
+  the file steps aside and the next file starts; after 6 tries in a row with
+  nothing arriving it is paused and tries again by itself 24 hours later
+  (the bytes downloaded so far are always kept).
+- **A "skip" button on every downloading file.** Press it to stop that
+  download now and move on: the next file starts at once, the bytes so far
+  are kept, and the skipped file rests for 10 minutes, then goes back in
+  line behind the files that were waiting (press "try now" on its row to
+  bring it back sooner). The "skip" on a paused or queued row is the old
+  one: it takes the file out of the queue.
+
 ## What changed in version 0.9.0
 
 Built for stores of 2 to 5 billion rates.

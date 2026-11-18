@@ -2999,6 +2999,15 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
                                      "(this row may have just started or already finished)")
         return {"status": "skipped"}
 
+    @app.post("/api/urls/{url_id}/skip")
+    def urls_skip(url_id: int):
+        """Skip ONE downloading link: its download stops now (bytes kept), the
+        next file takes the slot, and this one goes to the back of the line."""
+        if not store.skip_download(url_id, cfg.download_park_minutes or 10.0):
+            raise HTTPException(409, "this link isn't downloading right now "
+                                     "(it may have just finished or been parked)")
+        return {"status": "paused"}
+
     @app.post("/api/urls/{url_id}/stop")
     def urls_stop(url_id: int):
         """Stop a link whose file is being PROCESSED (the download is kept;

@@ -5467,6 +5467,7 @@ async function loadUrlQueue() {
       // it's waiting out the no-data timeout and will reconnect and resume from
       // exactly here. Say so, so a normal (if annoying) CDN hiccup isn't
       // mistaken for a crash.
+      statusCell += ` <button class="btn" style="padding:1px 8px;font-size:11.5px" title="skip this download for now: the next file starts at once, the bytes so far are kept, and it goes back in line in a few minutes behind the files waiting now" data-url-skip="${u.id}">skip</button>`;
       const held = stalledFor(u.id, u.bytes_done);
       if (held >= STALL_HINT_SECONDS) {
         statusCell += `<div class="sub muted">no data for ${Math.round(held)}s —`
@@ -5544,6 +5545,8 @@ async function loadUrlQueue() {
   };
   $$("[data-url-retry]", body).forEach((b) =>
     b.addEventListener("click", urlAction(b, `/api/urls/${b.dataset.urlRetry}/retry`, "retry")));
+  $$("[data-url-skip]", body).forEach((b) =>
+    b.addEventListener("click", urlAction(b, `/api/urls/${b.dataset.urlSkip}/skip`, "skip")));
   $$("[data-url-stop]", body).forEach((b) =>
     b.addEventListener("click", urlAction(b, `/api/urls/${b.dataset.urlStop}/stop`, "stop")));
   $$("[data-url-cancel]", body).forEach((b) =>

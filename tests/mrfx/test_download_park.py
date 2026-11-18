@@ -317,3 +317,125 @@ def test_one_slot_a_trickling_payer_steps_aside_then_takes_the_long_pause(parkin
     p = rows["trickle.json.gz"]
     assert p["status"] == "paused" and p["auto_resumes"] == 1, p
     assert "stopped sending data" in p["error"] and "24 hours" in p["error"]
+
+
+# ---------------------------------------------------------------------------
+# "skip" on a downloading row (0.9.1): stop it now, keep its bytes, start the
+# next file, and put it at the back of the line.
+
+
+def _start_fetch(cfg, store, name):
+    from mrfx.fetch import fetch_url_record
+    rec = store.next_queued_url()
+    assert rec["url"].endswith(name)
+    out = {}
+
+    def run():
+        out["ret"] = fetch_url_record(cfg, store, rec)
+        out["t"] = time.monotonic()
+    th = threading.Thread(target=run, daemon=True)
+    th.start()
+    for _ in range(200):                       # until it is really downloading
+        if any(u["status"] == "downloading" for u in store.list_urls()):
+            break
+        time.sleep(0.05)
+    return rec, th, out
+
+
+@pytest.mark.parametrize("server", ["silent", "midfile", "trickle"])
+def test_skip_stops_a_download_at_once_and_keeps_its_bytes(parking, store, server):
+    """Skip frees the slot within seconds whatever the server is doing — even
+    one blocked in a 30 s read — keeps the bytes, and leaves the row paused
+    with the skip message (never 'failed'). The next file then gets the slot."""
+    parking.download_timeout_seconds = 30.0     # a long blocked read
+    parking.download_park_seconds = 0           # no park: only the skip ends it
+    if server == "trickle":
+        base, _, stop = _trickle_world()
+        name = "trickle.json.gz"
+    else:
+        base, body, _, stop = _world(silent_after=(2 << 20) if server == "midfile" else 0)
+        name = "stalls.json.gz"
+    try:
+        add_urls(store, [f"{base}/{name}", f"{base}/good.json.gz"])
+        rec, th, out = _start_fetch(parking, store, name)
+        time.sleep(0.5)
+        t0 = time.monotonic()
+        assert store.skip_download(rec["id"]) is True
+        th.join(15)
+        assert not th.is_alive(), "skip did not free the slot"
+        took = out["t"] - t0
+        assert out["ret"] is False
+        row = next(u for u in store.list_urls() if u["id"] == rec["id"])
+        assert row["status"] == "paused" and "skipped by you" in row["error"], row
+        assert not store.is_download_canceled(rec["id"]), "the one-shot flag was cleared"
+        dest = parking.downloads_dir / filename_for(rec["url"])
+        if server == "midfile":
+            part = dest.with_suffix(dest.suffix + ".part")
+            assert part.read_bytes() == body[:2 << 20], "the bytes so far are kept"
+        # the next file is up next; the skipped one rests (an empty line
+        # does not wake it), then rejoins
+        assert store.next_queued_url()["url"].endswith("good.json.gz")
+        assert store.wake_parked_urls(only_if_idle=True) == 0
+        assert store.wake_paused_urls() == 0, "it rests for download_park_minutes"
+    finally:
+        stop()
+    assert took < 5, f"skip took {took:.1f} s to free the slot ({server} server)"
+
+
+def test_a_skipped_file_rejoins_behind_the_files_waiting(store):
+    """After its rest the skipped file goes back in line BEHIND files that
+    were waiting — not ahead of them by its older id."""
+    from mrfx.fetch import dedup_key
+    a = store.enqueue_url("https://x/a.json.gz", dedup_key("https://x/a.json.gz"))
+    b = store.enqueue_url("https://x/b.json.gz", dedup_key("https://x/b.json.gz"))
+    assert store.next_queued_url()["id"] == a        # a claimed first (older id)
+    store.update_url(a, status="downloading")
+    assert store.skip_download(a, minutes=0) is True
+    store.clear_download_cancel(a)
+    assert store.wake_paused_urls() == 1             # its rest is over
+    assert store.next_queued_url()["id"] == b, "b was waiting: it goes first"
+    assert store.next_queued_url()["id"] == a
+
+
+def test_skip_refuses_a_row_that_is_not_downloading(store):
+    from mrfx.fetch import dedup_key
+    a = store.enqueue_url("https://x/a.json.gz", dedup_key("https://x/a.json.gz"))
+    assert store.skip_download(a) is False
+    assert not store.is_download_canceled(a)
+
+
+def test_skip_endpoint(cfg, store):
+    from fastapi.testclient import TestClient
+
+    from mrfx.api import create_app
+    from mrfx.fetch import dedup_key
+    a = store.enqueue_url("https://x/a.json.gz", dedup_key("https://x/a.json.gz"))
+    c = TestClient(create_app(cfg, store))
+    assert c.post(f"/api/urls/{a}/skip").status_code == 409
+    store.update_url(a, status="downloading")
+    r = c.post(f"/api/urls/{a}/skip")
+    assert r.status_code == 200 and r.json() == {"status": "paused"}
+    store.clear_download_cancel(a)
+
+
+def test_skip_stops_parallel_segments_at_once(parking, store):
+    """Segments blocked on a silent server: skip ends the attempt at once and
+    the row is the skipped one (not failed, not fallen back to download on)."""
+    parking.download_segments = 4
+    parking.download_timeout_seconds = 30.0
+    parking.download_park_seconds = 0
+    base, _, stop = _trickle_world(total=400 << 20, ranges=True)
+    try:
+        add_urls(store, [f"{base}/trickle.json.gz"])
+        rec, th, out = _start_fetch(parking, store, "trickle.json.gz")
+        time.sleep(1.0)
+        t0 = time.monotonic()
+        assert store.skip_download(rec["id"]) is True
+        th.join(15)
+        assert not th.is_alive(), "skip did not end the segmented download"
+        took = out["t"] - t0
+    finally:
+        stop()
+    row = store.list_urls()[0]
+    assert out["ret"] is False and row["status"] == "paused" and "skipped by you" in row["error"]
+    assert took < 5, f"took {took:.1f} s"

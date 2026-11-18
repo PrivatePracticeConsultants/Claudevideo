@@ -498,8 +498,12 @@ def _segmented_download(cfg: MrfxConfig, url: str, dest: Path, part: Path, val_p
                 return
             try:
                 headers = {"Range": f"bytes={start + got}-{end}"}
+                # a stop, a skip, or the attempt ending (another segment
+                # failed, the stall window) wakes a read blocked on silence
                 with _client(cfg, ua=ua) as client, \
-                        client.stream("GET", url, headers=headers) as resp:
+                        client.stream("GET", url, headers=headers) as resp, \
+                        _StopWatch(resp, lambda: bool(state["err"] or state["canceled"]
+                                                      or _halt() == "cancel")):
                     if resp.status_code != 206:
                         raise DownloadError(f"segment HTTP {resp.status_code}",
                                             retryable=resp.status_code in RETRYABLE_STATUS)
@@ -632,6 +636,47 @@ def _reserve_disk_or_raise(my_key: int, parent: Path, total: int, resume_from: i
 # check, progress) did not run for 200 s per chunk — a dribbling download held
 # its slot until the 3-hour cap. Per-chunk bookkeeping at 64 KB is still cheap
 # (a lock acquire and a hash update; ~1,600/s on a 100 MB/s link).
+
+
+class _StopWatch:
+    """While a response streams, check `should_stop` every `every` seconds;
+    when it says stop, shut the connection's socket so a read blocked on a
+    silent server returns NOW instead of after the read timeout (2 min by
+    default). The user's "skip" / "stop downloads" then frees the slot at
+    once (0.9.1). Never raises; a no-op when there is nothing to check."""
+
+    def __init__(self, resp, should_stop, every: float = 0.5):
+        self.resp, self.should_stop, self.every = resp, should_stop, every
+        self.done = threading.Event()
+        self.fired = False
+
+    def __enter__(self):
+        if self.should_stop is not None:
+            threading.Thread(target=self._run, name="mrfx-dl-stop", daemon=True).start()
+        return self
+
+    def __exit__(self, *exc):
+        self.done.set()
+        return False
+
+    def _run(self) -> None:
+        import socket as _socket
+        while not self.done.wait(self.every):
+            try:
+                stop = bool(self.should_stop())
+            except Exception:  # noqa: BLE001 — a check failure never kills a download
+                stop = False
+            if not stop:
+                continue
+            self.fired = True
+            try:
+                ns = self.resp.extensions.get("network_stream")
+                sock = ns.get_extra_info("socket") if ns is not None else None
+                if sock is not None:
+                    sock.shutdown(_socket.SHUT_RDWR)
+            except Exception:  # noqa: BLE001 — closed already / no socket: fine
+                pass
+            return
 
 
 def _body_chunks(resp, size: int | None = None):
@@ -974,7 +1019,9 @@ def _download_reserved(cfg: MrfxConfig, url: str, dest: Path, progress_cb,
             started = _read_val(val_p) if resume_from else {}
             if started.get("validator"):
                 req_headers["If-Range"] = started["validator"]
-            with _client(cfg, verify=verify_override, ua=ua_override) as client,                     client.stream("GET", url, headers=req_headers) as resp:
+            with _client(cfg, verify=verify_override, ua=ua_override) as client, \
+                    client.stream("GET", url, headers=req_headers) as resp, \
+                    _StopWatch(resp, _canceled if cancel_check else None):
                 if resume_from and resp.status_code == 416:
                     # the .part already holds the whole file: its final rename
                     # failed last time (a Windows lock — review 11 item 1.9).
