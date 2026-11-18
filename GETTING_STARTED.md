@@ -1055,6 +1055,18 @@ Downloads and files:
 - **"fee for service" / "fee_schedule"** spelled differently by a payer no
   longer drop rates.
 
+## What changed in version 0.9.2
+
+- **"skip" now moves a file to its own "retry in 24 h" group.** The next
+  file starts at once. The skipped file tries again by itself 24 hours later
+  (the bytes so far are kept). On that try, if nothing arrives for 10
+  minutes, it is marked **failed** — it does not keep cycling. A big file
+  that IS downloading on that try is allowed to finish. "try now" on its row
+  runs that one try straight away; "retry" on a failed row starts fresh.
+- **The skip button reacts the moment you press it** ("skipping…"), and it
+  no longer waits when the app is busy writing to its database — before, on
+  a busy store, pressing it could look like nothing happened.
+
 ## What changed in version 0.9.1
 
 - **A download stuck at "0 MB" now steps aside by itself.** Some payer

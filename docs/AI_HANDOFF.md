@@ -972,6 +972,30 @@ Pinned by `tests/mrfx/test_review14.py` (every Group 1-3 case fails on
   paste is durable (`meta('pending_paste')`, `resume_pending_paste`). A
   hospital of an already-loaded name from another file is refused.
 
+### 0.9.2 additions (Nov 19, 2026) — skip = "retry in 24 h", then one try
+
+- `Store.skip_download(url_id, hours=SKIP_RETRY_HOURS)`: signals the cancel
+  set FIRST, then writes the row under `write_lock.acquire(timeout=3)`; when
+  the lock is busy the skip waits in `_pending_skips` and
+  `clear_download_cancel` (the download thread's finally) writes it —
+  `_write_skip` moves only a row still 'downloading'. Field report: "I press
+  skip and nothing happens" (0.9.1's skip took the writer lock blocking).
+- The row: paused, `retry_once = true`, `park_count = 0`, retry_after +24 h.
+  `url_queue_counts` reports it as `retry_later` (its own category; badge
+  "retry in 24 h"). When it wakes, `fetch_url_record` downloads it with
+  `download_park_seconds=0`, `download_segments=1`,
+  `download_stall_seconds=SKIP_RETRY_QUIET_SECONDS` (600): under 1 MB in that
+  window, or any failure but oversize / set-aside / disk-full -> 'failed'
+  with a sentence (no parks, no 24 h pauses). Success clears the flag.
+  "try now" (paused -> queued) keeps `retry_once`; REQUEUE_RESET (retry of
+  a failed row, resume) clears it.
+- Dashboard: the press shows "skipping…" at once (`_urlSkipping`), and the
+  URL table is not redrawn while a pointer is held on it (a redraw between
+  press and release swallows the click; it redraws every 4 s).
+- Pinned by `tests/mrfx/test_download_park.py` (category/24 h/try now/retry;
+  the retry fails after the quiet window; the retry loads a working file;
+  skip answers < 5 s while the writer lock is held — 20 s on 0.9.1).
+
 ### 0.9.1 additions (Nov 18, 2026) — trickling servers park; per-row skip
 
 - **Trickle bug (field: BCBS AZ / healthsparq, "0 / 2774 MB, no data for

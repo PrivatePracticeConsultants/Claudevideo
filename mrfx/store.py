@@ -1082,7 +1082,7 @@ def _dir_query_over(src: str) -> str:
 REQUEUE_RESET = (
     "progress = 0, bytes_done = 0, retry_after = NULL, park_count = 0, "
     "waiting_on = NULL, auto_resumes = 0, big_lane = false, finished_at = NULL, "
-    "duplicate_of = NULL, kind = CASE WHEN kind IN ('duplicate', 'canceled') "
+    "duplicate_of = NULL, retry_once = false, kind = CASE WHEN kind IN ('duplicate', 'canceled') "
     "THEN 'unknown' ELSE kind END")
 
 
@@ -1154,6 +1154,9 @@ class Store:
         # In-memory (same process as the workers); cleared once the download
         # sees it and stops.
         self._canceled_downloads: set[int] = set()
+        # skips not yet written (the writer lock was busy): the download
+        # thread writes them as it steps aside (clear_download_cancel)
+        self._pending_skips: dict[int, float] = {}
         self._cancel_lock = threading.Lock()
         # filenames the user asked to STOP mid-parse (the Files tab's "stop"):
         # the in-process parse checks it on every read; for a worker process
@@ -2720,6 +2723,10 @@ class Store:
         # check); the loaded file an early-skipped copy duplicated; and the
         # size lane a small-file slot handed the row to
         con.execute("ALTER TABLE url_queue ADD COLUMN IF NOT EXISTS waiting_on BIGINT")
+        # skipped by the user (0.9.2): waits SKIP_RETRY_HOURS in its own
+        # "retry in 24 h" category, then gets ONE more try that is marked
+        # failed after SKIP_RETRY_QUIET_SECONDS with nothing arriving
+        con.execute("ALTER TABLE url_queue ADD COLUMN IF NOT EXISTS retry_once BOOLEAN DEFAULT false")
         con.execute("ALTER TABLE url_queue ADD COLUMN IF NOT EXISTS duplicate_of VARCHAR")
         con.execute("ALTER TABLE url_queue ADD COLUMN IF NOT EXISTS big_lane BOOLEAN DEFAULT false")
         # what the payer's server said about the file when it was downloaded
@@ -3467,7 +3474,8 @@ class Store:
         allowed = {"kind", "status", "filename", "bytes_total", "bytes_done",
                    "progress", "rows_emitted", "child_count", "error", "parent_id",
                    "content_sha", "park_count", "duplicate_of", "big_lane",
-                   "server_validator", "server_size", "revalidate", "retries"}
+                   "server_validator", "server_size", "revalidate", "retries",
+                   "retry_once"}
         fields = {k: v for k, v in fields.items() if k in allowed}
         terminal = fields.get("status") in ("done", "failed", "skipped", "oversize")
         if terminal:
@@ -3626,8 +3634,9 @@ class Store:
         (audit 8 P2-E)."""
         with self.connect() as con:
             rows = con.execute(
-                "SELECT CASE WHEN status = 'paused' AND waiting_on IS NOT NULL "
-                "THEN 'waiting' ELSE status END, count(*) FROM url_queue GROUP BY 1").fetchall()
+                "SELECT CASE WHEN status = 'paused' AND waiting_on IS NOT NULL THEN 'waiting' "
+                "WHEN status = 'paused' AND coalesce(retry_once, false) THEN 'retry_later' "
+                "ELSE status END, count(*) FROM url_queue GROUP BY 1").fetchall()
         return {s: n for s, n in rows}
 
     def record_fingerprint(self, filename: str, fp: dict) -> None:
@@ -4301,8 +4310,8 @@ class Store:
         if allowed_from is None:
             return False
         with self.write_lock, self.connect() as con:
-            r = con.execute("SELECT status, kind FROM url_queue WHERE id = ?",
-                            [url_id]).fetchone()
+            r = con.execute("SELECT status, kind, coalesce(retry_once, false) FROM url_queue "
+                            "WHERE id = ?", [url_id]).fetchone()
             # a done INDEX / page may be fetched again (it anchors no duplicate
             # check): its "press retry on this row" is a real button now
             # (review 11 item 2.1)
@@ -4315,6 +4324,9 @@ class Store:
                 con.execute(
                     "UPDATE url_queue SET status = 'queued', error = NULL, force_size = false, "
                     f"{REQUEUE_RESET} WHERE id = ?", [url_id])
+                if r[0] == "paused" and r[2]:
+                    # "try now" on a skipped file IS its one more try (0.9.2)
+                    con.execute("UPDATE url_queue SET retry_once = true WHERE id = ?", [url_id])
             else:
                 con.execute(
                     "UPDATE url_queue SET status = ?, error = NULL, progress = 0, "
@@ -4322,7 +4334,7 @@ class Store:
                     # a row the USER skipped is never revived automatically —
                     # only kind 'duplicate' rows are (review 11 item 4.1)
                     "kind = CASE WHEN kind = 'duplicate' THEN 'unknown' ELSE kind END, "
-                    "waiting_on = NULL, finished_at = ? WHERE id = ?",
+                    "waiting_on = NULL, retry_once = false, finished_at = ? WHERE id = ?",
                     [status, _utcnow(), url_id])
             return True
 
@@ -4581,36 +4593,57 @@ class Store:
                             "WHERE status = 'skipped' AND kind = 'canceled'")
         return n
 
-    def skip_download(self, url_id: int, minutes: float = 10.0) -> bool:
-        """The user's "skip" on ONE downloading row (0.9.1): its download stops
-        now (the downloader thread aborts through is_download_canceled, the
-        .part is kept), its slot goes to the next file, and the row rests for
-        `minutes`, then rejoins BEHIND every file waiting (its retries tier
-        goes up one: the claim order is retries, then id) and resumes from its
-        kept bytes; "try now" brings it back at once. Unlike a park it is not
-        woken early when the line is empty — a skip that came straight back
-        read as a button that did nothing (live check). False when the row
-        is not downloading (it just finished or was never started)."""
-        with self.write_lock, self.connect() as con:
+    SKIP_RETRY_HOURS = 24.0           # a skipped file tries again this much later
+    SKIP_RETRY_QUIET_SECONDS = 600.0  # ...and fails if nothing arrives this long
+
+    def skip_download(self, url_id: int, hours: float | None = None) -> bool:
+        """The user's "skip" on ONE downloading row (0.9.2). Its download stops
+        at once (the thread aborts through is_download_canceled; the .part is
+        kept), its slot goes to the next file, and the row moves to its own
+        "retry in 24 h" category (paused, retry_once). After `hours` it gets
+        ONE more try: if nothing arrives for SKIP_RETRY_QUIET_SECONDS it is
+        marked failed (fetch_url_record); if it downloads, it is loaded as
+        usual. "try now" runs that one try at once.
+
+        Never waits long on the database: the stop is signalled first, and
+        when the writer lock is busy the download thread writes the new
+        status as it steps aside — the first version's skip waited on the
+        lock and, on a busy store, looked like a button that did nothing.
+        False when the row is not downloading."""
+        hours = self.SKIP_RETRY_HOURS if hours is None else float(hours)
+        with self.connect() as con:
             r = con.execute("SELECT status FROM url_queue WHERE id = ?", [url_id]).fetchone()
-            if not r or r[0] != "downloading":
-                return False
-            # signal the thread BEFORE the commit (cancel_all_downloading's rule)
-            with self._cancel_lock:
-                self._canceled_downloads.add(url_id)
-            mins = max(0.0, float(minutes))
-            con.execute(
-                "UPDATE url_queue SET status = 'paused', error = ?, "
-                "retry_after = ? + to_seconds(CAST(? AS DOUBLE)), "
-                # 0: wake_parked_urls (the empty-line wake) leaves it resting;
-                # wake_paused_urls brings it back when retry_after comes
-                "park_count = 0, retries = coalesce(retries, 0) + 1, waiting_on = NULL "
-                "WHERE id = ?",
-                [f"skipped by you — the bytes so far are kept; it goes back in line in "
-                 f"{mins:g} min, behind the files waiting now (press 'try now' to bring "
-                 "it back sooner)", _utcnow(), mins * 60.0, url_id])
-            con.execute("DELETE FROM inflight_fingerprints WHERE url_id = ?", [url_id])
+        if not r or r[0] != "downloading":
+            return False
+        with self._cancel_lock:
+            self._canceled_downloads.add(url_id)
+            self._pending_skips[url_id] = hours
+        if self.write_lock.acquire(timeout=3.0):
+            try:
+                with self._cancel_lock:
+                    hours = self._pending_skips.pop(url_id, None)
+                if hours is not None:
+                    with self.connect() as con:
+                        self._write_skip(con, url_id, hours)
+            finally:
+                self.write_lock.release()
         return True
+
+    def _write_skip(self, con, url_id: int, hours: float) -> None:
+        """The skipped row's new state (caller holds the writer lock). Only a
+        row still 'downloading' is moved: one that just finished, failed or
+        was stopped keeps what it has."""
+        when = (dt.datetime.now() + dt.timedelta(hours=hours)).strftime("%b %d, %I:%M %p")
+        con.execute(
+            "UPDATE url_queue SET status = 'paused', error = ?, "
+            "retry_after = ? + to_seconds(CAST(? AS DOUBLE)), park_count = 0, "
+            "retry_once = true, waiting_on = NULL WHERE id = ? AND status = 'downloading'",
+            [f"skipped by you — tries again by itself in {hours:g} hours (about {when}); "
+             f"if nothing arrives for {self.SKIP_RETRY_QUIET_SECONDS / 60:g} minutes then, "
+             "it is marked failed. The bytes so far are kept. Press 'try now' to try sooner.",
+             _utcnow(), hours * 3600.0, url_id])
+        con.execute("DELETE FROM inflight_fingerprints WHERE url_id = ? AND url_id IN "
+                    "(SELECT id FROM url_queue WHERE status = 'paused')", [url_id])
 
     def is_download_canceled(self, url_id: int) -> bool:
         with self._cancel_lock:
@@ -4621,6 +4654,10 @@ class Store:
         retry of the SAME row isn't instantly canceled again."""
         with self._cancel_lock:
             self._canceled_downloads.discard(url_id)
+            hours = self._pending_skips.pop(url_id, None)
+        if hours is not None:              # a skip the API could not write
+            with self.write_lock, self.connect() as con:
+                self._write_skip(con, url_id, hours)
 
     def request_parse_stop(self, filename: str) -> bool:
         """Ask the in-flight parse of `filename` to stop. False when the file

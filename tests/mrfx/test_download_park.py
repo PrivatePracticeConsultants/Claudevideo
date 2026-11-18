@@ -382,19 +382,108 @@ def test_skip_stops_a_download_at_once_and_keeps_its_bytes(parking, store, serve
     assert took < 5, f"skip took {took:.1f} s to free the slot ({server} server)"
 
 
-def test_a_skipped_file_rejoins_behind_the_files_waiting(store):
-    """After its rest the skipped file goes back in line BEHIND files that
-    were waiting — not ahead of them by its older id."""
+def test_a_skipped_file_waits_24_hours_in_its_own_category(store):
+    """0.9.2: skip -> its own "retry in 24 h" category (counted apart from the
+    paused ones), back in the queue only when the 24 h are up; "try now" runs
+    its one more try at once; "retry" on a failed row is a fresh start."""
     from mrfx.fetch import dedup_key
     a = store.enqueue_url("https://x/a.json.gz", dedup_key("https://x/a.json.gz"))
-    b = store.enqueue_url("https://x/b.json.gz", dedup_key("https://x/b.json.gz"))
-    assert store.next_queued_url()["id"] == a        # a claimed first (older id)
     store.update_url(a, status="downloading")
-    assert store.skip_download(a, minutes=0) is True
+    assert store.skip_download(a) is True
     store.clear_download_cancel(a)
-    assert store.wake_paused_urls() == 1             # its rest is over
-    assert store.next_queued_url()["id"] == b, "b was waiting: it goes first"
-    assert store.next_queued_url()["id"] == a
+    row = store.list_urls()[0]
+    assert row["status"] == "paused" and row["retry_once"] is True
+    assert "tries again by itself in 24 hours" in row["error"]
+    assert store.url_queue_counts() == {"retry_later": 1}
+    assert store.wake_paused_urls() == 0 and store.wake_parked_urls(only_if_idle=True) == 0
+    with store.connect() as con:                     # 24 h later
+        con.execute("UPDATE url_queue SET retry_after = retry_after - INTERVAL 25 HOUR")
+    assert store.wake_paused_urls() == 1
+    rec = store.next_queued_url()
+    assert rec["id"] == a and rec["retry_once"] is True, "the one more try is flagged"
+    # "try now" keeps the flag; a failed row's "retry" clears it
+    store.update_url(a, status="downloading")
+    assert store.skip_download(a, hours=24) is True
+    store.clear_download_cancel(a)
+    assert store.set_url_status_by_id(a, "queued") is True
+    assert store.list_urls()[0]["retry_once"] is True
+    store.update_url(a, status="failed", retry_once=False)
+    assert store.set_url_status_by_id(a, "queued") is True
+    assert store.list_urls()[0]["retry_once"] is False
+
+
+def _skipped_and_due(store, url):
+    """A row in the "retry in 24 h" category whose 24 h are up."""
+    from mrfx.fetch import dedup_key
+    a = store.enqueue_url(url, dedup_key(url))
+    store.update_url(a, status="downloading")
+    assert store.skip_download(a, hours=0) is True
+    store.clear_download_cancel(a)
+    assert store.wake_paused_urls() == 1
+    return a
+
+
+def test_the_retry_of_a_skipped_file_fails_after_the_quiet_window(parking, store, monkeypatch):
+    """Its one more try: nothing arriving for SKIP_RETRY_QUIET_SECONDS ->
+    failed (no parks, no 24 h pauses), with a sentence saying so."""
+    monkeypatch.setattr(type(store), "SKIP_RETRY_QUIET_SECONDS", 2.0)
+    base, _, _, stop = _world()
+    try:
+        a = _skipped_and_due(store, f"{base}/stalls.json.gz")
+        from mrfx.fetch import fetch_url_record
+        t0 = time.monotonic()
+        assert fetch_url_record(parking, store, store.next_queued_url()) is False
+        took = time.monotonic() - t0
+    finally:
+        stop()
+    row = store.list_urls()[0]
+    assert row["id"] == a and row["status"] == "failed" and row["retry_once"] is False, row
+    assert "skipped earlier and tried again" in row["error"] and "Press retry" in row["error"]
+    assert took < 15, f"failed after {took:.1f} s, not ~the 2 s quiet window"
+
+
+def test_the_retry_of_a_skipped_file_loads_it_when_it_works(parking, store):
+    base, _, _, stop = _world()
+    try:
+        _skipped_and_due(store, f"{base}/good.json.gz")
+        from mrfx.fetch import fetch_url_record
+        assert fetch_url_record(parking, store, store.next_queued_url()) is True
+    finally:
+        stop()
+    row = store.list_urls()[0]
+    assert row["status"] == "fetched" and row["retry_once"] is False
+
+
+def test_skip_answers_at_once_while_the_database_is_busy(parking, store):
+    """The writer lock held by something long (a part swap, a rollup's DDL):
+    skip still stops the download and answers within seconds; the download
+    thread writes the new status as it steps aside. was: skip waited on the
+    lock — "I press the skip button and nothing happens"."""
+    parking.download_timeout_seconds = 30.0
+    parking.download_park_seconds = 0
+    base, _, _, stop = _world()
+    try:
+        add_urls(store, [f"{base}/stalls.json.gz"])
+        rec, th, out = _start_fetch(parking, store, "stalls.json.gz")
+        held, release = threading.Event(), threading.Event()
+
+        def hold():
+            with store.write_lock:
+                held.set()
+                release.wait(20)
+        threading.Thread(target=hold, daemon=True).start()
+        held.wait(5)
+        t0 = time.monotonic()
+        assert store.skip_download(rec["id"]) is True
+        assert time.monotonic() - t0 < 5, "skip waited on the busy database"
+        release.set()
+        th.join(15)
+        assert not th.is_alive()
+    finally:
+        stop()
+    row = store.list_urls()[0]
+    assert row["status"] == "paused" and row["retry_once"] is True, row
+    assert "skipped by you" in row["error"]
 
 
 def test_skip_refuses_a_row_that_is_not_downloading(store):

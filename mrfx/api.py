@@ -3003,7 +3003,7 @@ def create_app(cfg: MrfxConfig, store: Store) -> FastAPI:
     def urls_skip(url_id: int):
         """Skip ONE downloading link: its download stops now (bytes kept), the
         next file takes the slot, and this one goes to the back of the line."""
-        if not store.skip_download(url_id, cfg.download_park_minutes or 10.0):
+        if not store.skip_download(url_id):
             raise HTTPException(409, "this link isn't downloading right now "
                                      "(it may have just finished or been parked)")
         return {"status": "paused"}

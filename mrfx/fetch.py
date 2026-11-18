@@ -2870,10 +2870,17 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict, lane_max: int = 0
     local = _local_duplicate_verdict(cfg, store, url_id, dest)
     if local:
         return _apply_verdict(cfg, store, url_id, url, dest, local)
+    # a file the user skipped gets ONE more try (0.9.2): no parks, one
+    # connection, and SKIP_RETRY_QUIET_SECONDS with under 1 MB arriving ends
+    # it (marked failed below). A file that is downloading keeps going.
+    retry_once = bool(rec.get("retry_once"))
+    dl_cfg = cfg.model_copy(update={
+        "download_park_seconds": 0.0, "download_segments": 1,
+        "download_stall_seconds": store.SKIP_RETRY_QUIET_SECONDS}) if retry_once else cfg
     try:
       try:
         content_sha, final_url = download(
-            cfg, url, dest,
+            dl_cfg, url, dest,
             progress_cb=lambda d, t: store.url_progress(url_id, d, t),
             max_bytes=_size_limit_for(cfg, rec),
             cancel_check=lambda: store.is_download_canceled(url_id),
@@ -2902,6 +2909,16 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict, lane_max: int = 0
             # where the raised error is not itself flagged canceled. The flag
             # is cleared in the finally below.
             log.info("url %s: download stopped by user", url)
+            return False
+        if (retry_once and not e.oversize and not e.set_aside
+                and "free disk space" not in str(e)):
+            # the skipped file's one more try did not work: failed, for good
+            # until the user presses retry (no parks, no 24 h pauses)
+            mins = store.SKIP_RETRY_QUIET_SECONDS / 60
+            store.update_url(url_id, status="failed", retry_once=False, error=(
+                f"skipped earlier and tried again: {e} — marked failed (nothing usable "
+                f"arrived within {mins:g} minutes). Press retry to try again."))
+            log.info("url %s: the skipped file's retry did not work — failed (%s)", url, e)
             return False
         # over the size limit is NOT a failure — it's "too big, needs your OK"
         # (distinct amber state so it never buries a real error in the count)
@@ -3002,7 +3019,8 @@ def fetch_url_record(cfg: MrfxConfig, store: Store, rec: dict, lane_max: int = 0
         # the stop instead of overwriting it with 'fetched'.
         log.info("url %s: finished just as the user stopped it — kept for retry", url)
         return False
-      store.update_url(url_id, content_sha=content_sha, status="fetched", park_count=0)
+      store.update_url(url_id, content_sha=content_sha, status="fetched", park_count=0,
+                       retry_once=False)
       _record_download_fingerprint(cfg, store, dest, url_id)
       return True
     finally:

@@ -5391,6 +5391,16 @@ const KIND_LABEL = {
   unknown: "?",
 };
 
+// rows whose "skip" was pressed and not yet confirmed by the server: shown as
+// "skipping…" at once, so the press never looks like nothing happened (0.9.2)
+const _urlSkipping = new Set();
+let _urlPointerDown = false;
+document.addEventListener("pointerdown", (e) => {
+  if (e.target && e.target.closest && e.target.closest("#url-body")) _urlPointerDown = true;
+}, true);
+document.addEventListener("pointerup", () => { _urlPointerDown = false; }, true);
+document.addEventListener("pointercancel", () => { _urlPointerDown = false; }, true);
+
 async function loadUrlQueue() {
   let d;
   try { d = await api("/api/urls"); } catch { return; }
@@ -5410,11 +5420,12 @@ async function loadUrlQueue() {
     // payer's shards make the failure count look alarming and bury real errors
     oversize: (n) => `<span class="warn-text">${n} too big (needs your OK)</span>`,
     waiting: (n) => `${n} waiting <span class="muted">(copies of a file already downloading — skipped for free if it matches)</span>`,
+    retry_later: (n) => `${n} skipped <span class="muted">(you skipped them — each tries again by itself 24 h later; if nothing arrives for 10 min then, it is marked failed)</span>`,
     paused: (n) => `<span class="warn-text">${n} paused <span class="muted">(their servers stopped sending — parked ones rejoin the line within minutes, the rest retry by themselves)</span></span>`,
     failed: (n) => `<span class="err-text">${n} failed</span>`,
   };
   const parts = ["downloading", "expanding", "ingesting", "fetched", "oversize", "paused",
-                 "waiting", "failed", "done", "skipped", "queued"]
+                 "retry_later", "waiting", "failed", "done", "skipped", "queued"]
     .filter((k) => c[k]).map((k) => (countLabel[k] || ((n) => `${n} ${k}`))(fmtInt(c[k])));
   const ds = d.settings || {};
   state.monthlyRecheck = ds.monthly_recheck !== false;
@@ -5440,14 +5451,17 @@ async function loadUrlQueue() {
   }
   // a row that left "downloading" (parked, finished, handed back) must not
   // carry its old stall timer into its next download (audit 8 P2-E)
-  for (const u of d.urls) if (u.status !== "downloading") _stallSeen.delete(u.id);
+  for (const u of d.urls) if (u.status !== "downloading") { _stallSeen.delete(u.id); _urlSkipping.delete(u.id); }
+  // a redraw between press and release swallows the click (the table redraws
+  // every 4 s): while a button is held, keep the rows as they are (0.9.2)
+  if (_urlPointerDown) return;
   body.innerHTML = d.urls.map((u) => {
     const short = u.url.split("?")[0].replace(/^https?:\/\//, "");
     const shown = short.length > 78 ? short.slice(0, 38) + "…" + short.slice(-37) : short;
     const badgeClass = u.status === "done" ? "done"
       : u.status === "failed" ? "failed"
       : u.status === "skipped" ? "skipped"
-      : u.status === "paused" && u.waiting_on != null ? "skipped"                 // neutral grey
+      : u.status === "paused" && (u.waiting_on != null || u.retry_once) ? "skipped"  // neutral grey
       : u.status === "oversize" || u.status === "paused" ? "pending_confirmation"  // amber, not red
       : "processing";
     // a PARKED download (its server went quiet for a few minutes) stepped
@@ -5456,8 +5470,10 @@ async function loadUrlQueue() {
     // a copy WAITING on an identical-looking download is the app saving a
     // download, not a stall: neutral grey, its own word (audit 8 P2-E)
     const waiting = u.status === "paused" && u.waiting_on != null;
+    // skipped by you: its own grey category, back by itself in 24 h (0.9.2)
+    const later = u.status === "paused" && u.retry_once && !waiting;
     const badgeLabel = u.status === "oversize" ? "too big" : waiting ? "waiting"
-      : parked ? "parked" : u.status;
+      : later ? "retry in 24 h" : parked ? "parked" : u.status;
     let statusCell = `<span class="badge ${esc(badgeClass)}">${esc(badgeLabel)}</span>`;
     if (u.status === "downloading" && u.bytes_total > 0) {
       statusCell += `<div class="progress"><div class="progress-fill" style="width:${Math.round(u.progress)}%"></div>
@@ -5467,7 +5483,9 @@ async function loadUrlQueue() {
       // it's waiting out the no-data timeout and will reconnect and resume from
       // exactly here. Say so, so a normal (if annoying) CDN hiccup isn't
       // mistaken for a crash.
-      statusCell += ` <button class="btn" style="padding:1px 8px;font-size:11.5px" title="skip this download for now: the next file starts at once, the bytes so far are kept, and it goes back in line in a few minutes behind the files waiting now" data-url-skip="${u.id}">skip</button>`;
+      statusCell += _urlSkipping.has(u.id)
+        ? ` <button class="btn" style="padding:1px 8px;font-size:11.5px" disabled>skipping…</button>`
+        : ` <button class="btn" style="padding:1px 8px;font-size:11.5px" title="skip this file: the next file starts at once, and this one tries again by itself in 24 hours (if nothing arrives for 10 minutes then, it is marked failed)" data-url-skip="${u.id}">skip</button>`;
       const held = stalledFor(u.id, u.bytes_done);
       if (held >= STALL_HINT_SECONDS) {
         statusCell += `<div class="sub muted">no data for ${Math.round(held)}s —`
@@ -5546,7 +5564,20 @@ async function loadUrlQueue() {
   $$("[data-url-retry]", body).forEach((b) =>
     b.addEventListener("click", urlAction(b, `/api/urls/${b.dataset.urlRetry}/retry`, "retry")));
   $$("[data-url-skip]", body).forEach((b) =>
-    b.addEventListener("click", urlAction(b, `/api/urls/${b.dataset.urlSkip}/skip`, "skip")));
+    b.addEventListener("click", async () => {
+      const id = Number(b.dataset.urlSkip);
+      _urlSkipping.add(id);                       // "skipping…" at once
+      b.textContent = "skipping…";
+      b.disabled = true;
+      try {
+        const r = await fetch(`/api/urls/${id}/skip`, { method: "POST" });
+        if (!r.ok) {
+          _urlSkipping.delete(id);
+          alert((await r.json().catch(() => ({}))).detail || `skip failed (HTTP ${r.status})`);
+        }
+      } catch (e) { _urlSkipping.delete(id); alert("skip failed: " + e.message); }
+      loadUrlQueue();
+    }));
   $$("[data-url-stop]", body).forEach((b) =>
     b.addEventListener("click", urlAction(b, `/api/urls/${b.dataset.urlStop}/stop`, "stop")));
   $$("[data-url-cancel]", body).forEach((b) =>
