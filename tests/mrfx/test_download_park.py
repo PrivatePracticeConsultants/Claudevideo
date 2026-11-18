@@ -189,3 +189,131 @@ def test_park_is_off_when_it_could_never_fire_first(cfg):
     from mrfx.config import MrfxConfig
     assert MrfxConfig().download_park_seconds == 240.0
     assert MrfxConfig().download_park_seconds < MrfxConfig().download_stall_seconds
+
+
+# ---------------------------------------------------------------------------
+# A TRICKLING server (field report, 0.9.1): the connection stays open and a
+# few bytes arrive every moment — never silent long enough for the read
+# timeout, never a full 64 KB read buffer. The park / stall / time-cap checks
+# ran only when a full buffer was handed over, so the row sat at "0 MB,
+# downloading — no data for 10846 s" and never parked or paused.
+
+
+def _trickle_world(total: int = 4 << 20, ranges: bool = False):
+    """/trickle.json.gz announces `total` bytes, then sends 10 bytes every
+    0.1 s (inside the 0.5 s read timeout) until stopped. With `ranges`, a
+    Range request is answered 206 the same way (so segments engage)."""
+    release = threading.Event()
+    seen = {"order": []}
+
+    class H(hs.BaseHTTPRequestHandler):
+        def do_GET(self):
+            name = self.path.rsplit("/", 1)[-1]
+            seen["order"].append((name, time.monotonic()))
+            if name == "good.json.gz":
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(GOOD)))
+                self.end_headers()
+                self.wfile.write(GOOD)
+                return
+            rng = self.headers.get("Range")
+            if ranges and rng:
+                a, b = rng.split("=")[1].split("-")
+                start, end = int(a), (int(b) if b else total - 1)
+                self.send_response(206)
+                self.send_header("Content-Range", f"bytes {start}-{end}/{total}")
+                self.send_header("Content-Length", str(end - start + 1))
+                self.end_headers()
+                if end - start + 1 <= 1:
+                    self.wfile.write(b"x")
+                    return
+            else:
+                self.send_response(200)
+                self.send_header("Content-Length", str(total))
+                self.send_header("Accept-Ranges", "bytes")
+                self.end_headers()
+            try:
+                while not release.wait(0.1):
+                    self.wfile.write(b"x" * 10)
+                    self.wfile.flush()
+            except OSError:
+                pass
+
+        def log_message(self, *a):
+            pass
+    httpd = hs.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+
+    def stop():
+        release.set()
+        httpd.shutdown()
+    return base, seen, stop
+
+
+def _download_in_thread(cfg, url, limit_s):
+    out = {}
+
+    def run():
+        t0 = time.monotonic()
+        try:
+            download(cfg, url, cfg.downloads_dir / filename_for(url))
+            out["err"] = None
+        except DownloadError as e:
+            out["err"] = e
+        out["took"] = time.monotonic() - t0
+    th = threading.Thread(target=run, daemon=True)
+    th.start()
+    th.join(limit_s)
+    assert not th.is_alive(), (
+        f"still downloading after {limit_s} s: a trickling server held the slot "
+        "and the park never fired")
+    return out
+
+
+def test_a_trickling_server_parks_the_download(parking):
+    """was: still downloading after 40 s with a 4 s park window (it never
+    parked; in the field 10,846 s at 0 MB)."""
+    base, _, stop = _trickle_world()
+    try:
+        out = _download_in_thread(parking, f"{base}/trickle.json.gz", 20)
+    finally:
+        stop()
+    e = out["err"]
+    assert e is not None and e.parked and e.retryable and not e.progressed
+    assert out["took"] < 10, f"parked after {out['took']:.1f} s, not ~the 1.5 s window"
+
+
+def test_a_trickling_server_in_parallel_segments_parks_too(parking):
+    """Segments: a few bytes on each segment counted as progress, so the
+    segmented attempt never ended. Now under 1 MB on all of them in the park
+    window ends it; the single connection it falls back to parks."""
+    parking.download_segments = 4
+    base, seen, stop = _trickle_world(total=400 << 20, ranges=True)
+    try:
+        out = _download_in_thread(parking, f"{base}/trickle.json.gz", 30)
+    finally:
+        stop()
+    e = out["err"]
+    assert e is not None and e.parked, e
+    assert len(seen["order"]) >= 1 + 4, "the probe and the segments ran first"
+    assert out["took"] < 20, f"took {out['took']:.1f} s"
+
+
+def test_one_slot_a_trickling_payer_steps_aside_then_takes_the_long_pause(parking, store):
+    """The whole lifecycle with ONE slot and the trickling file first: the
+    next file downloads while it is parked, and after download_park_limit
+    fruitless parks it is paused (back by itself in download_pause_hours)."""
+    base, seen, stop = _trickle_world()
+    try:
+        add_urls(store, [f"{base}/trickle.json.gz", f"{base}/good.json.gz"])
+        assert _drain_with_deadline(parking, store, 120), "the queue never finished"
+    finally:
+        stop()
+    rows = {u["url"].rsplit("/", 1)[-1]: u for u in store.list_urls()}
+    assert rows["good.json.gz"]["status"] == "done"
+    order = [n for n, _ in seen["order"]]
+    assert order[0] == "trickle.json.gz" and order.index("good.json.gz") == 1
+    p = rows["trickle.json.gz"]
+    assert p["status"] == "paused" and p["auto_resumes"] == 1, p
+    assert "stopped sending data" in p["error"] and "24 hours" in p["error"]

@@ -547,16 +547,25 @@ def _segmented_download(cfg: MrfxConfig, url: str, dest: Path, part: Path, val_p
         t.start()
     last_report_t = 0.0
     seen_done, seen_t = 0, time.monotonic()
+    # no MEANINGFUL progress (under _STALL_MIN_PROGRESS_BYTES across all the
+    # segments) for the park window — or the stall window when parking is
+    # off — ends the segmented attempt: a dribble of a few bytes per segment
+    # counted as progress and could hold the slot for hours (0.9.1). The
+    # single connection it falls back to then parks on its own clock.
+    quiet = cfg.download_park_seconds if (
+        cfg.download_park_seconds and (not stall_budget
+                                       or cfg.download_park_seconds < stall_budget)
+    ) else stall_budget
     while any(t.is_alive() for t in threads):
         time.sleep(0.4)
         with lock:
             done = prog["done"]
         _set_reservation(my_key, total - done)
         now = time.monotonic()
-        if done != seen_done:
+        if done - seen_done >= _STALL_MIN_PROGRESS_BYTES:
             seen_done, seen_t = done, now
-        elif stall_budget and now - seen_t > stall_budget:
-            state["err"] = f"no data on any segment for {int(stall_budget)} s"
+        elif quiet and now - seen_t > quiet:
+            state["err"] = f"under 1 MB on all segments in {int(quiet)} s"
         if progress_cb and now - last_report_t >= 1.5:
             progress_cb(done, total)
             last_report_t = now
@@ -623,10 +632,9 @@ def _reserve_disk_or_raise(my_key: int, parent: Path, total: int, resume_from: i
 # check, progress) did not run for 200 s per chunk — a dribbling download held
 # its slot until the 3-hour cap. Per-chunk bookkeeping at 64 KB is still cheap
 # (a lock acquire and a hash update; ~1,600/s on a 100 MB/s link).
-BODY_CHUNK_BYTES = 64 << 10
 
 
-def _body_chunks(resp, size: int = BODY_CHUNK_BYTES):
+def _body_chunks(resp, size: int | None = None):
     """The response body as SENT. We ask for `Accept-Encoding: identity`, but
     some origins (S3 objects stored with Content-Encoding: gzip metadata) gzip
     anyway; iter_bytes() would silently decode that — writing ~20x the bytes
@@ -634,7 +642,15 @@ def _body_chunks(resp, size: int = BODY_CHUNK_BYTES):
     hash than other copies, and, worst, making a Range resume (whose offsets
     count ENCODED bytes) splice decoded and encoded data into a corrupt file.
     gzip-encoded bodies are kept raw (open_stream reads gzip by its magic
-    bytes, whatever the name); other encodings are still decoded."""
+    bytes, whatever the name); other encodings are still decoded.
+
+    Each piece is what ONE network read returned (up to ~64 KB), never a
+    fixed-size buffer: with chunk_size=64 KB httpx held bytes until 64 KB had
+    gathered, so a server that keeps the connection open and dribbles a few
+    bytes at a time (each read inside the read timeout) yielded NOTHING — the
+    park / stall / 3-hour-cap / stop checks in the loop never ran, and the
+    row sat at "0 MB, downloading" for hours (field report, 0.9.1: 10,846 s
+    with no park). Per-read pieces let every check run on every arrival."""
     enc = (resp.headers.get("Content-Encoding") or "").strip().lower()
     if enc in ("", "identity", "gzip", "x-gzip"):
         return resp.iter_raw(chunk_size=size)
